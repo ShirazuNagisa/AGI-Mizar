@@ -29,10 +29,11 @@ use agi_engine_claude::ClaudeEngine;
 use agi_engine_dsh::DshEngine;
 use agi_protocol::api::{Command, StateSnapshot};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use axum::http::header;
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
@@ -94,6 +95,7 @@ pub async fn bind(
         // real one: it reads the live state through the same API a front end
         // will, so the seam is exercised from the first build.
         .route("/", get(page))
+        .route("/assets/:file", get(asset))
         .route("/healthz", get(healthz))
         .route("/api/v1/state", get(state_handler))
         .route("/api/v1/command", post(command_handler))
@@ -120,12 +122,61 @@ async fn healthz() -> impl IntoResponse {
     Json(json!({ "ok": true }))
 }
 
-/// The placeholder page the window loads.
-async fn page() -> impl IntoResponse {
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        PLACEHOLDER_PAGE,
-    )
+/// The React app, embedded at build time.
+///
+/// A build without `ui/dist` still works: the fallback page below draws the same
+/// data through the same API, so `cargo test` and a fresh clone are not blocked
+/// on a front-end build.
+#[derive(rust_embed::RustEmbed)]
+#[folder = "../../ui/dist"]
+struct Ui;
+
+/// The window's entry point.
+async fn page() -> Response {
+    match Ui::get("index.html") {
+        Some(file) => (
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            file.data.into_owned(),
+        )
+            .into_response(),
+        None => (
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            PLACEHOLDER_PAGE.as_bytes().to_vec(),
+        )
+            .into_response(),
+    }
+}
+
+/// One built asset.
+async fn asset(AxumPath(file): AxumPath<String>) -> Response {
+    // A path with a separator is not a name we produced; refusing keeps a
+    // request from walking out of the embedded tree.
+    if file.contains('/') || file.contains("..") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match Ui::get(&format!("assets/{file}")) {
+        Some(embedded) => (
+            [(header::CONTENT_TYPE, content_type(&file))],
+            embedded.data.into_owned(),
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// A content type from a file extension.
+fn content_type(file: &str) -> &'static str {
+    if file.ends_with(".js") {
+        "text/javascript; charset=utf-8"
+    } else if file.ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else if file.ends_with(".svg") {
+        "image/svg+xml"
+    } else if file.ends_with(".woff2") {
+        "font/woff2"
+    } else {
+        "application/octet-stream"
+    }
 }
 
 /// Deliberately plain: no build step, no framework, no design. Its whole job is
@@ -299,7 +350,7 @@ impl Drop for Attendance {
 /// leaves Claude Code's own behaviour untouched.
 async fn hook_handler(
     State(app): State<AppState>,
-    Path(event): Path<String>,
+    AxumPath(event): AxumPath<String>,
     headers: HeaderMap,
     body: String,
 ) -> Response {

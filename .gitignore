@@ -1,4 +1,7 @@
 target/
 node_modules/
-dist/
 .DS_Store
+
+# The built UI is committed, the same way the DSH plugin commits lib/: a fresh
+# clone has to be able to `cargo build` without a Node toolchain first.
+!ui/dist/

@@ -25,7 +25,7 @@ tokens, and the conversation methods. The React front end and the Tauri shell co
 | M4 | `dsh-mizar` 0.9.0 联调 | 🔶 插件侧已完成，等真机联调 |
 | M5 | Mizar 服务端：**局域网配对 + 核心方法 + 中继隧道** ✅；推送 / 上传 / 文件预览 ⬜ |
 | M6 | Tauri 壳 ✅；打包签名脚本已备，需装 `tauri-cli` |
-| M7 | 前端 | ⬜ |
+| M7 | React 前端（会话列表 / 对话 / 审批 / 详情） | ✅ |
 
 ## 仓库结构
 
@@ -50,10 +50,13 @@ protocol/            Mizar v1 黄金帧（手机协议，未来服务端用）
 cargo test                     # 100 个测试
 cargo run -p agi-daemon        # 内核，无窗口
 cargo run -p agi-app           # 窗口（会打印它加载的地址）
+
+cd ui && npm install && npm run build   # 改前端之后：内核在编译时嵌入 ui/dist
+cd ui && npm run dev                    # 前端热更新，代理到 127.0.0.1:19392
 ```
 
 窗口加载的是内核自己的页面 `http://127.0.0.1:<port>/?token=…`，不是 Tauri 打包的前端资源——
-所以同一份页面在浏览器里开发、在窗口里运行，只有一条路。现在的页面是占位，M7 换成 React。
+所以同一份页面在浏览器里开发、在窗口里运行，只有一条路。
 
 内核启动后会打印：
 
