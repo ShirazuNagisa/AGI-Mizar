@@ -111,7 +111,7 @@ pub fn list_transcripts(root: &Path) -> Vec<TranscriptFile> {
         }
     }
 
-    out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    out.sort_by_key(|file| std::cmp::Reverse(file.mtime));
     out
 }
 
@@ -131,7 +131,9 @@ mod tests {
 
     #[test]
     fn recognises_transcript_names() {
-        assert!(is_transcript_name("0f9c2b1a-1111-2222-3333-444455556666.jsonl"));
+        assert!(is_transcript_name(
+            "0f9c2b1a-1111-2222-3333-444455556666.jsonl"
+        ));
         assert!(!is_transcript_name("agent-abc.jsonl"));
         assert!(!is_transcript_name("notes.jsonl"));
         assert!(!is_transcript_name("0f9c2b1a.jsonl.txt"));

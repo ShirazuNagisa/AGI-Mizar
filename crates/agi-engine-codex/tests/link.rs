@@ -157,8 +157,14 @@ async fn answers_the_approval_codex_is_waiting_on() {
     }
     let approval = approval.expect("Codex asked for approval and nothing was announced");
     assert_eq!(approval.title, "shell");
-    assert_eq!(approval.session.as_ref().map(|s| s.id.as_str()), Some("th_1"));
-    assert_eq!(approval.detail.as_deref(), Some("wants to run rm -rf build"));
+    assert_eq!(
+        approval.session.as_ref().map(|s| s.id.as_str()),
+        Some("th_1")
+    );
+    assert_eq!(
+        approval.detail.as_deref(),
+        Some("wants to run rm -rf build")
+    );
 
     h.engine
         .answer(

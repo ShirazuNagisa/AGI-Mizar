@@ -24,7 +24,9 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 use agi_engine::{Answer, Engine, EngineError, EngineEvent};
-use agi_protocol::domain::{ContextPressure, Interaction, InteractionKind, Record, Session, SessionKey};
+use agi_protocol::domain::{
+    ContextPressure, Interaction, InteractionKind, Record, Session, SessionKey,
+};
 use agi_protocol::engine::{Capabilities, EngineId};
 use agi_protocol::link::{
     ApprovalFrame, DesktopFrame, EventFrame, LinkFrame, NoticeFrame, QuestionFrame, ResultFrame,
@@ -130,7 +132,9 @@ impl DshEngine {
 
     /// Lock without letting one panicking task poison the engine.
     fn inner(&self) -> MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn emit(&self, event: EngineEvent) {
@@ -169,11 +173,6 @@ impl DshEngine {
             .map_err(|_| EngineError::NotConnected {
                 engine: EngineId::Dsh,
             })
-    }
-
-    /// One unary call, correlated by id.
-    async fn request(&self, frame: DesktopFrame, id: String) -> Result<Value, EngineError> {
-        self.request_with(frame, id, REQUEST_TIMEOUT).await
     }
 
     /// One unary call with an explicit deadline.
@@ -238,21 +237,27 @@ impl DshEngine {
         {
             self.inner().streams.insert(id.clone(), tx);
         }
-        if let Err(error) = self.send(DesktopFrame::stream(id.clone(), endpoint, args)).await {
+        if let Err(error) = self
+            .send(DesktopFrame::stream(id.clone(), endpoint, args))
+            .await
+        {
             self.inner().streams.remove(&id);
             return Err(error);
         }
         let first = tokio::time::timeout(STREAM_OPEN_TIMEOUT, rx.recv()).await;
-        let _ = self.send(DesktopFrame::Cancel {
-            v: agi_protocol::link::LINK_VERSION,
-            id: id.clone(),
-        })
-        .await;
+        let _ = self
+            .send(DesktopFrame::Cancel {
+                v: agi_protocol::link::LINK_VERSION,
+                id: id.clone(),
+            })
+            .await;
         self.inner().streams.remove(&id);
 
         match first {
             Ok(Some(value)) => Ok(value),
-            Ok(None) => Err(EngineError::upstream("the stream closed before its opening frame")),
+            Ok(None) => Err(EngineError::upstream(
+                "the stream closed before its opening frame",
+            )),
             Err(_) => Err(EngineError::Timeout("stream opening frame")),
         }
     }
@@ -403,7 +408,10 @@ impl DshEngine {
 
     /// A projection unit changed: title, model, permissions, running flag.
     fn on_projection(&self, session_id: &str, payload: &Value) {
-        let key = payload.get("key").and_then(Value::as_str).unwrap_or_default();
+        let key = payload
+            .get("key")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let value = payload.get("value").unwrap_or(&Value::Null);
 
         let updated = {
@@ -414,7 +422,10 @@ impl DshEngine {
             match key {
                 "title" => session.title = value.as_str().map(str::to_string),
                 "modelSelection" => {
-                    session.model = value.get("model").and_then(Value::as_str).map(str::to_string)
+                    session.model = value
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
                 }
                 _ => return,
             }
@@ -431,9 +442,12 @@ impl DshEngine {
             // The session first, in its own scope: holding the `entry` borrow
             // while touching `inner.records` is two mutable borrows of one map.
             let session = {
-                let session = inner.sessions.entry(session_id.to_string()).or_insert_with(|| {
-                    Session::bare(SessionKey::new(EngineId::Dsh, session_id), projected.time)
-                });
+                let session = inner
+                    .sessions
+                    .entry(session_id.to_string())
+                    .or_insert_with(|| {
+                        Session::bare(SessionKey::new(EngineId::Dsh, session_id), projected.time)
+                    });
 
                 if let Some(running) = projected.running {
                     session.running = running;
@@ -589,7 +603,7 @@ impl DshEngine {
             items.len(),
             parsed.len()
         );
-        if items.len() > 0 && parsed.is_empty() {
+        if !items.is_empty() && parsed.is_empty() {
             // The shape changed, or we are reading the wrong keys. One row is
             // enough to say which.
             tracing::warn!("dsh: first row looked like {}", items[0]);
@@ -650,7 +664,10 @@ impl DshEngine {
     ) -> Result<Vec<Record>, EngineError> {
         let address = json!({ "kind": "session", "sessionId": session.raw() });
         let opening = self
-            .stream_opening("session/follow", json!({ "request": { "address": address } }))
+            .stream_opening(
+                "session/follow",
+                json!({ "request": { "address": address } }),
+            )
             .await?;
 
         // The cut is `cursor` on a snapshot frame; `throughSeq` is accepted too
@@ -833,21 +850,28 @@ fn parse_session(value: &Value) -> Option<Session> {
     Some(Session {
         key: SessionKey::new(EngineId::Dsh, id),
         cwd: value.get("cwd").and_then(Value::as_str).map(str::to_string),
-        title: value.get("title").and_then(Value::as_str).map(str::to_string),
-        model: value
-            .get("model")
-            .and_then(|model| match model {
-                Value::String(text) => Some(text.clone()),
-                Value::Object(map) => map.get("model").and_then(Value::as_str).map(str::to_string),
-                _ => None,
-            }),
+        title: value
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        model: value.get("model").and_then(|model| match model {
+            Value::String(text) => Some(text.clone()),
+            Value::Object(map) => map.get("model").and_then(Value::as_str).map(str::to_string),
+            _ => None,
+        }),
         updated_at,
-        running: value.get("running").and_then(Value::as_bool).unwrap_or(false),
+        running: value
+            .get("running")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         parent: value
             .get("parentSessionId")
             .and_then(Value::as_str)
             .map(str::to_string),
-        origin: value.get("origin").and_then(Value::as_str).map(str::to_string),
+        origin: value
+            .get("origin")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         turns: value
             .get("turns")
             .and_then(Value::as_u64)
@@ -979,7 +1003,10 @@ impl Engine for DshEngine {
     async fn answer(&self, id: &str, answer: Answer) -> Result<(), EngineError> {
         let kind = {
             let inner = self.inner();
-            inner.interactions.get(id).map(|interaction| interaction.kind)
+            inner
+                .interactions
+                .get(id)
+                .map(|interaction| interaction.kind)
         };
         let Some(kind) = kind else {
             return Err(EngineError::upstream(format!(
@@ -998,9 +1025,7 @@ impl Engine for DshEngine {
         };
         self.send(frame).await?;
         self.inner().interactions.remove(id);
-        self.emit(EngineEvent::InteractionResolved {
-            id: id.to_string(),
-        });
+        self.emit(EngineEvent::InteractionResolved { id: id.to_string() });
         Ok(())
     }
 
@@ -1012,9 +1037,7 @@ impl Engine for DshEngine {
         // that pair comes from. The shared model carries one string, so it is
         // `provider/model`; a bare model cannot be resolved here without guessing.
         let Some((provider, name)) = model.split_once('/') else {
-            return Err(EngineError::upstream(
-                "a DSH model is named provider/model",
-            ));
+            return Err(EngineError::upstream("a DSH model is named provider/model"));
         };
         self.call(
             "session/selectModel",

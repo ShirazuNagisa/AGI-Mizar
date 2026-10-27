@@ -104,9 +104,7 @@ async fn connect(
 
 /// Read one frame.
 async fn next(
-    socket: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<TcpStream>,
-    >,
+    socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
 ) -> Value {
     let message = tokio::time::timeout(Duration::from_secs(3), socket.next())
         .await

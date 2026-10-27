@@ -27,9 +27,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 
 use agi_engine::{Engine, EngineError, EngineEvent};
-use agi_protocol::api::{
-    ApiEvent, Command, CommandResponse, EngineStatus, StateSnapshot,
-};
+use agi_protocol::api::{ApiEvent, Command, CommandResponse, EngineStatus, StateSnapshot};
 use agi_protocol::domain::{Interaction, Record, Session, SessionKey};
 use agi_protocol::engine::EngineId;
 use tokio::sync::broadcast;
@@ -128,11 +126,15 @@ impl Core {
     }
 
     fn store_read(&self) -> std::sync::RwLockReadGuard<'_, Store> {
-        self.store.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.store
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn store_write(&self) -> std::sync::RwLockWriteGuard<'_, Store> {
-        self.store.write().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.store
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn publish(&self, event: ApiEvent) {
@@ -231,7 +233,7 @@ impl Core {
 
         let mut sessions: Vec<Session> = store.sessions.values().cloned().collect();
         // Newest first, which is the only order a session list is ever read in.
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
 
         StateSnapshot {
             version: self.version.clone(),
@@ -287,7 +289,10 @@ impl Core {
             } => {
                 let engine_id = self.store_read().interaction_engine.get(&id).copied();
                 let Some(engine_id) = engine_id else {
-                    return CommandResponse::error("UNKNOWN_INTERACTION", "nothing is waiting on that id");
+                    return CommandResponse::error(
+                        "UNKNOWN_INTERACTION",
+                        "nothing is waiting on that id",
+                    );
                 };
                 let Some(engine) = self.engine(engine_id) else {
                     return CommandResponse::error("UNKNOWN_ENGINE", "no such engine");

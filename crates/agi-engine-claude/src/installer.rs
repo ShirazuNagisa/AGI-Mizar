@@ -84,9 +84,7 @@ pub fn install(settings: &Path, shim: &Path) -> io::Result<InstallOutcome> {
             ));
         };
 
-        let already = entries
-            .iter()
-            .any(|entry| contains_marker(entry));
+        let already = entries.iter().any(contains_marker);
         if already {
             present += 1;
             continue;
@@ -237,7 +235,8 @@ mod tests {
         assert_eq!(outcome.added, 8);
         assert_eq!(outcome.present, 0);
 
-        let root: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        let root: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
         for (event, _) in HOOK_EVENTS {
             assert!(root["hooks"][event].is_array(), "{event} missing");
         }
@@ -278,10 +277,14 @@ mod tests {
         .unwrap();
 
         install(&settings, &shim()).unwrap();
-        let root: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        let root: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
         assert_eq!(root["model"], "opus");
         // The operator's own hook is still first.
-        assert_eq!(root["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "echo mine");
+        assert_eq!(
+            root["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            "echo mine"
+        );
         assert_eq!(root["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
     }
 
@@ -299,9 +302,13 @@ mod tests {
         let removed = uninstall(&settings).unwrap();
         assert_eq!(removed, 8);
 
-        let root: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        let root: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
         assert_eq!(root["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
-        assert_eq!(root["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "echo mine");
+        assert_eq!(
+            root["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            "echo mine"
+        );
         // Emptied arrays are dropped, not left behind.
         assert!(root["hooks"].get("Stop").is_none());
     }

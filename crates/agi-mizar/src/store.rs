@@ -74,12 +74,14 @@ impl DeviceStore {
     pub fn open(path: impl Into<PathBuf>, host_name: impl Into<String>) -> io::Result<Arc<Self>> {
         let path = path.into();
         let state = match std::fs::read_to_string(&path) {
-            Ok(text) if !text.trim().is_empty() => serde_json::from_str(&text).map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("{} is not a device roster: {error}", path.display()),
-                )
-            })?,
+            Ok(text) if !text.trim().is_empty() => {
+                serde_json::from_str(&text).map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{} is not a device roster: {error}", path.display()),
+                    )
+                })?
+            }
             _ => FileContents {
                 host_id: uuid::Uuid::new_v4().to_string(),
                 host_name: host_name.into(),
@@ -97,7 +99,9 @@ impl DeviceStore {
     }
 
     fn state(&self) -> MutexGuard<'_, FileContents> {
-        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// This computer's stable identity.
@@ -277,10 +281,15 @@ mod tests {
     #[test]
     fn a_token_is_returned_once_and_stored_only_as_a_hash() {
         let (store, dir) = store();
-        let issued = store.issue("iPhone", Some("iPhone17,1".to_string())).unwrap();
+        let issued = store
+            .issue("iPhone", Some("iPhone17,1".to_string()))
+            .unwrap();
 
         let text = std::fs::read_to_string(dir.path().join("devices.json")).unwrap();
-        assert!(!text.contains(&issued.token), "the token must not be on disk");
+        assert!(
+            !text.contains(&issued.token),
+            "the token must not be on disk"
+        );
         assert!(text.contains(&hash_token(&issued.token)));
 
         assert!(store.authenticate(&issued.token).is_some());

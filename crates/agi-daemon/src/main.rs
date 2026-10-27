@@ -21,7 +21,9 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                tracing_subscriber::EnvFilter::new("agi_core=info,agi_engine_dsh=info,agi_mizar=info")
+                tracing_subscriber::EnvFilter::new(
+                    "agi_core=info,agi_engine_dsh=info,agi_mizar=info",
+                )
             }),
         )
         .init();

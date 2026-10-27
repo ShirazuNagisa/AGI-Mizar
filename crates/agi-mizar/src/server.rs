@@ -82,22 +82,32 @@ impl MizarServer {
     }
 
     fn code(&self) -> MutexGuard<'_, Option<ActiveCode>> {
-        self.code.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.code
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn attempts(&self) -> MutexGuard<'_, VecDeque<Instant>> {
-        self.attempts.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.attempts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Attach a tunnel, so `host.info` can tell a phone where to find it from
     /// another network.
     pub fn attach_relay(&self, relay: Arc<RelayClient>) {
-        *self.relay.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(relay);
+        *self
+            .relay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(relay);
     }
 
     /// The tunnel facts a phone reads, when a tunnel is configured.
     fn relay_facts(&self) -> Value {
-        let guard = self.relay.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let guard = self
+            .relay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(relay) = guard.as_ref() else {
             return Value::Null;
         };
@@ -294,7 +304,11 @@ impl MizarServer {
                         "session.prompt needs a sessionId",
                     );
                 };
-                let text = frame.payload.get("text").and_then(Value::as_str).unwrap_or("");
+                let text = frame
+                    .payload
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
                 if text.trim().is_empty() {
                     return ServerFrame::error(
                         Some(id),
@@ -312,7 +326,9 @@ impl MizarServer {
                     .map(str::to_string)
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                 match engine.prompt(&key, text).await {
-                    Ok(()) => ServerFrame::ok(id, json!({ "accepted": true, "requestId": request_id })),
+                    Ok(()) => {
+                        ServerFrame::ok(id, json!({ "accepted": true, "requestId": request_id }))
+                    }
                     Err(error) => ServerFrame::error(
                         Some(id),
                         ErrorCode::from_engine(error.code()),
@@ -367,7 +383,8 @@ impl MizarServer {
             }
 
             "approval.answer" => {
-                let Some(request_id) = frame.payload.get("requestId").and_then(Value::as_str) else {
+                let Some(request_id) = frame.payload.get("requestId").and_then(Value::as_str)
+                else {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
@@ -468,10 +485,9 @@ impl MizarServer {
                     return ServerFrame::error(Some(id), ErrorCode::RemoteError, "no such engine");
                 };
                 match engine.set_permission(&key, preset).await {
-                    Ok(()) => ServerFrame::ok(
-                        id,
-                        json!({ "commandResult": { "kind": "success" } }),
-                    ),
+                    Ok(()) => {
+                        ServerFrame::ok(id, json!({ "commandResult": { "kind": "success" } }))
+                    }
                     Err(error) => ServerFrame::error(
                         Some(id),
                         ErrorCode::from_engine(error.code()),
@@ -498,7 +514,6 @@ impl MizarServer {
             .and_then(Value::as_str)
             .and_then(|text| text.parse().ok())
     }
-
 }
 
 /// `GET /mizar/v1/hello` — unauthenticated, reveals identity only.
@@ -513,10 +528,7 @@ async fn hello(State(server): State<Arc<MizarServer>>) -> Response {
 }
 
 /// `POST /mizar/v1/pair` — a code for a token, once.
-async fn pair(
-    State(server): State<Arc<MizarServer>>,
-    Json(body): Json<Value>,
-) -> Response {
+async fn pair(State(server): State<Arc<MizarServer>>, Json(body): Json<Value>) -> Response {
     let version = body
         .get("protocolVersion")
         .and_then(Value::as_u64)
@@ -614,10 +626,7 @@ fn code_message(code: ErrorCode) -> &'static str {
 }
 
 /// `GET /mizar/v1/ws` — the phone's socket.
-async fn upgrade(
-    State(server): State<Arc<MizarServer>>,
-    ws: WebSocketUpgrade,
-) -> Response {
+async fn upgrade(State(server): State<Arc<MizarServer>>, ws: WebSocketUpgrade) -> Response {
     ws.on_upgrade(move |socket| serve_socket(server, socket))
 }
 
@@ -646,7 +655,11 @@ async fn serve_socket(server: Arc<MizarServer>, socket: WebSocket) {
     let Some(frame) = ClientFrame::parse(&first) else {
         let _ = send(
             &out,
-            ServerFrame::error(None, ErrorCode::MalformedFrame, "the first frame must be a hello"),
+            ServerFrame::error(
+                None,
+                ErrorCode::MalformedFrame,
+                "the first frame must be a hello",
+            ),
         )
         .await;
         drop(out);

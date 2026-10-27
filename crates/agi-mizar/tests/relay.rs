@@ -25,9 +25,9 @@ async fn local_listener() -> u16 {
         )
         .route(
             "/mizar/v1/pair",
-            axum::routing::post(|body: String| async move {
-                axum::Json(json!({ "echoed": body }))
-            }),
+            axum::routing::post(
+                |body: String| async move { axum::Json(json!({ "echoed": body })) },
+            ),
         );
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -98,7 +98,9 @@ async fn fake_relay() -> (u16, oneshot::Receiver<()>) {
 
         // Liveness: a ping is answered with the same id.
         socket
-            .send(Message::Text(json!({ "t": "ping", "id": "p1" }).to_string()))
+            .send(Message::Text(
+                json!({ "t": "ping", "id": "p1" }).to_string(),
+            ))
             .await
             .unwrap();
         let pong = read_frame(&mut socket).await;

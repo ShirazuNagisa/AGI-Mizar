@@ -54,11 +54,7 @@ pub enum ServerFrame {
     },
     /// A method's answer.
     #[serde(rename = "ok")]
-    Ok {
-        v: u32,
-        id: String,
-        result: Value,
-    },
+    Ok { v: u32, id: String, result: Value },
     /// A method's failure.
     #[serde(rename = "error")]
     Error {
@@ -70,11 +66,7 @@ pub enum ServerFrame {
     },
     /// A server-initiated notification.
     #[serde(rename = "event")]
-    Event {
-        v: u32,
-        event: String,
-        data: Value,
-    },
+    Event { v: u32, event: String, data: Value },
 }
 
 impl ServerFrame {
@@ -391,7 +383,8 @@ mod tests {
         .unwrap();
         assert_eq!(hello.hello().unwrap().token, "mz_abc");
 
-        let call = ClientFrame::parse(r#"{"v":1,"type":"session.list","id":"m1","payload":{}}"#).unwrap();
+        let call =
+            ClientFrame::parse(r#"{"v":1,"type":"session.list","id":"m1","payload":{}}"#).unwrap();
         assert_eq!(call.kind, "session.list");
         assert_eq!(call.id.as_deref(), Some("m1"));
         assert!(call.hello().is_none());

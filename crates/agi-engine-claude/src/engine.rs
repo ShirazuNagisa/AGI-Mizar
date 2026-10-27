@@ -148,11 +148,15 @@ impl ClaudeEngine {
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn approvals(&self) -> MutexGuard<'_, HashMap<String, Pending>> {
-        self.approvals.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.approvals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn emit(&self, event: EngineEvent) {
@@ -301,7 +305,8 @@ impl ClaudeEngine {
 
         let local = format!("cl-{}", self.next_local.fetch_add(1, Ordering::Relaxed));
         let (tx, rx) = oneshot::channel();
-        self.approvals().insert(local.clone(), Pending { settle: tx });
+        self.approvals()
+            .insert(local.clone(), Pending { settle: tx });
 
         let interaction = Interaction {
             id: local.clone(),
@@ -516,10 +521,7 @@ fn peek(path: &Path) -> Meta {
             continue;
         };
         if meta.cwd.is_none() {
-            meta.cwd = value
-                .get("cwd")
-                .and_then(Value::as_str)
-                .map(str::to_string);
+            meta.cwd = value.get("cwd").and_then(Value::as_str).map(str::to_string);
         }
         if value.get("type").and_then(Value::as_str) == Some("custom-title") {
             meta.custom_title = value
@@ -607,7 +609,9 @@ fn last_prompt_in_tail(path: &Path) -> Option<String> {
 
 /// The first line of a prompt, shortened for a title.
 fn first_line(value: &Value) -> Option<String> {
-    let content = value.get("message").and_then(|message| message.get("content"))?;
+    let content = value
+        .get("message")
+        .and_then(|message| message.get("content"))?;
     let text = match content {
         Value::String(text) => text.clone(),
         Value::Array(parts) => parts
@@ -693,8 +697,9 @@ impl Engine for ClaudeEngine {
         let Some(file) = self.transcript_of(session.raw()) else {
             return Err(EngineError::UnknownSession(session.clone()));
         };
-        let text = std::fs::read_to_string(&file.path)
-            .map_err(|error| EngineError::upstream(format!("could not read the transcript: {error}")))?;
+        let text = std::fs::read_to_string(&file.path).map_err(|error| {
+            EngineError::upstream(format!("could not read the transcript: {error}"))
+        })?;
         let running = {
             let state = self.state();
             state.children.contains_key(&session.id) || state.active.contains(&session.id)
@@ -778,9 +783,7 @@ impl Engine for ClaudeEngine {
             Outcome::Rejected
         };
         let _ = pending.settle.send(outcome);
-        self.emit(EngineEvent::InteractionResolved {
-            id: id.to_string(),
-        });
+        self.emit(EngineEvent::InteractionResolved { id: id.to_string() });
         Ok(())
     }
 

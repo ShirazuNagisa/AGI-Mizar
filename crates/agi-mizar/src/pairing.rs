@@ -124,7 +124,10 @@ mod tests {
     #[test]
     fn the_alphabet_has_no_confusables() {
         for banned in ['I', 'L', 'O', 'U'] {
-            assert!(!ALPHABET.contains(&(banned as u8)), "{banned} must not appear");
+            assert!(
+                !ALPHABET.contains(&(banned as u8)),
+                "{banned} must not appear"
+            );
         }
     }
 

@@ -70,7 +70,10 @@ impl Harness {
     /// Answer the `session/list` call the engine makes on attach.
     async fn answer_session_list(&mut self, items: Value) {
         let frame = self.next().await;
-        assert_eq!(frame["type"], "invoke", "expected the attach-time list call");
+        assert_eq!(
+            frame["type"], "invoke",
+            "expected the attach-time list call"
+        );
         assert_eq!(frame["endpoint"], "session/list");
         let id = frame["id"].as_str().unwrap().to_string();
         self.send(json!({

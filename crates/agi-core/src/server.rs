@@ -30,15 +30,15 @@ use agi_engine_dsh::DshEngine;
 use agi_protocol::api::{Command, StateSnapshot};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path as AxumPath, Query, State};
+use axum::http::header;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::http::header;
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use serde_json::Value;
 use serde_json::json;
+use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -307,7 +307,6 @@ async fn pump_events(core: Arc<Core>, socket: WebSocket, _attendance: Attendance
         }
     }
 }
-
 
 /// Counts UI sockets, and tells the Claude engine whether anyone is watching.
 ///

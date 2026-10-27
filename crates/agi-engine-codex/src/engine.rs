@@ -95,11 +95,15 @@ impl CodexEngine {
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn approvals(&self) -> MutexGuard<'_, HashMap<String, PendingApproval>> {
-        self.approvals.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.approvals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn emit(&self, event: EngineEvent) {
@@ -119,19 +123,16 @@ impl CodexEngine {
             match self.server.start().await {
                 Ok(info) => {
                     backoff = RESTART_BASE;
-                    let version = info
-                        .get("userAgent")
-                        .and_then(Value::as_str)
-                        .map(|agent| {
-                            agent
-                                .split('/')
-                                .nth(1)
-                                .unwrap_or(agent)
-                                .split_whitespace()
-                                .next()
-                                .unwrap_or(agent)
-                                .to_string()
-                        });
+                    let version = info.get("userAgent").and_then(Value::as_str).map(|agent| {
+                        agent
+                            .split('/')
+                            .nth(1)
+                            .unwrap_or(agent)
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or(agent)
+                            .to_string()
+                    });
                     let detail = Some(match &version {
                         Some(version) => format!("app-server {version}"),
                         None => "app-server ready".to_string(),
@@ -245,8 +246,12 @@ impl CodexEngine {
                     self.touch(id);
                 }
             }
-            "thread/name/updated" | "thread/status/changed" | "thread/started"
-            | "thread/archived" | "thread/deleted" | "thread/unarchived" => {
+            "thread/name/updated"
+            | "thread/status/changed"
+            | "thread/started"
+            | "thread/archived"
+            | "thread/deleted"
+            | "thread/unarchived" => {
                 // The list is the cheapest way to be exactly right about a row
                 // that just changed; a partial update would need a second reader
                 // of the same fields.
@@ -454,7 +459,6 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-
 #[async_trait]
 impl Engine for CodexEngine {
     fn id(&self) -> EngineId {
@@ -644,9 +648,7 @@ impl Engine for CodexEngine {
             .respond(pending.json_id, result)
             .await
             .map_err(engine_error)?;
-        self.emit(EngineEvent::InteractionResolved {
-            id: id.to_string(),
-        });
+        self.emit(EngineEvent::InteractionResolved { id: id.to_string() });
         Ok(())
     }
 

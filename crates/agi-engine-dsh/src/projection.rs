@@ -274,7 +274,10 @@ mod tests {
 
     #[test]
     fn projects_a_turn_boundary_and_its_running_flag() {
-        let start = project(&payload(json!({"type":"turn/start","seq":1,"time":10,"data":{"turn":1}}))).unwrap();
+        let start = project(&payload(
+            json!({"type":"turn/start","seq":1,"time":10,"data":{"turn":1}}),
+        ))
+        .unwrap();
         assert_eq!(start.kind, RecordKind::TurnStart);
         assert_eq!(start.running, Some(true));
         assert_eq!(start.turn, Some(1));
@@ -306,7 +309,10 @@ mod tests {
             "type":"user/message","seq":3,"time":12,
             "data":{"turn":1,"source":{"kind":"user"},"content":[{"type":"text","text":"hello"}]}
         });
-        assert_eq!(project(&payload(event)).unwrap().kind, RecordKind::UserMessage);
+        assert_eq!(
+            project(&payload(event)).unwrap().kind,
+            RecordKind::UserMessage
+        );
     }
 
     #[test]
@@ -315,7 +321,10 @@ mod tests {
             "type":"user/message","seq":3,"time":12,
             "data":{"turn":1,"content":[{"type":"text","text":"hello"}]}
         });
-        assert_eq!(project(&payload(event)).unwrap().kind, RecordKind::UserMessage);
+        assert_eq!(
+            project(&payload(event)).unwrap().kind,
+            RecordKind::UserMessage
+        );
     }
 
     #[test]
@@ -335,19 +344,32 @@ mod tests {
                 "type":"user/message","seq":3,"time":12,
                 "data":{"turn":1,"source":{"kind":kind},"content":[{"type":"text","text":"x"}]}
             });
-            assert!(project(&payload(event)).is_none(), "{kind} should be dropped");
+            assert!(
+                project(&payload(event)).is_none(),
+                "{kind} should be dropped"
+            );
         }
     }
 
     #[test]
     fn keeps_a_real_event_as_a_notice() {
-        for kind in ["tool-jobs", "subagent-settled", "user-approval", "model-selection", "working-directory"] {
+        for kind in [
+            "tool-jobs",
+            "subagent-settled",
+            "user-approval",
+            "model-selection",
+            "working-directory",
+        ] {
             let event = json!({
                 "type":"user/message","seq":3,"time":12,
                 "data":{"turn":1,"source":{"kind":kind},"content":[{"type":"text","text":"x"}]}
             });
             let projected = project(&payload(event)).unwrap();
-            assert_eq!(projected.kind, RecordKind::Notice, "{kind} should be a notice");
+            assert_eq!(
+                projected.kind,
+                RecordKind::Notice,
+                "{kind} should be a notice"
+            );
             assert_eq!(projected.text.as_deref(), Some("x"));
         }
     }

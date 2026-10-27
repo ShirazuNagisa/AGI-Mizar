@@ -89,7 +89,9 @@ fn read_hook_file() -> Option<(u16, String)> {
 fn post(port: u16, token: &str, event: &str, body: &str) -> Option<String> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
     stream.set_read_timeout(Some(READ_TIMEOUT)).ok()?;
-    stream.set_write_timeout(Some(Duration::from_secs(5))).ok()?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .ok()?;
 
     let request = format!(
         "POST /hooks/claude/{event} HTTP/1.1\r\n\

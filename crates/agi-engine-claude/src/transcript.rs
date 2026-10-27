@@ -480,7 +480,10 @@ mod tests {
         let parsed = parse_iso8601_ms("2026-10-27T05:23:06.355Z").unwrap();
         assert_eq!(parsed, 1_793_078_586_355);
         assert_eq!(parse_iso8601_ms("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(parse_iso8601_ms("2026-10-27T05:23:06Z").map(|ms| ms % 1000), Some(0));
+        assert_eq!(
+            parse_iso8601_ms("2026-10-27T05:23:06Z").map(|ms| ms % 1000),
+            Some(0)
+        );
         assert_eq!(parse_iso8601_ms("nonsense"), None);
     }
 
@@ -489,7 +492,10 @@ mod tests {
         let text = format!(
             "{}{}",
             prompt("hello", "2026-10-27T05:00:00Z"),
-            assistant(json!([{ "type": "text", "text": "hi" }]), "2026-10-27T05:00:05Z")
+            assistant(
+                json!([{ "type": "text", "text": "hi" }]),
+                "2026-10-27T05:00:05Z"
+            )
         );
         let parsed = parse(&text, false);
         let kinds: Vec<RecordKind> = parsed.records.iter().map(|record| record.kind).collect();
@@ -559,7 +565,10 @@ mod tests {
             .filter(|record| record.kind == RecordKind::ToolResult)
             .collect();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].tool.as_ref().unwrap().output.as_deref(), Some("a.txt"));
+        assert_eq!(
+            results[0].tool.as_ref().unwrap().output.as_deref(),
+            Some("a.txt")
+        );
     }
 
     #[test]
@@ -567,8 +576,14 @@ mod tests {
         let text = format!(
             "{}{}{}",
             prompt("do it", "2026-10-27T05:00:00Z"),
-            assistant(json!([{ "type": "text", "text": "starting" }]), "2026-10-27T05:00:01Z"),
-            assistant(json!([{ "type": "text", "text": "done" }]), "2026-10-27T05:00:09Z")
+            assistant(
+                json!([{ "type": "text", "text": "starting" }]),
+                "2026-10-27T05:00:01Z"
+            ),
+            assistant(
+                json!([{ "type": "text", "text": "done" }]),
+                "2026-10-27T05:00:09Z"
+            )
         );
         let parsed = parse(&text, false);
         let messages: Vec<&Record> = parsed
@@ -596,7 +611,10 @@ mod tests {
         let text = format!(
             "{}{}{}",
             prompt("one", "2026-10-27T05:00:00Z"),
-            assistant(json!([{ "type": "text", "text": "a" }]), "2026-10-27T05:00:01Z"),
+            assistant(
+                json!([{ "type": "text", "text": "a" }]),
+                "2026-10-27T05:00:01Z"
+            ),
             prompt("two", "2026-10-27T05:01:00Z")
         );
         let parsed = parse(&text, false);
@@ -626,12 +644,18 @@ mod tests {
     fn a_wrapped_command_is_a_turn_but_not_a_title() {
         let text = format!(
             "{}{}",
-            prompt("<command-message>performance-audit</command-message>", "2026-10-27T05:00:00Z"),
+            prompt(
+                "<command-message>performance-audit</command-message>",
+                "2026-10-27T05:00:00Z"
+            ),
             prompt("actually look at the sidebar", "2026-10-27T05:01:00Z")
         );
         let parsed = parse(&text, false);
         assert_eq!(parsed.turns, 2, "a slash command is still a turn");
-        assert_eq!(parsed.title.as_deref(), Some("actually look at the sidebar"));
+        assert_eq!(
+            parsed.title.as_deref(),
+            Some("actually look at the sidebar")
+        );
     }
 
     #[test]

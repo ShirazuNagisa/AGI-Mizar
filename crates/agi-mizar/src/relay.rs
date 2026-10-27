@@ -90,11 +90,15 @@ impl RelayClient {
     }
 
     fn room(&self) -> MutexGuard<'_, Option<String>> {
-        self.room.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.room
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn streams(&self) -> MutexGuard<'_, HashMap<String, mpsc::Sender<StreamCommand>>> {
-        self.streams.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.streams
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// The relay's base URL, for `host.info`.
@@ -175,7 +179,9 @@ impl RelayClient {
 
         while let Some(message) = stream.next().await {
             let Ok(message) = message else { break };
-            let Message::Text(text) = message else { continue };
+            let Message::Text(text) = message else {
+                continue;
+            };
             let Ok(frame) = serde_json::from_str::<Value>(&text) else {
                 continue;
             };
@@ -356,7 +362,11 @@ struct LocalTarget {
 
 /// Replay one relayed HTTP request onto the local listener and answer it.
 async fn replay_request(target: LocalTarget, frame: Value, out: mpsc::Sender<Value>) {
-    let id = frame.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+    let id = frame
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     let method = frame
         .get("method")
         .and_then(Value::as_str)
@@ -482,7 +492,11 @@ fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let value = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
         out.push(ALPHABET[(value >> 18) as usize & 0x3f] as char);
         out.push(ALPHABET[(value >> 12) as usize & 0x3f] as char);

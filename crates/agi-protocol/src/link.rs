@@ -94,7 +94,9 @@ impl ResultFrame {
         }
         Err(UpstreamError {
             code: self.code.unwrap_or_else(|| "REMOTE_ERROR".to_string()),
-            message: self.message.unwrap_or_else(|| "the plugin reported a failure".to_string()),
+            message: self
+                .message
+                .unwrap_or_else(|| "the plugin reported a failure".to_string()),
             details: self.details,
         })
     }
@@ -186,7 +188,9 @@ impl LinkFrame {
             "hello" => serde_json::from_value(value).ok().map(LinkFrame::Hello),
             "event" => serde_json::from_value(value).ok().map(LinkFrame::Event),
             "result" => serde_json::from_value(value).ok().map(LinkFrame::Result),
-            "stream.item" => serde_json::from_value(value).ok().map(LinkFrame::StreamItem),
+            "stream.item" => serde_json::from_value(value)
+                .ok()
+                .map(LinkFrame::StreamItem),
             "stream.end" => serde_json::from_value(value).ok().map(LinkFrame::StreamEnd),
             "approval" => serde_json::from_value(value).ok().map(LinkFrame::Approval),
             "question" => serde_json::from_value(value).ok().map(LinkFrame::Question),
@@ -439,11 +443,15 @@ mod tests {
 
     #[test]
     fn leaves_a_valid_pair_alone() {
-        let text = r#"{"v":1,"type":"result","id":"dsh-1","ok":true,"value":{"title":"\ud83d\ude00"}}"#;
+        let text =
+            r#"{"v":1,"type":"result","id":"dsh-1","ok":true,"value":{"title":"\ud83d\ude00"}}"#;
         let Some(LinkFrame::Result(result)) = LinkFrame::parse(text) else {
             panic!("a valid pair must parse")
         };
-        assert_eq!(result.value.unwrap()["title"].as_str().unwrap(), "\u{1F600}");
+        assert_eq!(
+            result.value.unwrap()["title"].as_str().unwrap(),
+            "\u{1F600}"
+        );
     }
 
     #[test]
@@ -459,11 +467,17 @@ mod tests {
         assert_eq!(json["type"], "welcome");
         assert_eq!(json["linkVersion"], 1);
 
-        let json = serde_json::to_value(DesktopFrame::stream("c1", "session/follow", serde_json::json!({}))).unwrap();
+        let json = serde_json::to_value(DesktopFrame::stream(
+            "c1",
+            "session/follow",
+            serde_json::json!({}),
+        ))
+        .unwrap();
         assert_eq!(json["type"], "invoke");
         assert_eq!(json["mode"], "stream");
 
-        let json = serde_json::to_value(DesktopFrame::approval_answer("a1", "allowed-once")).unwrap();
+        let json =
+            serde_json::to_value(DesktopFrame::approval_answer("a1", "allowed-once")).unwrap();
         assert_eq!(json["type"], "answer");
         assert_eq!(json["outcome"], "allowed-once");
         assert!(json.get("answers").is_none());

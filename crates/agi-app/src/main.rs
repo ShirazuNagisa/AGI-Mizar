@@ -34,7 +34,8 @@ fn main() {
             endpoint_file: None,
             // Installing hooks edits a file the operator owns; a first launch
             // asks, it does not decide. The daemon's flag is the way in for now.
-            install_claude_hooks: std::env::args().any(|argument| argument == "--install-claude-hooks"),
+            install_claude_hooks: std::env::args()
+                .any(|argument| argument == "--install-claude-hooks"),
             relay_url: std::env::var("AGI_RELAY_URL").ok(),
             relay_token: std::env::var("AGI_RELAY_TOKEN").ok(),
         }))
@@ -42,7 +43,10 @@ fn main() {
 
     let url = booted.window_url();
     println!("AGI Mizar — window at {url}");
-    println!("  pairing code {} ({})", booted.pairing_code.display, booted.pairing_uri);
+    println!(
+        "  pairing code {} ({})",
+        booted.pairing_code.display, booted.pairing_uri
+    );
 
     // Both must outlive the window: the runtime keeps the servers alive, and
     // `booted` owns the kernel the servers read from.

@@ -141,7 +141,9 @@ impl AppServer {
     }
 
     fn pending(&self) -> MutexGuard<'_, HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>> {
-        self.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Spawn the child and complete the `initialize` handshake.
@@ -164,10 +166,7 @@ impl AppServer {
         }
 
         let mut child = command.spawn().map_err(|error| {
-            RpcError::Transport(format!(
-                "could not start {}: {error}",
-                self.config.binary
-            ))
+            RpcError::Transport(format!("could not start {}: {error}", self.config.binary))
         })?;
 
         let stdin = child
@@ -265,7 +264,10 @@ impl AppServer {
         let (tx, rx) = oneshot::channel();
         self.pending().insert(id, tx);
 
-        if let Err(error) = self.write(json!({ "id": id, "method": method, "params": params })).await {
+        if let Err(error) = self
+            .write(json!({ "id": id, "method": method, "params": params }))
+            .await
+        {
             self.pending().remove(&id);
             return Err(error);
         }
@@ -339,7 +341,10 @@ async fn read_stdout(
         };
 
         let id = value.get("id").cloned();
-        let method = value.get("method").and_then(Value::as_str).map(str::to_string);
+        let method = value
+            .get("method")
+            .and_then(Value::as_str)
+            .map(str::to_string);
 
         match (id, method) {
             // An answer to something we asked.

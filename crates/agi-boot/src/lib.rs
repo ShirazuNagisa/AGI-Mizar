@@ -62,7 +62,10 @@ pub struct Booted {
 impl Booted {
     /// The URL a window should load.
     pub fn window_url(&self) -> String {
-        format!("http://127.0.0.1:{}/?token={}", self.api_port, self.api_token)
+        format!(
+            "http://127.0.0.1:{}/?token={}",
+            self.api_port, self.api_token
+        )
     }
 }
 
@@ -154,7 +157,11 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
         }
     }
 
-    if let Some(url) = config.relay_url.as_ref().filter(|url| !url.trim().is_empty()) {
+    if let Some(url) = config
+        .relay_url
+        .as_ref()
+        .filter(|url| !url.trim().is_empty())
+    {
         let token = config.relay_token.unwrap_or_else(random_token);
         let relay = RelayClient::new(url, token, mizar.port());
         mizar.attach_relay(Arc::clone(&relay));

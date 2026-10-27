@@ -72,14 +72,22 @@ fn engine_over(root: &Path) -> Arc<ClaudeEngine> {
 #[tokio::test]
 async fn lists_sessions_from_transcripts() {
     let dir = tempfile::tempdir().unwrap();
-    write_transcript(dir.path(), "-tmp-work", "aaaa1111-2222-3333-4444-555566667777", false);
+    write_transcript(
+        dir.path(),
+        "-tmp-work",
+        "aaaa1111-2222-3333-4444-555566667777",
+        false,
+    );
 
     let engine = engine_over(dir.path());
     let sessions = engine.sessions().await.unwrap();
     assert_eq!(sessions.len(), 1);
 
     let session = &sessions[0];
-    assert_eq!(session.key.to_string(), format!("claude:{}", "aaaa1111-2222-3333-4444-555566667777"));
+    assert_eq!(
+        session.key.to_string(),
+        format!("claude:{}", "aaaa1111-2222-3333-4444-555566667777")
+    );
     assert_eq!(session.title.as_deref(), Some("list the files"));
     assert_eq!(session.cwd.as_deref(), Some("/tmp/work"));
     assert_eq!(session.model.as_deref(), Some("claude-opus-4"));
@@ -89,7 +97,12 @@ async fn lists_sessions_from_transcripts() {
 #[tokio::test]
 async fn reads_a_transcript_into_records() {
     let dir = tempfile::tempdir().unwrap();
-    write_transcript(dir.path(), "-tmp-work", "bbbb1111-2222-3333-4444-555566667777", false);
+    write_transcript(
+        dir.path(),
+        "-tmp-work",
+        "bbbb1111-2222-3333-4444-555566667777",
+        false,
+    );
 
     let engine = engine_over(dir.path());
     let key = SessionKey::new(EngineId::Claude, "bbbb1111-2222-3333-4444-555566667777");
@@ -109,7 +122,10 @@ async fn reads_a_transcript_into_records() {
     );
     assert_eq!(records[1].text.as_deref(), Some("list the files"));
     assert_eq!(records[2].tool.as_ref().unwrap().name, "Bash");
-    assert_eq!(records[3].tool.as_ref().unwrap().output.as_deref(), Some("a.txt"));
+    assert_eq!(
+        records[3].tool.as_ref().unwrap().output.as_deref(),
+        Some("a.txt")
+    );
     assert_eq!(records[4].text.as_deref(), Some("one file"));
 }
 
@@ -126,7 +142,9 @@ async fn a_turn_stays_open_while_a_hook_says_it_is_running() {
     // session that was killed mid-turn looks identical to one that is working.
     let closed = engine.records(&key, 100, None).await.unwrap();
     assert!(
-        closed.iter().any(|record| record.kind == RecordKind::TurnEnd),
+        closed
+            .iter()
+            .any(|record| record.kind == RecordKind::TurnEnd),
         "with no hook signal the turn is treated as finished"
     );
 
@@ -172,7 +190,11 @@ async fn an_attended_hook_waits_for_the_operator() {
     let mut events = engine.subscribe();
     let hook = {
         let engine = Arc::clone(&engine);
-        tokio::spawn(async move { engine.handle_hook("PreToolUse", &pre_tool_use("Bash")).await })
+        tokio::spawn(async move {
+            engine
+                .handle_hook("PreToolUse", &pre_tool_use("Bash"))
+                .await
+        })
     };
 
     // The card must appear before anything is answered.
@@ -216,7 +238,11 @@ async fn a_rejected_hook_denies_the_tool() {
     let mut events = engine.subscribe();
     let hook = {
         let engine = Arc::clone(&engine);
-        tokio::spawn(async move { engine.handle_hook("PreToolUse", &pre_tool_use("Bash")).await })
+        tokio::spawn(async move {
+            engine
+                .handle_hook("PreToolUse", &pre_tool_use("Bash"))
+                .await
+        })
     };
 
     let mut approval = None;
@@ -262,7 +288,12 @@ async fn a_hook_outside_the_default_permission_mode_is_left_alone() {
 #[tokio::test]
 async fn a_hook_that_is_not_an_approval_only_refreshes() {
     let dir = tempfile::tempdir().unwrap();
-    write_transcript(dir.path(), "-tmp-work", "dddd1111-2222-3333-4444-555566667777", false);
+    write_transcript(
+        dir.path(),
+        "-tmp-work",
+        "dddd1111-2222-3333-4444-555566667777",
+        false,
+    );
     let engine = engine_over(dir.path());
     let _ = engine.sessions().await.unwrap();
 

@@ -51,7 +51,10 @@ pub fn session_from_thread(thread: &Value) -> Option<Session> {
         return None;
     }
     let seconds = |key: &str| thread.get(key).and_then(Value::as_i64);
-    let updated_at = seconds("updatedAt").or_else(|| seconds("createdAt")).unwrap_or(0) * 1_000;
+    let updated_at = seconds("updatedAt")
+        .or_else(|| seconds("createdAt"))
+        .unwrap_or(0)
+        * 1_000;
 
     let title = thread
         .get("name")
@@ -63,9 +66,15 @@ pub fn session_from_thread(thread: &Value) -> Option<Session> {
 
     Some(Session {
         key: SessionKey::new(EngineId::Codex, id),
-        cwd: thread.get("cwd").and_then(Value::as_str).map(str::to_string),
+        cwd: thread
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         title,
-        model: thread.get("model").and_then(Value::as_str).map(str::to_string),
+        model: thread
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         updated_at,
         // Codex's own status is authoritative for threads this server has loaded.
         // `notLoaded` says nothing about a turn another window is running, and
@@ -104,11 +113,7 @@ pub fn records_from_turns(turns: &[Value]) -> Vec<Record> {
     for (index, turn) in turns.iter().enumerate() {
         let turn_number = (index + 1) as u32;
         let base = (index as i64 + 1) * 1_000_000;
-        let started_ms = turn
-            .get("startedAt")
-            .and_then(Value::as_i64)
-            .unwrap_or(0)
-            * 1_000;
+        let started_ms = turn.get("startedAt").and_then(Value::as_i64).unwrap_or(0) * 1_000;
 
         records.push(Record {
             seq: base,
@@ -191,7 +196,10 @@ pub fn records_from_turns(turns: &[Value]) -> Vec<Record> {
             }
         }
 
-        let status = turn.get("status").and_then(Value::as_str).unwrap_or("completed");
+        let status = turn
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("completed");
         if status != "inProgress" {
             if let Some((seq, text)) = last_assistant {
                 records.push(Record {
@@ -376,7 +384,10 @@ mod tests {
 
         assert_eq!(records[1].text.as_deref(), Some("list the files"));
         assert_eq!(records[2].tool.as_ref().unwrap().name, "shell");
-        assert_eq!(records[3].tool.as_ref().unwrap().output.as_deref(), Some("a.txt"));
+        assert_eq!(
+            records[3].tool.as_ref().unwrap().output.as_deref(),
+            Some("a.txt")
+        );
         assert_eq!(records[4].text.as_deref(), Some("one file"));
     }
 
@@ -406,7 +417,9 @@ mod tests {
             "items": [{ "type": "userMessage", "content": [{ "type": "text", "text": "go" }] }]
         })];
         let records = records_from_turns(&turns);
-        assert!(records.iter().all(|record| record.kind != RecordKind::TurnEnd));
+        assert!(records
+            .iter()
+            .all(|record| record.kind != RecordKind::TurnEnd));
     }
 
     #[test]
