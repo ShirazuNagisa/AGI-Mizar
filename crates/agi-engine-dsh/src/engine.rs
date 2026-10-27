@@ -1475,21 +1475,22 @@ impl Engine for DshEngine {
     /// expensive thing the adapter does, and nobody needs second-level freshness
     /// on "how much did I do in September".
     async fn usage_history(&self) -> Result<Vec<agi_protocol::api::UsageDay>, EngineError> {
+        // Answers that do not need the link come first: the window opens before
+        // the plugin dials in, and a stored fold is as true then as it was when
+        // it was written.
+        if let Some(days) = self.cached_usage() {
+            return Ok(days);
+        }
+        if let Some((days, age)) = self.read_usage_cache() {
+            if self.connected() && age > USAGE_CACHE_TTL.as_millis() as i64 {
+                self.refresh_usage_in_background();
+            }
+            return Ok(days);
+        }
         if !self.connected() {
             return Err(EngineError::NotConnected {
                 engine: EngineId::Dsh,
             });
-        }
-        if let Some(days) = self.cached_usage() {
-            return Ok(days);
-        }
-        // A previous launch's fold is better than a zero dashboard: serve it and
-        // fold again behind the window's back.
-        if let Some((days, age)) = self.read_usage_cache() {
-            if age > USAGE_CACHE_TTL.as_millis() as i64 {
-                self.refresh_usage_in_background();
-            }
-            return Ok(days);
         }
         if let Some(days) = self.recent_attempt() {
             return Ok(days);
