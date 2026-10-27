@@ -20,6 +20,7 @@
 //! are the per-day totals, which are what a cost line needs.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use agi_protocol::api::{ModelUsage, UsageDay};
 
@@ -187,6 +188,91 @@ impl UsageDays {
     }
 }
 
+/// What one file contributed last time it was read.
+#[derive(Debug)]
+struct CachedFile {
+    /// Modified time in epoch milliseconds, and the byte length: either changing
+    /// is enough to read the file again.
+    modified_ms: u64,
+    len: u64,
+    days: Vec<UsageDay>,
+}
+
+/// Per-file results, so a scan parses only the files that changed.
+///
+/// The three log trees this window reads are large — one Claude home measured at
+/// 149 MB — and the dashboard asks for a fold on every visit and every minute.
+/// Re-parsing all of it each time is work nobody asked for; a file whose
+/// modification time and size are unchanged has the same answer it had before.
+///
+/// Deleted files are dropped, so a rotated log does not pin its days forever.
+#[derive(Debug, Default)]
+pub struct ScanCache {
+    files: std::collections::HashMap<PathBuf, CachedFile>,
+}
+
+impl ScanCache {
+    /// Nothing cached yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fold every path, reading only the ones that changed since the last scan.
+    ///
+    /// `parse` answers the days one file contributes, or `None` when it cannot be
+    /// read; an unreadable file is skipped and retried on the next scan rather
+    /// than cached as empty.
+    pub fn days<F>(&mut self, paths: &[PathBuf], mut parse: F) -> Vec<UsageDay>
+    where
+        F: FnMut(&Path) -> Option<Vec<UsageDay>>,
+    {
+        let mut days = UsageDays::new();
+        let mut seen = std::collections::HashSet::with_capacity(paths.len());
+        for path in paths {
+            seen.insert(path.clone());
+            let (modified_ms, len) = std::fs::metadata(path)
+                .map(|meta| {
+                    let modified = meta
+                        .modified()
+                        .ok()
+                        .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|since| since.as_millis() as u64)
+                        .unwrap_or(0);
+                    (modified, meta.len())
+                })
+                .unwrap_or((0, 0));
+
+            let cached = self
+                .files
+                .get(path)
+                .filter(|entry| entry.modified_ms == modified_ms && entry.len == len)
+                .map(|entry| entry.days.clone());
+            let file_days = match cached {
+                Some(days) => days,
+                None => {
+                    let parsed = parse(path);
+                    if let Some(days) = &parsed {
+                        if modified_ms != 0 {
+                            self.files.insert(
+                                path.clone(),
+                                CachedFile {
+                                    modified_ms,
+                                    len,
+                                    days: days.clone(),
+                                },
+                            );
+                        }
+                    }
+                    parsed.unwrap_or_default()
+                }
+            };
+            days.merge(file_days);
+        }
+        self.files.retain(|path, _| seen.contains(path));
+        days.finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,6 +370,46 @@ mod tests {
         assert_eq!(folded[1].input_tokens, 30);
         assert_eq!(folded[1].hours[9], 2);
         assert_eq!(folded[1].models.len(), 2);
+    }
+
+    #[test]
+    fn a_scan_reads_a_file_once_and_again_only_after_it_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        std::fs::write(&path, "one line\n").unwrap();
+        let files = vec![path.clone()];
+        let mut cache = ScanCache::new();
+        let mut reads = 0;
+
+        let fold = |cache: &mut ScanCache, reads: &mut usize| {
+            cache.days(&files, |candidate| {
+                if !candidate.exists() {
+                    return None;
+                }
+                *reads += 1;
+                Some(vec![UsageDay {
+                    date: "2026-10-27".to_string(),
+                    messages: 1,
+                    ..Default::default()
+                }])
+            })
+        };
+
+        assert_eq!(fold(&mut cache, &mut reads)[0].messages, 1);
+        assert_eq!(reads, 1, "the first scan reads the file");
+
+        // Same size and time: the cached parse answers.
+        assert_eq!(fold(&mut cache, &mut reads)[0].messages, 1);
+        assert_eq!(reads, 1, "an unchanged file is not read again");
+
+        // A different length is a different file, even within one clock tick.
+        std::fs::write(&path, "a longer line\n").unwrap();
+        assert_eq!(fold(&mut cache, &mut reads)[0].messages, 1);
+        assert_eq!(reads, 2, "a changed file is read again");
+
+        // A vanished file stops contributing.
+        std::fs::remove_file(&path).unwrap();
+        assert!(fold(&mut cache, &mut reads).is_empty());
     }
 
     #[test]

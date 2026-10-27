@@ -115,6 +115,8 @@ pub struct ClaudeEngine {
     attended: AtomicBool,
     projects: PathBuf,
     binary: String,
+    /// Parsed transcripts, per file, so a fold reads only what changed.
+    usage_cache: Mutex<agi_engine::usage::ScanCache>,
     /// A weak handle to self, so a method taking `&self` can start a task that
     /// owns the engine. `Arc::new_cyclic` fills it in after construction.
     me: Weak<ClaudeEngine>,
@@ -132,6 +134,7 @@ impl ClaudeEngine {
             attended: AtomicBool::new(false),
             projects: projects.into(),
             binary: binary.into(),
+            usage_cache: Mutex::new(agi_engine::usage::ScanCache::new()),
             me: me.clone(),
         })
     }
@@ -745,7 +748,11 @@ impl Engine for ClaudeEngine {
     /// A directory read rather than a call: Claude Code writes the usage the
     /// provider billed into each `assistant` line, so there is nothing to ask.
     async fn usage_history(&self) -> Result<Vec<agi_protocol::api::UsageDay>, EngineError> {
-        Ok(crate::usage::days(&self.projects))
+        let mut cache = self
+            .usage_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ok(crate::usage::days_with_cache(&self.projects, &mut cache))
     }
 
     async fn prompt(&self, session: &SessionKey, text: &str) -> Result<(), EngineError> {

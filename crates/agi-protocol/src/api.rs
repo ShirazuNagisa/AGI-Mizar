@@ -52,7 +52,7 @@ pub struct EngineStatus {
 /// buckets into its own local day and the kernel adds the buckets up, so a host
 /// whose engines disagree about the time zone cannot produce a day that no clock
 /// showed.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageDay {
     /// "YYYY-MM-DD", local time zone.
@@ -72,7 +72,7 @@ pub struct UsageDay {
 }
 
 /// What one model did on one day.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelUsage {
     pub model: String,

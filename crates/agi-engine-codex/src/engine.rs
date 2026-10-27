@@ -79,6 +79,8 @@ pub struct CodexEngine {
     state: Mutex<State>,
     approvals: Mutex<HashMap<String, PendingApproval>>,
     next_local: AtomicU64,
+    /// Parsed rollouts, per file, so a fold reads only what changed.
+    usage_cache: Mutex<agi_engine::usage::ScanCache>,
 }
 
 impl CodexEngine {
@@ -91,6 +93,7 @@ impl CodexEngine {
             state: Mutex::new(State::new()),
             approvals: Mutex::new(HashMap::new()),
             next_local: AtomicU64::new(1),
+            usage_cache: Mutex::new(agi_engine::usage::ScanCache::new()),
         })
     }
 
@@ -541,7 +544,14 @@ impl Engine for CodexEngine {
     /// rollouts under `~/.codex/sessions` are the durable record of what was
     /// billed, and they are read from disk instead.
     async fn usage_history(&self) -> Result<Vec<agi_protocol::api::UsageDay>, EngineError> {
-        Ok(crate::usage::days(&crate::usage::sessions_dir()))
+        let mut cache = self
+            .usage_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ok(crate::usage::days_with_cache(
+            &crate::usage::sessions_dir(),
+            &mut cache,
+        ))
     }
 
     async fn prompt(&self, session: &SessionKey, text: &str) -> Result<(), EngineError> {

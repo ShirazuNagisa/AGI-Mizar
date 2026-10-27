@@ -24,7 +24,7 @@
 
 use std::path::{Path, PathBuf};
 
-use agi_engine::usage::{parse_instant_ms, UNKNOWN_MODEL};
+use agi_engine::usage::{parse_instant_ms, ScanCache, UNKNOWN_MODEL};
 use agi_engine::UsageDays;
 use agi_protocol::api::UsageDay;
 use serde_json::Value;
@@ -60,13 +60,23 @@ pub fn sessions_dir() -> PathBuf {
 /// A missing tree is no days rather than an error: a machine that has never run
 /// Codex has no rollouts, which is a fact the window draws as an empty graph.
 pub fn days(sessions: &Path) -> Vec<UsageDay> {
+    days_with_cache(sessions, &mut ScanCache::new())
+}
+
+/// The same scan, reusing the parse of every rollout that has not changed.
+pub fn days_with_cache(sessions: &Path, cache: &mut ScanCache) -> Vec<UsageDay> {
+    let files = rollout_files(sessions);
+    cache.days(&files, |path| {
+        std::fs::read_to_string(path)
+            .ok()
+            .map(|text| file_days(&text))
+    })
+}
+
+/// What one rollout file contributed, on its own.
+fn file_days(text: &str) -> Vec<UsageDay> {
     let mut days = UsageDays::new();
-    for path in rollout_files(sessions) {
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        fold_rollout(&mut days, &text);
-    }
+    fold_rollout(&mut days, text);
     days.finish()
 }
 
@@ -278,6 +288,27 @@ mod tests {
     use serde_json::json;
 
     /// A local instant, written the way Codex writes it.
+    #[test]
+    fn a_cached_scan_answers_the_same_days_as_a_fresh_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let day = dir.path().join("2026").join("10").join("27");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(
+            day.join("rollout-1.jsonl"),
+            "{\"timestamp\":\"2026-10-27T09:30:00.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":10,\"output_tokens\":2},\"total_token_usage\":{\"input_tokens\":10,\"output_tokens\":2}}}}\n",
+        )
+        .unwrap();
+
+        let fresh = days(dir.path());
+        assert!(
+            !fresh.is_empty(),
+            "the fixture has to count for this test to mean anything"
+        );
+        let mut cache = ScanCache::new();
+        assert_eq!(days_with_cache(dir.path(), &mut cache), fresh);
+        assert_eq!(days_with_cache(dir.path(), &mut cache), fresh);
+    }
+
     fn iso_at(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> String {
         chrono::Local
             .with_ymd_and_hms(year, month, day, hour, minute, 0)

@@ -28,7 +28,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use agi_engine::usage::UNKNOWN_MODEL;
+use agi_engine::usage::{ScanCache, UNKNOWN_MODEL};
 use agi_engine::UsageDays;
 use agi_protocol::api::UsageDay;
 use serde_json::Value;
@@ -54,13 +54,23 @@ const MAX_DEPTH: usize = 8;
 /// every one of those lines was billed to the same account, so the scan reads
 /// them too. A year of totals that is smaller than the invoice is not a total.
 pub fn days(projects: &Path) -> Vec<UsageDay> {
+    days_with_cache(projects, &mut ScanCache::new())
+}
+
+/// The same scan, reusing the parse of every transcript that has not changed.
+pub fn days_with_cache(projects: &Path, cache: &mut ScanCache) -> Vec<UsageDay> {
+    let files = transcript_files(projects);
+    cache.days(&files, |path| {
+        std::fs::read_to_string(path)
+            .ok()
+            .map(|text| file_days(&text))
+    })
+}
+
+/// What one transcript file contributed, on its own.
+fn file_days(text: &str) -> Vec<UsageDay> {
     let mut days = UsageDays::new();
-    for path in transcript_files(projects) {
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        fold_transcript(&mut days, &text);
-    }
+    fold_transcript(&mut days, text);
     days.finish()
 }
 
@@ -261,6 +271,21 @@ mod tests {
             .with_timezone(&chrono::Utc)
             .format("%Y-%m-%dT%H:%M:%S.000Z")
             .to_string()
+    }
+
+    #[test]
+    fn a_cached_scan_answers_the_same_days_as_a_fresh_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("project").join("session");
+        std::fs::create_dir_all(&nested).unwrap();
+        let at = iso_at(2026, 10, 27, 9, 30);
+        std::fs::write(nested.join("a.jsonl"), format!("{}\n", prompt(&at))).unwrap();
+
+        let fresh = days(dir.path());
+        let mut cache = ScanCache::new();
+        assert_eq!(days_with_cache(dir.path(), &mut cache), fresh);
+        // Second pass answers from the cache and must not drift.
+        assert_eq!(days_with_cache(dir.path(), &mut cache), fresh);
     }
 
     fn prompt(at: &str) -> String {
