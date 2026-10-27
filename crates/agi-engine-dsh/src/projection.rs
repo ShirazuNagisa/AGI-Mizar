@@ -93,12 +93,48 @@ fn parts_text(parts: &Value) -> Option<String> {
     }
 }
 
-/// Whether a `user/message` is context DSH assembled for itself.
-fn is_injected(data: &Value) -> bool {
-    matches!(
-        data.get("source").and_then(|source| source.get("kind")).and_then(Value::as_str),
-        Some("runtime-context") | Some("skill-catalog")
-    )
+/// Who really wrote a `user/message`.
+///
+/// Measured across twelve real session logs: `user/message` arrives with
+/// **fourteen** different `source.kind` values, and only one of them is a person.
+/// The rest are the harness talking to itself — runtime context, the skill
+/// catalogue, sampled clocks, job notices, subagent settlements, model switches.
+///
+/// Treating them all as messages puts words in the operator's mouth: a transcript
+/// full of `Time sampled while preparing turn 1, step 1: …` rendered as blue
+/// bubbles they never typed. So the kinds are sorted into three answers rather
+/// than one boolean:
+///
+/// - **Person** — `user`. Anything missing a kind counts here too: an older host
+///   that does not send `source` is not evidence of injection.
+/// - **Notice** — real events worth a grey line: a background job finishing, a
+///   subagent reporting back, a permission policy change, a model switch, a
+///   working-directory change.
+/// - **Drop** — bookkeeping nobody reads: sampled clocks, the runtime snapshot,
+///   the skill catalogue, injected instructions, compaction checkpoints, goal
+///   scaffolding.
+enum Authorship {
+    Person,
+    Notice,
+    Drop,
+}
+
+/// Classify one `user/message` by its source kind.
+fn authorship(data: &Value) -> Authorship {
+    let kind = data
+        .get("source")
+        .and_then(|source| source.get("kind"))
+        .and_then(Value::as_str)
+        .unwrap_or("user");
+
+    match kind {
+        "user" => Authorship::Person,
+        // Noise: high volume, zero information per line.
+        "time-context" | "runtime-context" | "skill-catalog" | "agent-instructions"
+        | "compact-checkpoint" | "goal" | "tool-goal" => Authorship::Drop,
+        // Everything else is a real event with a short, useful text.
+        _ => Authorship::Notice,
+    }
 }
 
 /// The `{seq, time, type, data}` record inside a forwarded payload.
@@ -160,15 +196,20 @@ pub fn project(payload: &Value) -> Option<Projected> {
             ..base
         }),
         "user/message" => {
-            if is_injected(data) {
-                return None;
-            }
             let text = parts_text(data.get("content")?)?;
-            Some(Projected {
-                kind: RecordKind::UserMessage,
-                text: Some(text),
-                ..base
-            })
+            match authorship(data) {
+                Authorship::Drop => None,
+                Authorship::Person => Some(Projected {
+                    kind: RecordKind::UserMessage,
+                    text: Some(text),
+                    ..base
+                }),
+                Authorship::Notice => Some(Projected {
+                    kind: RecordKind::Notice,
+                    text: Some(text),
+                    ..base
+                }),
+            }
         }
         "assistant/message" => {
             let message = data.get("message")?;
@@ -260,13 +301,54 @@ mod tests {
     }
 
     #[test]
-    fn drops_injected_runtime_context() {
-        for kind in ["runtime-context", "skill-catalog"] {
+    fn only_a_person_is_a_user_message() {
+        let event = json!({
+            "type":"user/message","seq":3,"time":12,
+            "data":{"turn":1,"source":{"kind":"user"},"content":[{"type":"text","text":"hello"}]}
+        });
+        assert_eq!(project(&payload(event)).unwrap().kind, RecordKind::UserMessage);
+    }
+
+    #[test]
+    fn a_message_without_a_source_counts_as_a_person() {
+        let event = json!({
+            "type":"user/message","seq":3,"time":12,
+            "data":{"turn":1,"content":[{"type":"text","text":"hello"}]}
+        });
+        assert_eq!(project(&payload(event)).unwrap().kind, RecordKind::UserMessage);
+    }
+
+    #[test]
+    fn drops_the_harness_talking_to_itself() {
+        // Every one of these was measured in a real log, and every one of them
+        // would otherwise render as something the operator typed.
+        for kind in [
+            "runtime-context",
+            "skill-catalog",
+            "time-context",
+            "agent-instructions",
+            "compact-checkpoint",
+            "goal",
+            "tool-goal",
+        ] {
             let event = json!({
                 "type":"user/message","seq":3,"time":12,
                 "data":{"turn":1,"source":{"kind":kind},"content":[{"type":"text","text":"x"}]}
             });
             assert!(project(&payload(event)).is_none(), "{kind} should be dropped");
+        }
+    }
+
+    #[test]
+    fn keeps_a_real_event_as_a_notice() {
+        for kind in ["tool-jobs", "subagent-settled", "user-approval", "model-selection", "working-directory"] {
+            let event = json!({
+                "type":"user/message","seq":3,"time":12,
+                "data":{"turn":1,"source":{"kind":kind},"content":[{"type":"text","text":"x"}]}
+            });
+            let projected = project(&payload(event)).unwrap();
+            assert_eq!(projected.kind, RecordKind::Notice, "{kind} should be a notice");
+            assert_eq!(projected.text.as_deref(), Some("x"));
         }
     }
 
