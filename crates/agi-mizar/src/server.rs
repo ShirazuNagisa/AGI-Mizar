@@ -23,6 +23,7 @@
 //! relay switching, push registration — say so instead of pretending.
 
 use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -30,7 +31,7 @@ use std::time::{Duration, Instant};
 use agi_core::Core;
 use agi_protocol::domain::{InteractionKind, SessionKey};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -227,7 +228,12 @@ impl MizarServer {
         self.port.store(bound, Ordering::Relaxed);
 
         Ok(tokio::spawn(async move {
-            if let Err(error) = axum::serve(listener, router).await {
+            // With peer addresses: "the phone says it cannot connect" is
+            // otherwise indistinguishable from "nothing arrived", and a request
+            // replayed by the tunnel comes from 127.0.0.1 while a phone on this
+            // network comes from its own address.
+            let service = router.into_make_service_with_connect_info::<SocketAddr>();
+            if let Err(error) = axum::serve(listener, service).await {
                 tracing::error!("mizar listener stopped: {error}");
             }
         }))
@@ -639,18 +645,31 @@ impl MizarServer {
 }
 
 /// `GET /mizar/v1/hello` — unauthenticated, reveals identity only.
-async fn hello(State(server): State<Arc<MizarServer>>) -> Response {
+async fn hello(
+    State(server): State<Arc<MizarServer>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+) -> Response {
+    tracing::info!("mizar: hello from {peer}");
     Json(json!({
         "hostId": server.store.host_id(),
         "hostName": server.store.host_name(),
         "home": server.home,
         "protocolVersion": PROTOCOL_VERSION,
+        // The app's identity probe decodes these two, and a host that omits
+        // them reads as unreachable to its route planner.
+        "pairingOpen": server.code().is_some(),
+        "paired": !server.store.devices().is_empty(),
     }))
     .into_response()
 }
 
 /// `POST /mizar/v1/pair` — a code for a token, once.
-async fn pair(State(server): State<Arc<MizarServer>>, Json(body): Json<Value>) -> Response {
+async fn pair(
+    State(server): State<Arc<MizarServer>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(body): Json<Value>,
+) -> Response {
+    tracing::info!("mizar: a phone at {peer} is trying to pair");
     let version = body
         .get("protocolVersion")
         .and_then(Value::as_u64)
@@ -709,6 +728,7 @@ async fn pair(State(server): State<Arc<MizarServer>>, Json(body): Json<Value>) -
     };
 
     if let Err(code) = accepted {
+        tracing::warn!("mizar: pairing refused for {peer} — {code:?}");
         return frame_response(ServerFrame::error(None, code, code_message(code)));
     }
 
@@ -722,14 +742,17 @@ async fn pair(State(server): State<Arc<MizarServer>>, Json(body): Json<Value>) -
         .map(str::to_string);
 
     match server.store.issue(name, model) {
-        Ok(issued) => Json(json!({
-            "deviceToken": issued.token,
-            "deviceId": issued.device.id,
-            "hostId": server.store.host_id(),
-            "hostName": server.store.host_name(),
-            "protocolVersion": PROTOCOL_VERSION,
-        }))
-        .into_response(),
+        Ok(issued) => {
+            tracing::info!("mizar: paired {} from {peer}", issued.device.name);
+            Json(json!({
+                "deviceToken": issued.token,
+                "deviceId": issued.device.id,
+                "hostId": server.store.host_id(),
+                "hostName": server.store.host_name(),
+                "protocolVersion": PROTOCOL_VERSION,
+            }))
+            .into_response()
+        }
         Err(error) => frame_response(ServerFrame::error(
             None,
             ErrorCode::Internal,
@@ -748,8 +771,13 @@ fn code_message(code: ErrorCode) -> &'static str {
 }
 
 /// `GET /mizar/v1/ws` — the phone's socket.
-async fn upgrade(State(server): State<Arc<MizarServer>>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| serve_socket(server, socket))
+async fn upgrade(
+    State(server): State<Arc<MizarServer>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    tracing::info!("mizar: a socket is being opened by {peer}");
+    ws.on_upgrade(move |socket| serve_socket(server, peer, socket))
 }
 
 /// Run one phone connection.
@@ -757,7 +785,7 @@ async fn upgrade(State(server): State<Arc<MizarServer>>, ws: WebSocketUpgrade) -
 /// One writer task owns the sink and drains a channel; the read loop and the
 /// event forwarder both produce into it. Two tasks writing to one sink is the
 /// kind of bug that only shows up as a truncated frame under load.
-async fn serve_socket(server: Arc<MizarServer>, socket: WebSocket) {
+async fn serve_socket(server: Arc<MizarServer>, peer: SocketAddr, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
     let (out, mut out_rx) = tokio::sync::mpsc::channel::<String>(64);
 
@@ -772,9 +800,13 @@ async fn serve_socket(server: Arc<MizarServer>, socket: WebSocket) {
     // The handshake is the only frame allowed to be unauthenticated.
     let first = match stream.next().await {
         Some(Ok(Message::Text(text))) => text,
-        _ => return,
+        _ => {
+            tracing::warn!("mizar: {peer} opened a socket and sent no hello");
+            return;
+        }
     };
     let Some(frame) = ClientFrame::parse(&first) else {
+        tracing::warn!("mizar: {peer} opened a socket with a frame that is not JSON");
         let _ = send(
             &out,
             ServerFrame::error(
@@ -789,6 +821,7 @@ async fn serve_socket(server: Arc<MizarServer>, socket: WebSocket) {
         return;
     };
     let Some(hello) = frame.hello() else {
+        tracing::warn!("mizar: {peer} did not start with hello");
         let _ = send(
             &out,
             ServerFrame::error(None, ErrorCode::Unauthenticated, "send hello first"),
@@ -799,6 +832,7 @@ async fn serve_socket(server: Arc<MizarServer>, socket: WebSocket) {
         return;
     };
     let Some(device) = server.store.authenticate(&hello.token) else {
+        tracing::warn!("mizar: {peer} presented a token this host does not know");
         let _ = send(
             &out,
             ServerFrame::error(
@@ -814,7 +848,7 @@ async fn serve_socket(server: Arc<MizarServer>, socket: WebSocket) {
     };
 
     tracing::info!(
-        "mizar: {} connected ({})",
+        "mizar: {} connected from {peer} ({})",
         device.name,
         hello.app_version.as_deref().unwrap_or("unknown version")
     );

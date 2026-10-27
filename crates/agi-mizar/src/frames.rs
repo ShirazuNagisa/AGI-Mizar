@@ -193,6 +193,12 @@ pub struct ClientFrame {
     /// `hello` or a method name.
     pub kind: String,
     pub payload: Value,
+    /// The frame exactly as it arrived.
+    ///
+    /// `hello` is the one frame whose fields the protocol puts at the top level
+    /// rather than inside `payload`, so the raw object has to be kept to read
+    /// them without also accepting a `session.list` that carries a stray token.
+    root: Value,
 }
 
 impl ClientFrame {
@@ -215,6 +221,7 @@ impl ClientFrame {
             id: object.get("id").and_then(Value::as_str).map(str::to_string),
             kind,
             payload: object.get("payload").cloned().unwrap_or(Value::Null),
+            root: value,
         })
     }
 
@@ -223,19 +230,21 @@ impl ClientFrame {
         if self.kind != "hello" {
             return None;
         }
-        let token = self.payload.get("token").and_then(Value::as_str)?;
+        // The app and the protocol put the handshake fields at the top level.
+        // An earlier build of this server only looked inside `payload`, so a
+        // real phone opened a socket and was answered "send hello first" — the
+        // node stand-in had been written to match the bug. Accept both.
+        let field = |name: &str| {
+            self.root
+                .get(name)
+                .or_else(|| self.payload.get(name))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
         Some(Hello {
-            token: token.to_string(),
-            app_version: self
-                .payload
-                .get("appVersion")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            device_model: self
-                .payload
-                .get("deviceModel")
-                .and_then(Value::as_str)
-                .map(str::to_string),
+            token: field("token")?,
+            app_version: field("appVersion"),
+            device_model: field("deviceModel"),
         })
     }
 }
@@ -390,11 +399,19 @@ mod tests {
 
     #[test]
     fn parses_a_hello_and_a_method_call() {
+        // The shape the app sends: the token is on the frame, not in a payload.
         let hello = ClientFrame::parse(
-            r#"{"v":1,"type":"hello","id":"h1","payload":{"token":"mz_abc","appVersion":"0.1.0"}}"#,
+            r#"{"v":1,"type":"hello","id":"h1","token":"mz_abc","appVersion":"0.1.0","protocolVersion":1}"#,
         )
         .unwrap();
         assert_eq!(hello.hello().unwrap().token, "mz_abc");
+        assert_eq!(hello.hello().unwrap().app_version.as_deref(), Some("0.1.0"));
+
+        // The older nested shape stays readable.
+        let nested =
+            ClientFrame::parse(r#"{"v":1,"type":"hello","id":"h1","payload":{"token":"mz_abc"}}"#)
+                .unwrap();
+        assert_eq!(nested.hello().unwrap().token, "mz_abc");
 
         let call =
             ClientFrame::parse(r#"{"v":1,"type":"session.list","id":"m1","payload":{}}"#).unwrap();
