@@ -54,6 +54,7 @@ protocol/            Mizar v1 黄金帧（手机协议，未来服务端用）
 cargo test                     # 112 个测试
 cargo run -p agi-daemon        # 内核，无窗口
 cargo run -p agi-app           # 窗口（会打印它加载的地址）
+scripts/dev-app.sh             # 同上，但包成带图标的 .app（Dock 与 Finder 显示应用图标）
 
 cd ui && npm install && npm run build   # 改前端之后：内核在编译时嵌入 ui/dist
 cd ui && npm run dev                    # 前端热更新，代理到 127.0.0.1:19392
