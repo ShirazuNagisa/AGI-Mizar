@@ -224,6 +224,52 @@ async fn a_revoked_device_cannot_open_a_socket() {
 }
 
 #[tokio::test]
+async fn the_tunnel_moves_only_to_a_relay_both_sides_know() {
+    let (server, store, _dir) = start().await;
+    server.attach_relay(agi_mizar::RelayClient::new(
+        "https://dshmizar.shirazu-nagisa.com",
+        "tunnel-secret",
+        1,
+    ));
+    let issued = store.issue("iPhone", None).unwrap();
+    let (mut socket, _) = connect(server.port(), &issued.token).await;
+
+    // An origin neither this host nor the app trusts is refused, not dialled.
+    socket
+        .send(Message::Text(
+            json!({
+                "v": 1, "type": "relay.set", "id": "r1",
+                "payload": { "url": "https://evil.example.com" }
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let refused = next(&mut socket).await;
+    assert_eq!(refused["type"], "error");
+    assert_eq!(refused["code"], "MALFORMED_FRAME");
+
+    // Asking for the relay it is already on is answered, not churned.
+    socket
+        .send(Message::Text(
+            json!({
+                "v": 1, "type": "relay.set", "id": "r2",
+                "payload": { "url": "https://dshmizar.shirazu-nagisa.com" }
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let answer = next(&mut socket).await;
+    assert_eq!(answer["type"], "ok");
+    assert_eq!(
+        answer["result"]["url"],
+        "https://dshmizar.shirazu-nagisa.com"
+    );
+    assert_eq!(answer["result"]["room"], Value::Null);
+}
+
+#[tokio::test]
 async fn a_socket_without_hello_is_told_to_handshake() {
     let (server, _, _dir) = start().await;
     let (mut socket, _) = connect_async(format!("ws://127.0.0.1:{}/mizar/v1/ws", server.port()))

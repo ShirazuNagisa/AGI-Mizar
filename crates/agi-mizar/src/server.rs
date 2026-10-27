@@ -69,6 +69,8 @@ pub struct MizarServer {
     port: AtomicU16,
     /// The tunnel, when one is configured.
     relay: Mutex<Option<Arc<RelayClient>>>,
+    /// Notices every connected phone receives: today, that the tunnel moved.
+    notices: broadcast::Sender<Value>,
 }
 
 impl MizarServer {
@@ -82,6 +84,7 @@ impl MizarServer {
             attempts: Mutex::new(VecDeque::new()),
             port: AtomicU16::new(0),
             relay: Mutex::new(None),
+            notices: broadcast::channel(16).0,
         })
     }
 
@@ -104,6 +107,45 @@ impl MizarServer {
             .relay
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(relay);
+    }
+
+    /// The relays a phone may ask this host to move between.
+    ///
+    /// The list is the phone's too (`RelayTier`): a host that accepted an
+    /// arbitrary origin would become a way to point a phone's traffic anywhere.
+    const SELECTABLE_RELAYS: [&'static str; 2] = [
+        "https://dshmizar.shirazu-nagisa.com",
+        "https://dshmizar-1.shirazu-nagisa.com",
+    ];
+
+    /// Move the tunnel to another public relay.
+    ///
+    /// The secret does not change, and the room derives from it, so every
+    /// pairing survives the move: phones keep the same room on a new origin.
+    fn switch_relay(&self, url: &str) -> Result<Value, &'static str> {
+        let base = url.trim_end_matches('/');
+        if !Self::SELECTABLE_RELAYS.contains(&base) {
+            return Err("relay.set: that is not one of the public relays");
+        }
+        let mut guard = self
+            .relay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(current) = guard.as_ref().cloned() else {
+            return Err("relay.set: this host has no tunnel to move");
+        };
+        let room = current.current_room();
+        let base_url = room.as_ref().map(|room| format!("{}/r/{room}", base));
+        if current.base() == base {
+            return Ok(json!({ "url": base, "room": room, "baseURL": base_url }));
+        }
+
+        current.stop();
+        let next = current.rebased(base);
+        let running = Arc::clone(&next);
+        tokio::spawn(async move { running.run().await });
+        *guard = Some(next);
+        Ok(json!({ "url": base, "room": room, "baseURL": base_url }))
     }
 
     /// The tunnel facts a phone reads, when a tunnel is configured.
@@ -927,6 +969,29 @@ impl MizarServer {
                 }
             }
 
+            // Move the tunnel between the two public relays. The phone asks
+            // because its account's tier decides which relay it belongs on.
+            "relay.set" => {
+                let Some(url) = frame.payload.get("url").and_then(Value::as_str) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "relay.set needs a url",
+                    );
+                };
+                match self.switch_relay(url) {
+                    Ok(facts) => {
+                        // Everybody else on this host is told where it went, so
+                        // a phone redials instead of finding out on next failure.
+                        let _ = self.notices.send(facts.clone());
+                        ServerFrame::ok(id, facts)
+                    }
+                    Err(message) => {
+                        ServerFrame::error(Some(id), ErrorCode::MalformedFrame, message)
+                    }
+                }
+            }
+
             "session.prompt" => {
                 let Some(key) = self.session_of(frame) else {
                     return ServerFrame::error(
@@ -1529,6 +1594,29 @@ async fn serve_socket(server: Arc<MizarServer>, peer: SocketAddr, socket: WebSoc
         })
     };
 
+    // Host notices: today the only one is the tunnel moving, and a phone that
+    // is not told would keep dialling the old relay until something failed.
+    let mut notices = server.notices.subscribe();
+    let notifier = {
+        let out = out.clone();
+        tokio::spawn(async move {
+            loop {
+                match notices.recv().await {
+                    Ok(data) => {
+                        if send(&out, ServerFrame::event("relay.changed", data))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => return,
+                }
+            }
+        })
+    };
+
     while let Some(message) = stream.next().await {
         let Ok(Message::Text(text)) = message else {
             break;
@@ -1547,6 +1635,7 @@ async fn serve_socket(server: Arc<MizarServer>, peer: SocketAddr, socket: WebSoc
     }
 
     forwarder.abort();
+    notifier.abort();
     drop(out);
     let _ = writer.await;
     tracing::info!("mizar: {} disconnected", device.name);

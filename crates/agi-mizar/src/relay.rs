@@ -66,6 +66,8 @@ pub struct RelayClient {
     local_port: u16,
     room: Mutex<Option<String>>,
     connected: AtomicBool,
+    /// Set when this client has been replaced by one pointed elsewhere.
+    stopped: AtomicBool,
     /// Open phone WebSockets, by relay stream id.
     streams: Mutex<HashMap<String, mpsc::Sender<StreamCommand>>>,
 }
@@ -85,6 +87,7 @@ impl RelayClient {
             local_port,
             room: Mutex::new(None),
             connected: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
             streams: Mutex::new(HashMap::new()),
         })
     }
@@ -104,6 +107,23 @@ impl RelayClient {
     /// The relay's base URL, for `host.info`.
     pub fn base(&self) -> &str {
         &self.base
+    }
+
+    /// The secret this tunnel authenticates with, kept for a move to another
+    /// relay: the room derives from it, so a move keeps every pairing intact.
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// Ask this client to stop redialling. The socket itself is closed by the
+    /// relay when the replacement dials the same room.
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::Relaxed);
+    }
+
+    /// A client for the same tunnel on a different relay.
+    pub fn rebased(&self, base: impl Into<String>) -> Arc<Self> {
+        Self::new(base, self.token.clone(), self.local_port)
     }
 
     /// The room the relay assigned, once it has.
@@ -140,7 +160,7 @@ impl RelayClient {
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let mut backoff = RECONNECT_MIN;
-        loop {
+        while !self.stopped.load(Ordering::Relaxed) {
             match self.serve_once().await {
                 Ok(()) => {
                     backoff = RECONNECT_MIN;
