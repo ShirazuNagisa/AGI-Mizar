@@ -144,6 +144,12 @@ pub enum ErrorCode {
     FileUnknown,
     FileForbidden,
     FileTooLarge,
+    UploadUnknown,
+    UploadBadChunk,
+    UploadTooLarge,
+    UploadIncomplete,
+    AttachmentTooLarge,
+    AttachmentFailed,
 }
 
 impl ErrorCode {
@@ -168,6 +174,12 @@ impl ErrorCode {
             Self::FileUnknown => "FILE_UNKNOWN",
             Self::FileForbidden => "FILE_FORBIDDEN",
             Self::FileTooLarge => "FILE_TOO_LARGE",
+            Self::UploadUnknown => "UPLOAD_UNKNOWN",
+            Self::UploadBadChunk => "UPLOAD_BAD_CHUNK",
+            Self::UploadTooLarge => "UPLOAD_TOO_LARGE",
+            Self::UploadIncomplete => "UPLOAD_INCOMPLETE",
+            Self::AttachmentTooLarge => "ATTACHMENT_TOO_LARGE",
+            Self::AttachmentFailed => "ATTACHMENT_FAILED",
         }
     }
 

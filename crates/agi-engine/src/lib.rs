@@ -145,6 +145,21 @@ pub trait Engine: Send + Sync {
     /// Choose a permission preset.
     async fn set_permission(&self, session: &SessionKey, preset: &str) -> Result<(), EngineError>;
 
+    /// Send a prompt with attachments.
+    ///
+    /// An engine that cannot carry a blob falls back to the text alone rather
+    /// than refusing the turn: the operator typed something, and losing the
+    /// words because a screenshot could not follow is the worse failure.
+    async fn prompt_with(
+        &self,
+        session: &SessionKey,
+        text: &str,
+        attachments: &[agi_protocol::domain::PromptAttachment],
+    ) -> Result<(), EngineError> {
+        let _ = attachments;
+        self.prompt(session, text).await
+    }
+
     /// The engine's event stream. One receiver per subscriber.
     fn subscribe(&self) -> tokio::sync::broadcast::Receiver<EngineEvent>;
 

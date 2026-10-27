@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use agi_core::Core;
 use agi_engine::MAX_SLICE_BYTES;
-use agi_protocol::domain::{Balance, InteractionKind, SessionKey, Wallet};
+use agi_protocol::domain::{AttachmentKind, Balance, InteractionKind, SessionKey, Wallet};
 use agi_protocol::engine::EngineId;
 use agi_protocol::usage::UsageContext;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -76,6 +76,8 @@ pub struct MizarServer {
     foreground: Mutex<std::collections::HashSet<String>>,
     /// The client that talks to the relay's push API.
     http: reqwest::Client,
+    /// Files a phone is sending, staged until a prompt names them.
+    uploads: std::sync::Arc<crate::uploads::UploadStore>,
 }
 
 impl MizarServer {
@@ -95,6 +97,7 @@ impl MizarServer {
                 .timeout(Duration::from_secs(10))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
+            uploads: Arc::new(upload_store()),
         })
     }
 
@@ -1022,6 +1025,128 @@ impl MizarServer {
                 }
             }
 
+            // Attachments arrive in four calls: where to put them, the bytes a
+            // chunk at a time, a record a prompt can name, or a clean abort.
+            "upload.begin" => {
+                let Some(session) = frame
+                    .payload
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "upload.begin needs a sessionId",
+                    );
+                };
+                let Some(kind) = frame
+                    .payload
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .and_then(AttachmentKind::parse)
+                else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "upload.begin needs a kind of image or file",
+                    );
+                };
+                let Some(name) = frame.payload.get("name").and_then(Value::as_str) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "upload.begin needs a name",
+                    );
+                };
+                let Some(byte_size) = frame.payload.get("byteSize").and_then(Value::as_u64) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "upload.begin needs a byteSize",
+                    );
+                };
+                let media_type = frame
+                    .payload
+                    .get("mediaType")
+                    .and_then(Value::as_str)
+                    .unwrap_or("application/octet-stream");
+                match self.uploads.begin(
+                    &device.id,
+                    crate::uploads::BeginRequest {
+                        session,
+                        kind,
+                        name: name.to_string(),
+                        media_type: media_type.to_string(),
+                        byte_size,
+                    },
+                ) {
+                    Ok(begin) => ServerFrame::ok(
+                        id,
+                        json!({ "uploadId": begin.upload_id, "chunkBytes": begin.chunk_bytes }),
+                    ),
+                    Err(error) => upload_error(Some(id), error),
+                }
+            }
+
+            "upload.chunk" => {
+                let Some(upload_id) = frame.payload.get("uploadId").and_then(Value::as_str) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "upload.chunk needs an uploadId",
+                    );
+                };
+                let Some(index) = frame.payload.get("index").and_then(Value::as_u64) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "upload.chunk needs an index",
+                    );
+                };
+                let Some(data) = frame.payload.get("data").and_then(Value::as_str) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "upload.chunk needs data",
+                    );
+                };
+                let Some(bytes) = crate::relay::unbase64(data) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "upload.chunk: data is not base64",
+                    );
+                };
+                match self.uploads.chunk(&device.id, upload_id, index, &bytes) {
+                    Ok(received) => ServerFrame::ok(id, json!({ "received": received })),
+                    Err(error) => upload_error(Some(id), error),
+                }
+            }
+
+            "upload.finish" => {
+                let Some(upload_id) = frame.payload.get("uploadId").and_then(Value::as_str) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "upload.finish needs an uploadId",
+                    );
+                };
+                match self.uploads.finish(&device.id, upload_id) {
+                    Ok(record) => {
+                        ServerFrame::ok(id, serde_json::to_value(record).unwrap_or(Value::Null))
+                    }
+                    Err(error) => upload_error(Some(id), error),
+                }
+            }
+
+            "upload.abort" => {
+                if let Some(upload_id) = frame.payload.get("uploadId").and_then(Value::as_str) {
+                    self.uploads.abort(&device.id, upload_id);
+                }
+                ServerFrame::ok(id, json!({ "aborted": true }))
+            }
+
             "session.prompt" => {
                 let Some(key) = self.session_of(frame) else {
                     return ServerFrame::error(
@@ -1035,15 +1160,39 @@ impl MizarServer {
                     .get("text")
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                if text.trim().is_empty() {
+                let attachment_ids: Vec<String> = frame
+                    .payload
+                    .get("attachmentIds")
+                    .and_then(Value::as_array)
+                    .map(|rows| {
+                        rows.iter()
+                            .filter_map(|row| row.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if text.trim().is_empty() && attachment_ids.is_empty() {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
-                        "session.prompt needs text",
+                        "session.prompt needs text or an attachment",
                     );
                 }
                 let Some(engine) = self.core.engine(key.engine) else {
                     return ServerFrame::error(Some(id), ErrorCode::RemoteError, "no such engine");
+                };
+                // Resolved before the engine sees them: ownership, session and
+                // expiry are checked here, and the record is spent by this call.
+                let attachments = if attachment_ids.is_empty() {
+                    Vec::new()
+                } else {
+                    match self.uploads.resolve_for_prompt(
+                        &device.id,
+                        &key.to_string(),
+                        &attachment_ids,
+                    ) {
+                        Ok(attachments) => attachments,
+                        Err(error) => return upload_error(Some(id), error),
+                    }
                 };
                 let request_id = frame
                     .payload
@@ -1051,7 +1200,7 @@ impl MizarServer {
                     .and_then(Value::as_str)
                     .map(str::to_string)
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-                match engine.prompt(&key, text).await {
+                match engine.prompt_with(&key, text, &attachments).await {
                     Ok(()) => {
                         ServerFrame::ok(id, json!({ "accepted": true, "requestId": request_id }))
                     }
@@ -1466,6 +1615,32 @@ impl MizarServer {
             .and_then(Value::as_str)
             .and_then(|text| text.parse().ok())
     }
+}
+
+/// The error frame for one refused upload call.
+fn upload_error(id: Option<String>, error: crate::uploads::UploadError) -> ServerFrame {
+    let code = match error.code {
+        "UPLOAD_UNKNOWN" => ErrorCode::UploadUnknown,
+        "UPLOAD_BAD_CHUNK" => ErrorCode::UploadBadChunk,
+        "UPLOAD_TOO_LARGE" | "UPLOAD_LIMITED" => ErrorCode::UploadTooLarge,
+        "UPLOAD_INCOMPLETE" => ErrorCode::UploadIncomplete,
+        "ATTACHMENT_TOO_LARGE" => ErrorCode::AttachmentTooLarge,
+        "ATTACHMENT_FAILED" | "UPLOAD_FAILED" => ErrorCode::AttachmentFailed,
+        _ => ErrorCode::MalformedFrame,
+    };
+    ServerFrame::error(id, code, error.message)
+}
+
+/// Open the staging area beside the device roster.
+fn upload_store() -> crate::uploads::UploadStore {
+    let root = crate::store::default_store_path()
+        .parent()
+        .map(|home| home.join("uploads"))
+        .unwrap_or_else(|| std::env::temp_dir().join("agi-mizar-uploads"));
+    crate::uploads::UploadStore::open(root).unwrap_or_else(|_| {
+        crate::uploads::UploadStore::open(std::env::temp_dir().join("agi-mizar-uploads"))
+            .expect("the staging area has to exist somewhere")
+    })
 }
 
 /// The provider's own top-up page, and the only one this host will name.

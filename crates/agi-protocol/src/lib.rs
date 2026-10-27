@@ -11,12 +11,16 @@
 //! a contract that can open a socket is a contract that is hard to test.
 
 pub mod api;
+pub mod b64;
 pub mod catalog;
 pub mod domain;
 pub mod engine;
 pub mod link;
 pub mod usage;
 
-pub use domain::{Interaction, InteractionKind, Record, RecordKind, Session, SessionKey, ToolInfo};
+pub use domain::{
+    AttachmentKind, Interaction, InteractionKind, PromptAttachment, Record, RecordKind, Session,
+    SessionKey, ToolInfo,
+};
 pub use engine::{Capabilities, EngineId};
 pub use usage::SessionUsage;

@@ -1107,8 +1107,50 @@ impl Engine for DshEngine {
     }
 
     async fn prompt(&self, session: &SessionKey, text: &str) -> Result<(), EngineError> {
+        self.prompt_with(session, text, &[]).await
+    }
+
+    async fn prompt_with(
+        &self,
+        session: &SessionKey,
+        text: &str,
+        attachments: &[agi_protocol::domain::PromptAttachment],
+    ) -> Result<(), EngineError> {
         if session.engine != EngineId::Dsh {
             return Err(EngineError::UnknownSession(session.clone()));
+        }
+        let mut content = Vec::new();
+        if !text.trim().is_empty() {
+            content.push(json!({ "type": "text", "text": text }));
+        }
+        for attachment in attachments {
+            match attachment.kind {
+                agi_protocol::domain::AttachmentKind::Image => {
+                    // A photograph travels inline: DSH turns the bytes into a
+                    // durable reference of its own, and the phone never needs a
+                    // receipt for one.
+                    content.push(json!({
+                        "type": "image",
+                        "data": agi_protocol::b64::encode(&attachment.bytes),
+                        "mediaType": attachment.media_type,
+                        "name": attachment.name,
+                    }));
+                }
+                agi_protocol::domain::AttachmentKind::File => {
+                    // The fallback the plugin used when the host has no
+                    // `fileUploads`: a path the agent's own tools can open.
+                    let path = attachment.path.clone().unwrap_or_default();
+                    content.push(json!({
+                        "type": "text",
+                        "text": format!("[File: {}]\n{}", attachment.name, path),
+                    }));
+                }
+            }
+        }
+        if content.is_empty() {
+            return Err(EngineError::upstream(
+                "a prompt needs text or an attachment",
+            ));
         }
         let request_id = format!("agi-{}", uuid::Uuid::new_v4());
         self.call(
@@ -1118,7 +1160,7 @@ impl Engine for DshEngine {
                     "requestId": request_id,
                     "sessionId": session.raw(),
                     "mode": "queue",
-                    "content": [{ "type": "text", "text": text }],
+                    "content": content,
                 }
             }),
         )

@@ -27,8 +27,10 @@ pub mod pairing;
 pub mod relay;
 pub mod server;
 pub mod store;
+pub mod uploads;
 
 pub use frames::{ErrorCode, ServerFrame, HTTP_PREFIX, PROTOCOL_VERSION, WS_PATH};
 pub use relay::RelayClient;
 pub use server::MizarServer;
 pub use store::{Device, DeviceStore};
+pub use uploads::UploadStore;

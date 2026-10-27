@@ -282,6 +282,45 @@ pub struct FilePreview {
     pub truncated: bool,
 }
 
+/// What an attachment is, as the phone labels it when it starts an upload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AttachmentKind {
+    Image,
+    File,
+}
+
+impl AttachmentKind {
+    /// Parse the wire spelling.
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "image" => Some(Self::Image),
+            "file" => Some(Self::File),
+            _ => None,
+        }
+    }
+
+    /// The wire spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::File => "file",
+        }
+    }
+}
+
+/// One blob the host holds for a prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptAttachment {
+    pub kind: AttachmentKind,
+    pub name: String,
+    pub media_type: String,
+    /// The bytes, for kinds the prompt carries inline.
+    pub bytes: Vec<u8>,
+    /// Where the host stored them, for kinds that travel as a path.
+    pub path: Option<String>,
+}
+
 /// A file's facts, as the phone's preview page asks for them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
