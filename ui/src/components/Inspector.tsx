@@ -1,5 +1,15 @@
-import type { EngineStatus, Interaction, Session } from '../api'
+import type {
+  ActivityEntry,
+  DeliveredFile,
+  EngineStatus,
+  Interaction,
+  ModelInfo,
+  PermissionPreset,
+  Session,
+  SessionStats,
+} from '../api'
 import { Questions } from './Questions'
+import { SessionDetails } from './SessionDetails'
 import { when } from './SessionList'
 
 /**
@@ -15,7 +25,16 @@ export function Inspector(props: {
   interactions: Interaction[]
   engines: EngineStatus[]
   version: string
+  stats: SessionStats | null
+  activity: ActivityEntry[]
+  deliverables: DeliveredFile[]
+  models: ModelInfo[]
+  permissions: PermissionPreset[]
   onAnswer: (id: string, outcome?: string, answers?: unknown[]) => void
+  onModel: (id: string) => void
+  onPermission: (id: string) => void
+  onRename: () => void
+  onArchive: () => void
 }) {
   return (
     <>
@@ -53,42 +72,18 @@ export function Inspector(props: {
         ))}
 
         {props.session !== null ? (
-          <>
-            <Field label="Session" value={props.session.key} />
-            {props.session.model !== null ? <Field label="Model" value={props.session.model} /> : null}
-            {props.session.cwd !== null ? <Field label="Directory" value={props.session.cwd} /> : null}
-            <Field label="Turns" value={String(props.session.turns)} />
-            {props.session.context !== null ? (
-              <div className="field">
-                <span className="label">
-                  Context · {Math.round(props.session.context.percent)}%
-                </span>
-                <div
-                  style={{
-                    height: 6,
-                    borderRadius: 999,
-                    background: 'color-mix(in srgb, var(--text) 10%, transparent)',
-                    overflow: 'hidden',
-                  }}
-                >
-                  <div
-                    style={{
-                      width: `${Math.min(100, Math.max(1, props.session.context.percent))}%`,
-                      height: '100%',
-                      borderRadius: 999,
-                      background:
-                        props.session.context.percent > 85 ? 'var(--warn)' : 'var(--accent)',
-                    }}
-                  />
-                </div>
-                <span className="value">
-                  {(props.session.context.used / 1000).toFixed(1)}k /{' '}
-                  {(props.session.context.window / 1000).toFixed(0)}k tokens
-                </span>
-              </div>
-            ) : null}
-            <Field label="Updated" value={when(props.session.updated_at)} />
-          </>
+          <SessionDetails
+            session={props.session}
+            stats={props.stats}
+            activity={props.activity}
+            deliverables={props.deliverables}
+            models={props.models}
+            permissions={props.permissions}
+            onModel={props.onModel}
+            onPermission={props.onPermission}
+            onRename={props.onRename}
+            onArchive={props.onArchive}
+          />
         ) : (
           <span className="hint">No session selected.</span>
         )}

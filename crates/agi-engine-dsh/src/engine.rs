@@ -25,7 +25,9 @@ use std::time::Duration;
 
 use agi_engine::{Answer, Engine, EngineError, EngineEvent};
 use agi_protocol::domain::{
-    ContextPressure, Interaction, InteractionKind, Question, Record, Session, SessionKey,
+    ActivityEntry, ActivityKind, ContextPressure, DeliveredFile, Interaction, InteractionKind,
+    ModelInfo, PermissionPreset, Question, Record, RecordKind, Session, SessionKey, SessionStats,
+    Workspace,
 };
 use agi_protocol::engine::{Capabilities, EngineId};
 use agi_protocol::link::{
@@ -208,6 +210,22 @@ impl DshEngine {
     /// Call an endpoint with the `request` wrapper DSH's descriptors use.
     async fn call(&self, endpoint: &str, args: Value) -> Result<Value, EngineError> {
         self.call_with(endpoint, args, REQUEST_TIMEOUT).await
+    }
+
+    /// Call an in-process service the desktop is allowed to reach.
+    async fn call_service(
+        &self,
+        service: &str,
+        method: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, EngineError> {
+        let id = self.next_id();
+        self.request_with(
+            DesktopFrame::service(id.clone(), service, method, args),
+            id,
+            REQUEST_TIMEOUT,
+        )
+        .await
     }
 
     /// Call an endpoint, allowing a longer wait than the default.
@@ -799,6 +817,42 @@ impl DshEngine {
         };
         self.emit(EngineEvent::SessionUpdated(updated));
     }
+
+    /// Read one projection snapshot for a session.
+    async fn projections(&self, session: &SessionKey) -> Result<Value, EngineError> {
+        let value = self
+            .call(
+                "session/projections",
+                json!({ "request": { "sessionId": session.raw() } }),
+            )
+            .await?;
+        Ok(value.get("values").cloned().unwrap_or(Value::Null))
+    }
+}
+
+/// The first non-empty line, cut to something a feed can show.
+fn first_line(text: Option<&str>) -> String {
+    let line = text
+        .unwrap_or_default()
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    if line.chars().count() <= 160 {
+        line.to_string()
+    } else {
+        line.chars().take(157).collect::<String>() + "…"
+    }
+}
+
+/// A short stable suffix for an activity id.
+fn kind_slug(kind: ActivityKind) -> &'static str {
+    match kind {
+        ActivityKind::Thinking => "think",
+        ActivityKind::Command => "cmd",
+        ActivityKind::Output => "out",
+        ActivityKind::Tool => "tool",
+    }
 }
 
 /// Read a `user-questions/request` payload into the shared model.
@@ -1142,6 +1196,319 @@ impl Engine for DshEngine {
             return Err(EngineError::upstream(text));
         }
         Ok(())
+    }
+
+    async fn activity(
+        &self,
+        session: &SessionKey,
+        limit: usize,
+    ) -> Result<Vec<ActivityEntry>, EngineError> {
+        // Built from the record cache rather than a second endpoint: the records
+        // already carry the tool calls and their output, and a live feed that
+        // disagrees with the transcript underneath it is worse than none.
+        let records = {
+            let inner = self.inner();
+            inner.records.get(&session.id).cloned().unwrap_or_default()
+        };
+        let Some(latest) = records.iter().filter_map(|record| record.turn).max() else {
+            return Ok(Vec::new());
+        };
+
+        let mut entries: Vec<ActivityEntry> = records
+            .iter()
+            .filter(|record| record.turn == Some(latest))
+            .filter_map(|record| {
+                let tool = record.tool.as_ref()?;
+                let kind = match record.kind {
+                    RecordKind::ToolCall => {
+                        if matches!(tool.name.as_str(), "bash" | "shell" | "exec" | "run") {
+                            ActivityKind::Command
+                        } else {
+                            ActivityKind::Tool
+                        }
+                    }
+                    RecordKind::ToolResult => ActivityKind::Output,
+                    _ => return None,
+                };
+                let text = match kind {
+                    ActivityKind::Output => first_line(tool.output.as_deref()),
+                    _ => first_line(tool.arguments.as_deref()),
+                };
+                Some(ActivityEntry {
+                    id: format!("{}-{}", record.seq, kind_slug(kind)),
+                    seq: record.seq,
+                    at: record.time,
+                    kind,
+                    title: if tool.name.is_empty() {
+                        "output".to_string()
+                    } else {
+                        tool.name.clone()
+                    },
+                    text,
+                })
+            })
+            .collect();
+
+        // Only the tail is worth showing: the feed answers "what now", not "what
+        // ever".
+        if entries.len() > limit {
+            entries.drain(..entries.len() - limit);
+        }
+        Ok(entries)
+    }
+
+    async fn stats(&self, session: &SessionKey) -> Result<SessionStats, EngineError> {
+        let values = self.projections(session).await?;
+        let mut stats = SessionStats::default();
+        if let Some(summary) = values.get("sessionStats") {
+            stats.turns = summary.get("turns").and_then(Value::as_u64).unwrap_or(0) as u32;
+            stats.steps = summary.get("steps").and_then(Value::as_u64).unwrap_or(0) as u32;
+            stats.llm_ms = summary.get("llmMs").and_then(Value::as_i64).unwrap_or(0);
+            stats.tool_ms = summary.get("toolMs").and_then(Value::as_i64).unwrap_or(0);
+        }
+        if let Some(usage) = values.get("tokenUsage") {
+            stats.input_tokens = usage
+                .get("inputTokens")
+                .or_else(|| usage.get("input"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            stats.output_tokens = usage
+                .get("outputTokens")
+                .or_else(|| usage.get("output"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+        }
+        Ok(stats)
+    }
+
+    async fn deliverables(&self, session: &SessionKey) -> Result<Vec<DeliveredFile>, EngineError> {
+        // A delivered file is a `present` tool call, which is the one place the
+        // model names what it made. Reading it out of the records keeps this in
+        // step with the transcript.
+        let records = {
+            let inner = self.inner();
+            inner.records.get(&session.id).cloned().unwrap_or_default()
+        };
+        let mut files: Vec<DeliveredFile> = Vec::new();
+        for record in records
+            .iter()
+            .filter(|record| record.kind == RecordKind::ToolCall)
+        {
+            let Some(tool) = record.tool.as_ref() else {
+                continue;
+            };
+            if !tool.name.contains("present") {
+                continue;
+            }
+            let Some(arguments) = tool.arguments.as_deref() else {
+                continue;
+            };
+            let Ok(parsed) = serde_json::from_str::<Value>(arguments) else {
+                continue;
+            };
+            let Some(list) = parsed.get("files").and_then(Value::as_array) else {
+                continue;
+            };
+            for entry in list {
+                let Some(path) = entry.get("path").and_then(Value::as_str) else {
+                    continue;
+                };
+                let name = path.rsplit('/').next().unwrap_or(path).to_string();
+                if files.iter().any(|file| file.path == path) {
+                    continue;
+                }
+                files.push(DeliveredFile {
+                    path: path.to_string(),
+                    name,
+                    description: entry
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                });
+            }
+        }
+        Ok(files)
+    }
+
+    async fn models(&self) -> Result<Vec<ModelInfo>, EngineError> {
+        // Measured shape: `{groups: [{id, models: [{id, name, reasoning:
+        // {efforts: [{id, name}]}}]}]}`. The group id is the provider, and a
+        // model is addressed as `provider/model`.
+        let value = self.call("session/modelCatalog", json!({})).await?;
+        let mut models = Vec::new();
+        for group in value
+            .get("groups")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+        {
+            let provider = group
+                .get("id")
+                .or_else(|| group.get("provider"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            for model in group
+                .get("models")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+            {
+                let Some(name) = model
+                    .get("id")
+                    .or_else(|| model.get("model"))
+                    .and_then(Value::as_str)
+                else {
+                    continue;
+                };
+                models.push(ModelInfo {
+                    id: format!("{provider}/{name}"),
+                    label: model
+                        .get("name")
+                        .or_else(|| model.get("label"))
+                        .and_then(Value::as_str)
+                        .unwrap_or(name)
+                        .to_string(),
+                    provider: Some(provider.to_string()),
+                    reasoning: model
+                        .get("reasoning")
+                        .and_then(|reasoning| reasoning.get("efforts"))
+                        .and_then(Value::as_array)
+                        .map(|efforts| {
+                            efforts
+                                .iter()
+                                .filter_map(|effort| match effort {
+                                    Value::String(text) => Some(text.clone()),
+                                    other => {
+                                        other.get("id").and_then(Value::as_str).map(str::to_string)
+                                    }
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                });
+            }
+        }
+        Ok(models)
+    }
+
+    async fn permissions(&self) -> Result<Vec<PermissionPreset>, EngineError> {
+        // Measured shape: `{options: [{name, value}], defaultPreset}`.
+        let value = self.call("permissionPresets/catalog", json!({})).await?;
+        let options = value
+            .get("options")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Ok(options
+            .iter()
+            .filter_map(|option| {
+                let id = option
+                    .get("value")
+                    .or_else(|| option.get("id"))
+                    .and_then(Value::as_str)?;
+                Some(PermissionPreset {
+                    id: id.to_string(),
+                    label: option
+                        .get("name")
+                        .or_else(|| option.get("label"))
+                        .and_then(Value::as_str)
+                        .unwrap_or(id)
+                        .to_string(),
+                    description: option
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                })
+            })
+            .collect())
+    }
+
+    async fn create(&self, cwd: Option<&str>) -> Result<SessionKey, EngineError> {
+        let request = match cwd {
+            Some(cwd) => json!({ "request": { "cwd": cwd } }),
+            None => json!({ "request": {} }),
+        };
+        let value = self.call("session/create", request).await?;
+        let id = value
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| EngineError::upstream("session/create returned no id"))?;
+        let session = SessionKey::new(EngineId::Dsh, id);
+        self.refresh_sessions().await?;
+        Ok(session)
+    }
+
+    async fn rename(&self, session: &SessionKey, title: &str) -> Result<(), EngineError> {
+        self.call(
+            "session/rename",
+            json!({ "request": { "sessionId": session.raw(), "title": title } }),
+        )
+        .await?;
+        self.enrich(&session.id).await;
+        Ok(())
+    }
+
+    async fn archive(&self, session: &SessionKey, stop_activity: bool) -> Result<(), EngineError> {
+        self.call_service(
+            "workspaceRegistry",
+            "archiveSession",
+            vec![
+                json!(session.raw()),
+                json!({ "stopActivity": stop_activity }),
+            ],
+        )
+        .await?;
+        {
+            let mut inner = self.inner();
+            inner.sessions.remove(&session.id);
+            inner.records.remove(&session.id);
+        }
+        self.emit(EngineEvent::SessionRemoved(session.clone()));
+        Ok(())
+    }
+
+    async fn workspaces(&self) -> Result<Vec<Workspace>, EngineError> {
+        // Measured shape: `[{id, host, record: {path, title, sessionIds}}]` — the
+        // useful half is under `record`, not on the row.
+        let value = self
+            .call_service("workspaceRegistry", "list", Vec::new())
+            .await?;
+        let list = value
+            .as_array()
+            .cloned()
+            .or_else(|| value.get("items").and_then(Value::as_array).cloned())
+            .unwrap_or_default();
+
+        Ok(list
+            .iter()
+            .filter_map(|workspace| {
+                let id = workspace.get("id").and_then(Value::as_str)?;
+                let record = workspace.get("record").unwrap_or(workspace);
+                Some(Workspace {
+                    id: id.to_string(),
+                    path: record
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    name: record
+                        .get("title")
+                        .or_else(|| record.get("name"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    session_ids: record
+                        .get("sessionIds")
+                        .and_then(Value::as_array)
+                        .map(|ids| {
+                            ids.iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_string)
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                })
+            })
+            .collect())
     }
 
     fn subscribe(&self) -> broadcast::Receiver<EngineEvent> {

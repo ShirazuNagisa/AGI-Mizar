@@ -238,6 +238,64 @@ pub enum InteractionKind {
     Question,
 }
 
+/// One line of "what the running turn is doing".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityEntry {
+    /// Stable across refreshes, so a list can be merged rather than replaced.
+    pub id: String,
+    /// The engine's own sequence, for ordering.
+    pub seq: i64,
+    pub at: i64,
+    pub kind: ActivityKind,
+    /// A tool name, or the first words of a thought.
+    pub title: String,
+    /// One line. Anything longer belongs in the transcript.
+    pub text: String,
+}
+
+/// What kind of work an activity line describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityKind {
+    Thinking,
+    Command,
+    Output,
+    Tool,
+}
+
+/// What a session has cost so far.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct SessionStats {
+    pub turns: u32,
+    pub steps: u32,
+    /// Milliseconds spent waiting on the model.
+    pub llm_ms: i64,
+    /// Milliseconds spent running tools.
+    pub tool_ms: i64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+/// A file the model said it produced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveredFile {
+    /// Relative to the session's working directory, as the model named it.
+    pub path: String,
+    /// The name to show.
+    pub name: String,
+    pub description: Option<String>,
+}
+
+/// One workspace the host knows about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Workspace {
+    pub id: String,
+    pub path: String,
+    pub name: Option<String>,
+    /// The sessions the host assigns to it, in its own order.
+    pub session_ids: Vec<String>,
+}
+
 /// One question in a batch, as the agent asked it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Question {

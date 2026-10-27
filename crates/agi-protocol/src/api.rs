@@ -73,6 +73,37 @@ pub enum Command {
     SetModel { session: SessionKey, model: String },
     /// Choose a permission preset for a session.
     SetPermission { session: SessionKey, preset: String },
+    /// What the running turn is doing.
+    Activity {
+        session: SessionKey,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    /// What a session has cost.
+    Stats { session: SessionKey },
+    /// Files the model said it produced.
+    Deliverables { session: SessionKey },
+    /// Every model an engine offers.
+    Models { engine: EngineId },
+    /// Every permission preset an engine offers.
+    Permissions { engine: EngineId },
+    /// Start a session in a directory.
+    Create {
+        engine: EngineId,
+        #[serde(default)]
+        cwd: Option<String>,
+    },
+    /// Give a session a name.
+    Rename { session: SessionKey, title: String },
+    /// Hide a session without deleting it.
+    Archive {
+        session: SessionKey,
+        #[serde(default)]
+        stop_activity: Option<bool>,
+    },
+    /// The host's own workspace grouping.
+    Workspaces { engine: EngineId },
+
     /// The pairing code to show a phone, and a QR for its URI.
     Pairing {
         /// Issue a fresh code instead of returning the one already on screen.

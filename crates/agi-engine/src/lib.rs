@@ -14,7 +14,10 @@
 //! update mechanisms (a WebSocket firehose, a JSON-RPC notification stream, a
 //! file being appended to).
 
-use agi_protocol::domain::{Interaction, Record, Session, SessionKey};
+use agi_protocol::domain::{
+    ActivityEntry, DeliveredFile, Interaction, ModelInfo, PermissionPreset, Record, Session,
+    SessionKey, SessionStats, Workspace,
+};
 use agi_protocol::engine::{Capabilities, EngineId};
 use async_trait::async_trait;
 use serde_json::Value;
@@ -141,4 +144,71 @@ pub trait Engine: Send + Sync {
 
     /// The engine's event stream. One receiver per subscriber.
     fn subscribe(&self) -> tokio::sync::broadcast::Receiver<EngineEvent>;
+
+    // ---- capabilities below are optional ----
+    //
+    // Each has a default that reports the gap rather than pretending. An adapter
+    // implements the ones its product can actually do, and the capability flags
+    // it reports are what the UI draws from.
+
+    /// What the running turn is doing, oldest first.
+    async fn activity(
+        &self,
+        _session: &SessionKey,
+        _limit: usize,
+    ) -> Result<Vec<ActivityEntry>, EngineError> {
+        Err(self.unsupported("activity"))
+    }
+
+    /// What this session has cost so far.
+    async fn stats(&self, _session: &SessionKey) -> Result<SessionStats, EngineError> {
+        Err(self.unsupported("stats"))
+    }
+
+    /// Files the model said it produced.
+    async fn deliverables(&self, _session: &SessionKey) -> Result<Vec<DeliveredFile>, EngineError> {
+        Err(self.unsupported("deliverables"))
+    }
+
+    /// Every model this engine offers.
+    async fn models(&self) -> Result<Vec<ModelInfo>, EngineError> {
+        Err(self.unsupported("models"))
+    }
+
+    /// Every permission preset this engine offers.
+    async fn permissions(&self) -> Result<Vec<PermissionPreset>, EngineError> {
+        Err(self.unsupported("permissions"))
+    }
+
+    /// Start a new session in a directory.
+    async fn create(&self, _cwd: Option<&str>) -> Result<SessionKey, EngineError> {
+        Err(self.unsupported("create"))
+    }
+
+    /// Give a session a name.
+    async fn rename(&self, _session: &SessionKey, _title: &str) -> Result<(), EngineError> {
+        Err(self.unsupported("rename"))
+    }
+
+    /// Hide a session without deleting it.
+    async fn archive(
+        &self,
+        _session: &SessionKey,
+        _stop_activity: bool,
+    ) -> Result<(), EngineError> {
+        Err(self.unsupported("archive"))
+    }
+
+    /// The host's own workspace grouping.
+    async fn workspaces(&self) -> Result<Vec<Workspace>, EngineError> {
+        Err(self.unsupported("workspaces"))
+    }
+
+    /// The failure for a capability this adapter does not have.
+    fn unsupported(&self, feature: &'static str) -> EngineError {
+        EngineError::Unsupported {
+            engine: self.id(),
+            feature,
+        }
+    }
 }

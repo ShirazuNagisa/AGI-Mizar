@@ -259,6 +259,93 @@ impl Core {
     pub async fn dispatch(&self, command: Command) -> CommandResponse {
         match command {
             Command::State => CommandResponse::ok(self.snapshot()),
+            Command::Activity { session, limit } => {
+                let Some(engine) = self.engine(session.engine) else {
+                    return CommandResponse::error("UNKNOWN_ENGINE", "no such engine");
+                };
+                match engine.activity(&session, limit.unwrap_or(120)).await {
+                    Ok(entries) => CommandResponse::ok(entries),
+                    Err(error) => failure(error),
+                }
+            }
+            Command::Stats { session } => {
+                let Some(engine) = self.engine(session.engine) else {
+                    return CommandResponse::error("UNKNOWN_ENGINE", "no such engine");
+                };
+                match engine.stats(&session).await {
+                    Ok(stats) => CommandResponse::ok(stats),
+                    Err(error) => failure(error),
+                }
+            }
+            Command::Deliverables { session } => {
+                let Some(engine) = self.engine(session.engine) else {
+                    return CommandResponse::error("UNKNOWN_ENGINE", "no such engine");
+                };
+                match engine.deliverables(&session).await {
+                    Ok(files) => CommandResponse::ok(files),
+                    Err(error) => failure(error),
+                }
+            }
+            Command::Models { engine: id } => {
+                let Some(engine) = self.engine(id) else {
+                    return CommandResponse::error("UNKNOWN_ENGINE", "no such engine");
+                };
+                match engine.models().await {
+                    Ok(models) => CommandResponse::ok(models),
+                    Err(error) => failure(error),
+                }
+            }
+            Command::Permissions { engine: id } => {
+                let Some(engine) = self.engine(id) else {
+                    return CommandResponse::error("UNKNOWN_ENGINE", "no such engine");
+                };
+                match engine.permissions().await {
+                    Ok(presets) => CommandResponse::ok(presets),
+                    Err(error) => failure(error),
+                }
+            }
+            Command::Create { engine: id, cwd } => {
+                let Some(engine) = self.engine(id) else {
+                    return CommandResponse::error("UNKNOWN_ENGINE", "no such engine");
+                };
+                match engine.create(cwd.as_deref()).await {
+                    Ok(session) => CommandResponse::ok(session),
+                    Err(error) => failure(error),
+                }
+            }
+            Command::Rename { session, title } => {
+                let Some(engine) = self.engine(session.engine) else {
+                    return CommandResponse::error("UNKNOWN_ENGINE", "no such engine");
+                };
+                match engine.rename(&session, &title).await {
+                    Ok(()) => CommandResponse::done(),
+                    Err(error) => failure(error),
+                }
+            }
+            Command::Archive {
+                session,
+                stop_activity,
+            } => {
+                let Some(engine) = self.engine(session.engine) else {
+                    return CommandResponse::error("UNKNOWN_ENGINE", "no such engine");
+                };
+                match engine
+                    .archive(&session, stop_activity.unwrap_or(false))
+                    .await
+                {
+                    Ok(()) => CommandResponse::done(),
+                    Err(error) => failure(error),
+                }
+            }
+            Command::Workspaces { engine: id } => {
+                let Some(engine) = self.engine(id) else {
+                    return CommandResponse::error("UNKNOWN_ENGINE", "no such engine");
+                };
+                match engine.workspaces().await {
+                    Ok(workspaces) => CommandResponse::ok(workspaces),
+                    Err(error) => failure(error),
+                }
+            }
             Command::Pairing { refresh } => {
                 let source = self
                     .pairing

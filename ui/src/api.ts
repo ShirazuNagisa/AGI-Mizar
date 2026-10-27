@@ -111,6 +111,43 @@ export interface StateSnapshot {
   interactions: Interaction[]
 }
 
+export interface ActivityEntry {
+  id: string
+  seq: number
+  at: number
+  kind: 'thinking' | 'command' | 'output' | 'tool'
+  title: string
+  text: string
+}
+
+export interface SessionStats {
+  turns: number
+  steps: number
+  llm_ms: number
+  tool_ms: number
+  input_tokens: number
+  output_tokens: number
+}
+
+export interface DeliveredFile {
+  path: string
+  name: string
+  description: string | null
+}
+
+export interface ModelInfo {
+  id: string
+  label: string
+  provider: string | null
+  reasoning: string[]
+}
+
+export interface PermissionPreset {
+  id: string
+  label: string
+  description: string | null
+}
+
 export interface PairingView {
   code: string
   uri: string
@@ -127,6 +164,15 @@ export type Command =
   | { op: 'answer'; id: string; outcome?: string; answers?: unknown[] }
   | { op: 'set_model'; session: string; model: string }
   | { op: 'set_permission'; session: string; preset: string }
+  | { op: 'activity'; session: string; limit?: number }
+  | { op: 'stats'; session: string }
+  | { op: 'deliverables'; session: string }
+  | { op: 'models'; engine: EngineId }
+  | { op: 'permissions'; engine: EngineId }
+  | { op: 'create'; engine: EngineId; cwd?: string }
+  | { op: 'rename'; session: string; title: string }
+  | { op: 'archive'; session: string; stop_activity?: boolean }
+  | { op: 'workspaces'; engine: EngineId }
   | { op: 'pairing'; refresh: boolean }
   | { op: 'ping' }
 

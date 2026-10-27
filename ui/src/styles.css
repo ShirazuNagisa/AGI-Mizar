@@ -638,3 +638,80 @@ button {
 .group .count {
   font-variant-numeric: tabular-nums;
 }
+
+/* ---------- details: meter, pickers, activity ---------- */
+
+.meter {
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+  overflow: hidden;
+}
+
+.meter > div {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 200ms ease;
+}
+
+.picker {
+  width: 100%;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: inherit;
+  font: inherit;
+  padding: 5px 8px;
+  border-radius: 8px;
+  outline: none;
+}
+
+.picker:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.feed {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 6px;
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+}
+
+.feed-row {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.feed-title {
+  flex: none;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  color: var(--text-2);
+}
+
+.feed-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
+.feed-row[data-kind='command'] .feed-title {
+  color: var(--accent);
+}
+
+.feed-row[data-kind='output'] .feed-text {
+  color: var(--text-2);
+}

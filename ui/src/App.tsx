@@ -1,5 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Kernel, type ApiEvent, type EngineId, type Interaction, type TurnRecord, type Session, type StateSnapshot } from './api'
+import {
+  Kernel,
+  type ActivityEntry,
+  type ApiEvent,
+  type DeliveredFile,
+  type EngineId,
+  type Interaction,
+  type ModelInfo,
+  type PermissionPreset,
+  type Session,
+  type SessionStats,
+  type StateSnapshot,
+  type TurnRecord,
+} from './api'
 import { SessionList } from './components/SessionList'
 import { Conversation } from './components/Conversation'
 import { Inspector } from './components/Inspector'
@@ -18,6 +31,11 @@ export function App() {
   const [error, setError] = useState<string | null>(null)
   const [live, setLive] = useState(false)
   const [pairing, setPairing] = useState(false)
+  const [stats, setStats] = useState<SessionStats | null>(null)
+  const [activity, setActivity] = useState<ActivityEntry[]>([])
+  const [deliverables, setDeliverables] = useState<DeliveredFile[]>([])
+  const [models, setModels] = useState<ModelInfo[]>([])
+  const [permissions, setPermissions] = useState<PermissionPreset[]>([])
   const selectedRef = useRef<string | null>(null)
 
   selectedRef.current = selected
@@ -105,6 +123,58 @@ export function App() {
     }
   }, [selected])
 
+  const running = active_is_running(snapshot, selected)
+
+  useEffect(() => {
+    if (selected === null) {
+      setStats(null)
+      setActivity([])
+      setDeliverables([])
+      setModels([])
+      setPermissions([])
+      return
+    }
+    const engine = selected.split(':')[0] as EngineId
+    let cancelled = false
+    void kernel.send<SessionStats>({ op: 'stats', session: selected }).then((value) => {
+      if (!cancelled) setStats(value)
+    }).catch(() => {})
+    void kernel.send<DeliveredFile[]>({ op: 'deliverables', session: selected }).then((value) => {
+      if (!cancelled) setDeliverables(value)
+    }).catch(() => {})
+    void kernel.send<ModelInfo[]>({ op: 'models', engine }).then((value) => {
+      if (!cancelled) setModels(value)
+    }).catch(() => setModels([]))
+    void kernel.send<PermissionPreset[]>({ op: 'permissions', engine }).then((value) => {
+      if (!cancelled) setPermissions(value)
+    }).catch(() => setPermissions([]))
+    return () => {
+      cancelled = true
+    }
+  }, [selected])
+
+  useEffect(() => {
+    if (selected === null || !running) {
+      setActivity([])
+      return
+    }
+    let cancelled = false
+    const poll = () => {
+      void kernel
+        .send<ActivityEntry[]>({ op: 'activity', session: selected, limit: 120 })
+        .then((value) => {
+          if (!cancelled) setActivity(value)
+        })
+        .catch(() => {})
+    }
+    poll()
+    const timer = setInterval(poll, 1500)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [selected, running])
+
   const sessions = useMemo(() => {
     if (snapshot === null) return []
     return snapshot.sessions.filter(
@@ -159,6 +229,22 @@ export function App() {
         </div>
         <span className="spacer" />
         <span className="hint">{live ? 'live' : 'reconnecting…'}</span>
+        <button
+          className="btn ghost"
+          onClick={() =>
+            act(async () => {
+              const cwd = active?.cwd ?? undefined
+              const created = await kernel.send<string>({
+                op: 'create',
+                engine: (filter === 'all' ? 'dsh' : filter) as EngineId,
+                cwd,
+              })
+              setSelected(created)
+            })
+          }
+        >
+          New session
+        </button>
         <button className="btn ghost" onClick={() => setPairing(true)}>
           Pair a phone
         </button>
@@ -195,6 +281,32 @@ export function App() {
           <aside className="panel">
             <Inspector
               session={active}
+              stats={stats}
+              activity={activity}
+              deliverables={deliverables}
+              models={models}
+              permissions={permissions}
+              onModel={(id) => {
+                if (active === null) return
+                act(() => kernel.send({ op: 'set_model', session: active.key, model: id }))
+              }}
+              onPermission={(id) => {
+                if (active === null) return
+                act(() => kernel.send({ op: 'set_permission', session: active.key, preset: id }))
+              }}
+              onRename={() => {
+                if (active === null) return
+                const title = window.prompt('Rename this session', active.title ?? '')
+                if (title !== null && title.trim() !== '') {
+                  act(() => kernel.send({ op: 'rename', session: active.key, title: title.trim() }))
+                }
+              }}
+              onArchive={() => {
+                if (active === null) return
+                if (window.confirm('Archive this session? It stays on the computer.')) {
+                  act(() => kernel.send({ op: 'archive', session: active.key }))
+                }
+              }}
               interactions={waiting.filter(
                 (entry) => entry.session === active?.key || entry.session === null,
               )}
@@ -237,6 +349,12 @@ function EngineTab(props: {
       <span className="count">{props.offline ? '—' : props.count}</span>
     </button>
   )
+}
+
+/** Whether the selected session is running, for the activity poll. */
+function active_is_running(snapshot: StateSnapshot | null, key: string | null): boolean {
+  if (snapshot === null || key === null) return false
+  return snapshot.sessions.some((session) => session.key === key && session.running)
 }
 
 function labelOf(engine: EngineId): string {
