@@ -146,14 +146,32 @@ impl MizarServer {
         addresses
     }
 
+    /// The tunnel's base URL for this room, when one is known.
+    fn relay_base_url(&self) -> Option<String> {
+        let guard = self
+            .relay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.as_ref()?.phone_base_url()
+    }
+
     /// The `mizar://pair?...` URI for a code, using the address a phone can reach.
+    ///
+    /// Two routes when there are two: the LAN address a phone on this network
+    /// can dial, and the relay room that works from anywhere else.
     pub fn pairing_uri(&self, code: &PairingCode) -> String {
         let host = self
             .addresses()
             .into_iter()
             .next()
             .unwrap_or_else(|| format!("127.0.0.1:{}", self.port()));
-        crate::frames::pairing_uri(&host, &code.display, &self.store.host_name())
+        let relay = self.relay_base_url();
+        crate::frames::pairing_uri(
+            &host,
+            relay.as_deref(),
+            &code.display,
+            &self.store.host_name(),
+        )
     }
 
     /// The code to show a phone, its URI, and a QR of that URI.

@@ -317,9 +317,22 @@ pub struct SessionRow {
 }
 
 /// Build the pairing URI the desktop shows as a QR code.
-pub fn pairing_uri(host_port: &str, code: &str, host_name: &str) -> String {
+///
+/// A phone that is not on this network cannot dial `h` at all, so when the
+/// tunnel has a room the URI also carries `u`, the relay base URL for that room.
+/// Both are offered: an app on the same network takes the short direct route,
+/// and one anywhere else falls through to the tunnel.
+pub fn pairing_uri(
+    host_port: &str,
+    relay_base: Option<&str>,
+    code: &str,
+    host_name: &str,
+) -> String {
+    let relay = relay_base
+        .map(|base| format!("u={}&", url_encode(base)))
+        .unwrap_or_default();
     format!(
-        "{PAIR_SCHEME}://pair?h={}&c={}&n={}&v={PROTOCOL_VERSION}",
+        "{PAIR_SCHEME}://pair?h={}&{relay}c={}&n={}&v={PROTOCOL_VERSION}",
         url_encode(host_port),
         url_encode(code),
         url_encode(host_name)
@@ -399,10 +412,24 @@ mod tests {
 
     #[test]
     fn builds_a_pairing_uri_with_an_encoded_host() {
-        let uri = pairing_uri("192.168.1.10:19392", "K7QP-3M2X", "Mac mini");
+        let uri = pairing_uri("192.168.1.10:19392", None, "K7QP-3M2X", "Mac mini");
         assert_eq!(
             uri,
             "mizar://pair?h=192.168.1.10%3A19392&c=K7QP-3M2X&n=Mac%20mini&v=1"
+        );
+    }
+
+    #[test]
+    fn a_tunnel_adds_the_route_a_phone_off_this_network_can_take() {
+        let uri = pairing_uri(
+            "192.168.1.10:19392",
+            Some("https://relay.example.com/r/ABCD1234"),
+            "K7QP-3M2X",
+            "Mac mini",
+        );
+        assert_eq!(
+            uri,
+            "mizar://pair?h=192.168.1.10%3A19392&u=https%3A%2F%2Frelay.example.com%2Fr%2FABCD1234&c=K7QP-3M2X&n=Mac%20mini&v=1"
         );
     }
 
