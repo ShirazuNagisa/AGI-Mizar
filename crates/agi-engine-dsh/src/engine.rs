@@ -1323,9 +1323,27 @@ impl Engine for DshEngine {
 
     async fn fork(&self, session: &SessionKey, at_seq: i64) -> Result<SessionKey, EngineError> {
         if at_seq < 0 {
-            return Err(EngineError::upstream(
-                "a branch boundary is a log position, not a negative number",
-            ));
+            return Err(EngineError::Upstream {
+                code: "MALFORMED_FRAME".to_string(),
+                message: "a branch boundary is a log position, not a negative number".to_string(),
+                details: None,
+            });
+        }
+        // The boundary has to be a completed turn, and this is checked here
+        // rather than trusted to DSH: a stale client that remembers an old seq
+        // would otherwise branch a conversation in the middle of a step, and the
+        // fork would look successful.
+        let page = self.records(session, 1000, Some(at_seq + 1)).await?;
+        match page.iter().find(|record| record.seq == at_seq) {
+            Some(record) if record.kind == RecordKind::TurnEnd => {}
+            _ => {
+                return Err(EngineError::Upstream {
+                    code: "MALFORMED_FRAME".to_string(),
+                    message: "the selected turn boundary could not be verified; refresh the conversation and try again"
+                        .to_string(),
+                    details: None,
+                });
+            }
         }
         let value = self
             .call(
@@ -1339,6 +1357,35 @@ impl Engine for DshEngine {
             .filter(|id| !id.is_empty())
             .ok_or_else(|| EngineError::upstream("session/fork returned no session id"))?;
         Ok(SessionKey::new(session.engine, id))
+    }
+
+    async fn session_cwd(&self, session: &SessionKey) -> Result<String, EngineError> {
+        if session.engine != EngineId::Dsh {
+            return Err(EngineError::UnknownSession(session.clone()));
+        }
+        // A file preview asks for the working directory once per slice, and
+        // `sessions()` re-reads the whole list on the host every time — the
+        // slowest call this engine makes. The cache is kept current by the event
+        // feed, so it answers first, and the network only sees the question once.
+        if let Some(cwd) = {
+            let inner = self.inner();
+            inner
+                .sessions
+                .get(&session.id)
+                .and_then(|row| row.cwd.clone())
+        } {
+            return Ok(cwd);
+        }
+        let sessions = self.sessions().await?;
+        sessions
+            .into_iter()
+            .find(|candidate| candidate.key == *session)
+            .and_then(|candidate| candidate.cwd)
+            .ok_or_else(|| EngineError::Upstream {
+                code: "FILE_FORBIDDEN".to_string(),
+                message: "this session has no working directory to read from".to_string(),
+                details: None,
+            })
     }
 
     async fn deliverables(&self, session: &SessionKey) -> Result<Vec<DeliveredFile>, EngineError> {

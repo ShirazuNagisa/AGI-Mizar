@@ -234,13 +234,13 @@ pub trait Engine: Send + Sync {
         session: &SessionKey,
         path: &str,
     ) -> Result<FilePreview, EngineError> {
-        let cwd = self.session_cwd(session).await?;
+        let cwd = self.session_cwd(session).await.map_err(refused_cwd)?;
         read_within(std::path::Path::new(&cwd), path)
     }
 
     /// What a path is, as the phone's preview page asks before reading.
     async fn file_stat(&self, session: &SessionKey, path: &str) -> Result<FileStat, EngineError> {
-        let cwd = self.session_cwd(session).await?;
+        let cwd = self.session_cwd(session).await.map_err(refused_cwd)?;
         stat_within(std::path::Path::new(&cwd), path)
     }
 
@@ -252,7 +252,7 @@ pub trait Engine: Send + Sync {
         offset: u64,
         length: u64,
     ) -> Result<FileSlice, EngineError> {
-        let cwd = self.session_cwd(session).await?;
+        let cwd = self.session_cwd(session).await.map_err(refused_cwd)?;
         slice_within(std::path::Path::new(&cwd), path, offset, length)
     }
 
@@ -281,10 +281,10 @@ pub trait Engine: Send + Sync {
 }
 
 /// The refusal for a path the fence does not allow.
-fn forbidden(path: &str) -> EngineError {
+fn forbidden(path: &str, reason: String) -> EngineError {
     EngineError::Upstream {
         code: "FILE_FORBIDDEN".to_string(),
-        message: format!("{path} is outside the session's directory"),
+        message: format!("{path}: {reason}"),
         details: None,
     }
 }
@@ -357,9 +357,12 @@ pub fn read_within(cwd: &std::path::Path, path: &str) -> Result<FilePreview, Eng
 /// `/private/var`, and joining the raw cwd would compare two spellings of the
 /// same directory and call every file outside.
 fn resolve_within(cwd: &std::path::Path, path: &str) -> Result<std::path::PathBuf, EngineError> {
-    let root = cwd
-        .canonicalize()
-        .map_err(|error| EngineError::upstream(format!("{}: {error}", cwd.display())))?;
+    let root = cwd.canonicalize().map_err(|error| {
+        forbidden(
+            cwd.display().to_string().as_str(),
+            format!("the session's working directory cannot be resolved ({error})"),
+        )
+    })?;
     let candidate = if std::path::Path::new(path).is_absolute() {
         std::path::PathBuf::from(path)
     } else {
@@ -370,26 +373,48 @@ fn resolve_within(cwd: &std::path::Path, path: &str) -> Result<std::path::PathBu
     // point inside" for a file that may not exist, so a `../` is refused as a
     // fence violation rather than as a missing file. The canonical one is what
     // catches a symlink inside the directory that resolves outside it.
-    if !lexical_normalize(&candidate).starts_with(&root) {
-        return Err(forbidden(path));
+    //
+    // The written form of the root counts too: a working directory recorded as
+    // `/tmp/proj` and a canonical root of `/private/tmp/proj` are the same
+    // directory, and an absolute path the model wrote in the first spelling is
+    // not an escape.
+    let written_root = lexical_normalize(cwd);
+    let lexical = lexical_normalize(&candidate);
+    if !lexical.starts_with(&root) && !lexical.starts_with(&written_root) {
+        return Err(forbidden(
+            path,
+            "it is outside the session's directory".to_string(),
+        ));
     }
     let resolved = candidate
         .canonicalize()
         .map_err(|error| unknown(path, &error))?;
     if !resolved.starts_with(&root) {
-        return Err(forbidden(path));
+        return Err(forbidden(
+            path,
+            "it is outside the session's directory".to_string(),
+        ));
     }
     let metadata = std::fs::metadata(&resolved).map_err(|error| unknown(path, &error))?;
     if !metadata.is_file() {
-        return Err(forbidden(path));
+        return Err(forbidden(path, "it is not a regular file".to_string()));
     }
     // A preview is a read of whatever the model pointed at, and "whatever" must
     // not include the operator's credentials because a sentence in a summary
     // asked for them.
     if denied_name(&file_name(&resolved, path)) {
-        return Err(forbidden(path));
+        return Err(forbidden(path, "this name is not readable".to_string()));
     }
     Ok(resolved)
+}
+
+/// The refusal for a session whose files cannot be read at all.
+fn refused_cwd(_error: EngineError) -> EngineError {
+    EngineError::Upstream {
+        code: "FILE_FORBIDDEN".to_string(),
+        message: "this session has no working directory to read from".to_string(),
+        details: None,
+    }
 }
 
 /// The file's own name, falling back to the path as written.
@@ -471,6 +496,9 @@ fn media_type(name: &str) -> (&'static str, bool) {
 pub fn stat_within(cwd: &std::path::Path, path: &str) -> Result<FileStat, EngineError> {
     let resolved = resolve_within(cwd, path)?;
     let metadata = std::fs::metadata(&resolved).map_err(|error| unknown(path, &error))?;
+    if metadata.len() > MAX_FILE_BYTES {
+        return Err(too_large(path, metadata.len()));
+    }
     let name = file_name(&resolved, path);
     let (media, previewable) = media_type(&name);
     let modified_at = metadata
@@ -651,5 +679,74 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let error = stat_within(dir.path(), "missing.md").unwrap_err();
         assert_eq!(error.code(), "FILE_UNKNOWN");
+    }
+
+    #[test]
+    fn the_credential_list_is_case_insensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [".ENV", "SERVER.PEM", "Id_RSA"] {
+            std::fs::write(dir.path().join(name), "secret").unwrap();
+            assert_eq!(
+                read_within(dir.path(), name).unwrap_err().code(),
+                "FILE_FORBIDDEN",
+                "{name} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_beyond_the_ceiling_is_refused_before_it_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.bin");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_FILE_BYTES + 1).unwrap();
+        drop(file);
+        // A stat is the first thing the app asks; answering it with the size and
+        // then failing the first slice costs a round trip and a progress bar
+        // that never moves.
+        assert_eq!(
+            stat_within(dir.path(), "huge.bin").unwrap_err().code(),
+            "FILE_TOO_LARGE"
+        );
+        assert_eq!(
+            slice_within(dir.path(), "huge.bin", 0, 16)
+                .unwrap_err()
+                .code(),
+            "FILE_TOO_LARGE"
+        );
+    }
+
+    #[test]
+    fn an_empty_file_is_one_empty_slice_that_says_it_ended() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("empty.txt"), []).unwrap();
+        let slice = slice_within(dir.path(), "empty.txt", 0, 16).unwrap();
+        assert_eq!(slice.length, 0);
+        assert!(slice.data.is_empty());
+        assert!(slice.eof);
+    }
+
+    #[test]
+    fn a_working_directory_reached_through_a_symlink_still_reads() {
+        // `/tmp` is `/private/tmp` on macOS, and a session recorded with either
+        // spelling must not turn its own files into escapes.
+        let real = tempfile::tempdir().unwrap();
+        std::fs::write(real.path().join("a.txt"), "hi").unwrap();
+        #[cfg(target_os = "macos")]
+        let link = std::path::PathBuf::from("/tmp")
+            .join(format!("agi-engine-link-{}", std::process::id()));
+        #[cfg(not(target_os = "macos"))]
+        let link = real.path().join("nested-link");
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(real.path(), &link).unwrap();
+        }
+        let preview = read_within(&link, "a.txt");
+        #[cfg(target_os = "macos")]
+        let _ = std::fs::remove_file(&link);
+        if cfg!(target_os = "macos") {
+            assert_eq!(preview.unwrap().text.as_deref(), Some("hi"));
+        }
     }
 }

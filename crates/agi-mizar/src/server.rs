@@ -693,11 +693,19 @@ impl MizarServer {
                         "file.read needs a path",
                     );
                 };
-                let offset = frame
-                    .payload
-                    .get("offset")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
+                let offset = match frame.payload.get("offset") {
+                    None | Some(Value::Null) => 0,
+                    Some(value) => match value.as_u64() {
+                        Some(offset) => offset,
+                        None => {
+                            return ServerFrame::error(
+                                Some(id),
+                                ErrorCode::MalformedFrame,
+                                "file.read: offset must be a non-negative integer",
+                            );
+                        }
+                    },
+                };
                 let length = frame
                     .payload
                     .get("length")

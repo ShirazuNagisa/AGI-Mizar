@@ -191,6 +191,9 @@ impl ErrorCode {
             "FILE_UNKNOWN" => Self::FileUnknown,
             "FILE_FORBIDDEN" => Self::FileForbidden,
             "FILE_TOO_LARGE" => Self::FileTooLarge,
+            // A caller's mistake — an offset past the end, a boundary that is
+            // not a turn end — is the client's to fix, not a remote failure.
+            "FILE_SLICE_INVALID" | "MALFORMED_FRAME" => Self::MalformedFrame,
             _ => Self::RemoteError,
         }
     }
