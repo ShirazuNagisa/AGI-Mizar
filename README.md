@@ -3,10 +3,11 @@
 One desktop application that hosts three coding agents — **DSH**, **Claude Code** and **Codex** —
 and lets a phone drive all of them through one connection.
 
-This repository currently contains the **backend kernel**. There is no window yet: the kernel runs,
-serves its API, accepts the DSH plugin, drives a Codex app-server, and reads and answers Claude Code
-through transcripts and hooks, and serves the shipped phone app over Mizar v1 — pairing, device
-tokens, and the conversation methods. The React front end and the Tauri shell come next.
+This repository contains the whole desktop application: a kernel that serves its API, accepts the DSH
+plugin, drives a Codex app-server, reads and answers Claude Code through transcripts and hooks, and
+serves the shipped phone app over Mizar v1 — pairing, device tokens, and the conversation methods —
+plus a React front end and a Tauri window that loads the kernel's own page. There is no public
+installer yet; see [打包](#打包).
 
 ```
 手机 App ──▶ AGI Mizar ──┬──▶ DSH         （helper plugin 拨回环 WS 进来）
@@ -23,7 +24,7 @@ tokens, and the conversation methods. The React front end and the Tauri shell co
 | M2 | Codex 引擎（app-server JSON-RPC、审批、历史投影） | ✅ |
 | M3 | Claude Code 引擎（transcript 解析、hooks、`claude -p`） | ✅ |
 | M4 | `dsh-mizar` 0.9.0 联调 | 🔶 插件侧已完成，等真机联调 |
-| M5 | Mizar 服务端：**局域网配对 + 核心方法 + 中继隧道** ✅；推送 / 上传 / 文件预览 ⬜ |
+| M5 | Mizar 服务端：**局域网配对 + 核心方法 + 中继隧道** ✅；桌面端文件预览 ✅；手机 `file.*` / 推送 / 上传 ⬜ |
 | M6 | Tauri 壳 ✅；打包签名脚本已备，需装 `tauri-cli` |
 | M7 | React 前端（会话列表 / 对话 / 审批 / 详情） | ✅ |
 
@@ -39,7 +40,10 @@ crates/
 ├─ agi-hook-shim/    Claude Code hooks 调用的无 GUI 小二进制
 ├─ agi-mizar/        手机侧服务端：配对、设备、Mizar v1 WebSocket
 ├─ agi-core/         内核：状态聚合、本地 API、端点文件
+├─ agi-boot/         daemon 与窗口共用的启动序列
+├─ agi-app/          Tauri 壳：开窗并把端口 / 令牌交给页面
 └─ agi-daemon/       无窗口运行内核（开发 / 诊断 / 无头部署）
+ui/                  React 前端（构建产物在编译期嵌进内核）
 docs/                架构与协议
 protocol/            Mizar v1 黄金帧（手机协议，未来服务端用）
 ```
@@ -47,7 +51,7 @@ protocol/            Mizar v1 黄金帧（手机协议，未来服务端用）
 ## 跑起来
 
 ```sh
-cargo test                     # 100 个测试
+cargo test                     # 112 个测试
 cargo run -p agi-daemon        # 内核，无窗口
 cargo run -p agi-app           # 窗口（会打印它加载的地址）
 
