@@ -168,6 +168,9 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
         tokio::spawn(async move { relay.run().await });
     }
 
+    // The window needs a code to show; the kernel asks whoever is composed.
+    core.attach_pairing(Arc::clone(&mizar) as Arc<dyn agi_core::PairingSource>);
+
     let pairing_code = mizar.issue_code();
     let pairing_uri = mizar.pairing_uri(&pairing_code);
 

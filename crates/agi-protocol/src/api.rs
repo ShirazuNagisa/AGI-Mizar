@@ -73,8 +73,29 @@ pub enum Command {
     SetModel { session: SessionKey, model: String },
     /// Choose a permission preset for a session.
     SetPermission { session: SessionKey, preset: String },
+    /// The pairing code to show a phone, and a QR for its URI.
+    Pairing {
+        /// Issue a fresh code instead of returning the one already on screen.
+        #[serde(default)]
+        refresh: bool,
+    },
     /// Liveness probe, used by the shell before it shows a window.
     Ping,
+}
+
+/// What the window draws to pair a phone.
+#[derive(Debug, Clone, Serialize)]
+pub struct PairingView {
+    /// The code as a person reads it, `K7QP-3M2X`.
+    pub code: String,
+    /// `mizar://pair?...`, which the QR encodes.
+    pub uri: String,
+    /// Every address a phone on this network could dial, best first.
+    pub addresses: Vec<String>,
+    /// An SVG QR of `uri`, drawn by the host so the window needs no library.
+    pub svg: Option<String>,
+    /// Epoch milliseconds after which the code is dead.
+    pub expires_at: i64,
 }
 
 /// The answer to one command.

@@ -133,13 +133,59 @@ impl MizarServer {
         code
     }
 
+    /// Every address a phone could dial, `host:port`, best first.
+    pub fn addresses(&self) -> Vec<String> {
+        let port = self.port();
+        let mut addresses: Vec<String> = crate::store::local_addresses()
+            .into_iter()
+            .map(|address| format!("{address}:{port}"))
+            .collect();
+        // Loopback last, and only as a fallback: a phone cannot dial it, but a
+        // simulator on this machine can.
+        addresses.push(format!("127.0.0.1:{port}"));
+        addresses
+    }
+
     /// The `mizar://pair?...` URI for a code, using the address a phone can reach.
     pub fn pairing_uri(&self, code: &PairingCode) -> String {
-        let port = self.port();
-        let host = crate::store::local_address()
-            .map(|address| format!("{address}:{port}"))
-            .unwrap_or_else(|| format!("127.0.0.1:{port}"));
+        let host = self
+            .addresses()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| format!("127.0.0.1:{}", self.port()));
         crate::frames::pairing_uri(&host, &code.display, &self.store.host_name())
+    }
+
+    /// The code to show a phone, its URI, and a QR of that URI.
+    ///
+    /// `refresh` issues a new code; otherwise the one already showing is reused,
+    /// because a window that re-renders must not invalidate the code somebody is
+    /// in the middle of typing.
+    pub fn pairing_view(&self, refresh: bool) -> agi_protocol::api::PairingView {
+        let code = if refresh {
+            self.issue_code()
+        } else {
+            self.code()
+                .as_ref()
+                .map(|active| active.code.clone())
+                .unwrap_or_else(|| self.issue_code())
+        };
+        let uri = self.pairing_uri(&code);
+        let svg = qrcode::QrCode::new(uri.as_bytes()).ok().map(|qr| {
+            qr.render::<qrcode::render::svg::Color>()
+                .min_dimensions(180, 180)
+                .dark_color(qrcode::render::svg::Color("#1c1c1e"))
+                .light_color(qrcode::render::svg::Color("#ffffff"))
+                .build()
+        });
+
+        agi_protocol::api::PairingView {
+            code: code.display.clone(),
+            uri,
+            addresses: self.addresses(),
+            svg,
+            expires_at: code.expires_at,
+        }
     }
 
     /// Bind the listener and start serving.
@@ -187,13 +233,7 @@ impl MizarServer {
 
         match frame.kind.as_str() {
             "host.info" => {
-                let port = self.port();
-                let addresses: Vec<String> = crate::store::local_address()
-                    .map(|address| vec![format!("{address}:{port}")])
-                    .unwrap_or_default()
-                    .into_iter()
-                    .chain(std::iter::once(format!("127.0.0.1:{port}")))
-                    .collect();
+                let addresses = self.addresses();
                 ServerFrame::ok(
                     id,
                     json!({
@@ -806,6 +846,12 @@ fn os_name() -> &'static str {
 /// Wrap a frame as an HTTP response body.
 fn frame_response(frame: ServerFrame) -> Response {
     Json(serde_json::to_value(frame).unwrap_or(Value::Null)).into_response()
+}
+
+impl agi_core::PairingSource for MizarServer {
+    fn pairing_view(&self, refresh: bool) -> agi_protocol::api::PairingView {
+        MizarServer::pairing_view(self, refresh)
+    }
 }
 
 #[cfg(test)]

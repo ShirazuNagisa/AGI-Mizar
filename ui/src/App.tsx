@@ -3,6 +3,7 @@ import { Kernel, type ApiEvent, type EngineId, type Interaction, type TurnRecord
 import { SessionList } from './components/SessionList'
 import { Conversation } from './components/Conversation'
 import { Inspector } from './components/Inspector'
+import { Pairing } from './components/Pairing'
 
 const kernel = new Kernel()
 
@@ -16,6 +17,7 @@ export function App() {
   const [inspector, setInspector] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [live, setLive] = useState(false)
+  const [pairing, setPairing] = useState(false)
   const selectedRef = useRef<string | null>(null)
 
   selectedRef.current = selected
@@ -160,6 +162,9 @@ export function App() {
         </div>
         <span className="spacer" />
         <span className="hint">{live ? 'live' : 'reconnecting…'}</span>
+        <button className="btn ghost" onClick={() => setPairing(true)}>
+          Pair a phone
+        </button>
         <button className="btn ghost" onClick={() => setInspector((open) => !open)}>
           {inspector ? 'Hide details' : 'Details'}
         </button>
@@ -201,6 +206,13 @@ export function App() {
           </aside>
         ) : null}
       </div>
+
+      {pairing ? (
+        <Pairing
+          onClose={() => setPairing(false)}
+          request={(refresh) => kernel.send({ op: 'pairing', refresh })}
+        />
+      ) : null}
 
       {error !== null ? (
         <div className="notice" style={{ position: 'fixed', left: 16, right: 16, bottom: 16 }}>

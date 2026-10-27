@@ -246,14 +246,80 @@ pub fn host_name() -> String {
         .unwrap_or_else(|| "this computer".to_string())
 }
 
-/// The address a phone on the same network would dial.
+/// Every address a phone on this network could dial, best first.
 ///
-/// Found by asking the OS which local address it would use to reach the outside
-/// world. `UdpSocket::connect` sends nothing; it only resolves the route.
-pub fn local_address() -> Option<std::net::IpAddr> {
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("8.8.8.8:80").ok()?;
-    Some(socket.local_addr().ok()?.ip())
+/// **Not** "the address the OS would use to reach the internet": on a machine
+/// with a VPN that answer is the tunnel's, and a phone cannot dial a tunnel
+/// endpoint. Measured here, that trick returned `198.18.0.1` — the benchmark
+/// range a tunnel had taken over — while the real interface was `10.14.217.149`
+/// on `en1`.
+///
+/// So interfaces are enumerated and ranked:
+///
+/// - only IPv4, only `UP`, never loopback;
+/// - never a point-to-point interface (tunnels: `utun`, `tun`, `tap`, `gif`,
+///   `stf`, `ppp`) or a peer-to-peer one (`awdl`, `llw`) — those are for other
+///   Apple devices, not for a phone on the Wi-Fi;
+/// - never the benchmark ranges `198.18.0.0/15`, nor link-local `169.254/16`;
+/// - private addresses rank above public ones, and `192.168` above `10` above
+///   `172.16/12`, because that is the order a home network is usually described
+///   in.
+pub fn local_addresses() -> Vec<std::net::IpAddr> {
+    use std::net::IpAddr;
+
+    let Ok(interfaces) = if_addrs::get_if_addrs() else {
+        return Vec::new();
+    };
+
+    let mut found: Vec<(u8, IpAddr)> = Vec::new();
+    for interface in interfaces {
+        let name = interface.name.to_ascii_lowercase();
+        if is_tunnel(&name) {
+            continue;
+        }
+        let IpAddr::V4(address) = interface.addr.ip() else {
+            continue;
+        };
+        if address.is_loopback() || address.is_link_local() || is_benchmark(address.octets()) {
+            continue;
+        }
+        found.push((rank(address.octets()), IpAddr::V4(address)));
+    }
+
+    found.sort_by_key(|(rank, _)| *rank);
+    found.dedup_by_key(|(_, address)| *address);
+    found.into_iter().map(|(_, address)| address).collect()
+}
+
+/// Whether an interface name belongs to a tunnel or a peer-to-peer link.
+fn is_tunnel(name: &str) -> bool {
+    [
+        "utun", "tun", "tap", "gif", "stf", "ppp", "awdl", "llw", "ipsec", "bridge",
+    ]
+    .iter()
+    .any(|prefix| name.starts_with(prefix))
+}
+
+/// The `198.18.0.0/15` benchmark range, which tunnels and sandboxes occupy.
+fn is_benchmark(octets: [u8; 4]) -> bool {
+    octets[0] == 198 && (octets[1] == 18 || octets[1] == 19)
+}
+
+/// Lower is better.
+fn rank(octets: [u8; 4]) -> u8 {
+    match octets {
+        // Home networks first: they are what a phone is most likely on.
+        [192, 168, ..] => 0,
+        [10, ..] => 1,
+        [172, second, ..] if (16..=31).contains(&second) => 2,
+        // A public address can still be the right answer on a corporate network.
+        _ => 3,
+    }
+}
+
+/// The single address to put in a pairing URI.
+pub fn best_address() -> Option<std::net::IpAddr> {
+    local_addresses().into_iter().next()
 }
 
 #[cfg(test)]

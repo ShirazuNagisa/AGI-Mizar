@@ -510,3 +510,67 @@ button {
   color: var(--warn);
   font-size: 12px;
 }
+
+/* ---------- pairing ---------- */
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: color-mix(in srgb, #000 38%, transparent);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  z-index: 20;
+}
+
+.pair-card {
+  width: min(360px, 100%);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: 0 24px 64px -24px rgba(0, 0, 0, 0.5);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  align-items: center;
+}
+
+.pair-card h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.pair-card .qr {
+  width: 180px;
+  height: 180px;
+  border-radius: var(--r-sm);
+  background: #fff;
+  padding: 8px;
+  border: 1px solid var(--line);
+}
+
+.pair-card .qr svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.pair-card .code {
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 22px;
+  letter-spacing: 0.16em;
+  font-weight: 600;
+}
+
+.pair-card .addresses {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 11px;
+  color: var(--text-2);
+  text-align: center;
+}

@@ -100,6 +100,14 @@ export interface StateSnapshot {
   interactions: Interaction[]
 }
 
+export interface PairingView {
+  code: string
+  uri: string
+  addresses: string[]
+  svg: string | null
+  expires_at: number
+}
+
 export type Command =
   | { op: 'state' }
   | { op: 'messages'; session: string; limit?: number; before?: number }
@@ -108,6 +116,7 @@ export type Command =
   | { op: 'answer'; id: string; outcome?: string; answers?: unknown[] }
   | { op: 'set_model'; session: string; model: string }
   | { op: 'set_permission'; session: string; preset: string }
+  | { op: 'pairing'; refresh: boolean }
   | { op: 'ping' }
 
 export interface ApiError {

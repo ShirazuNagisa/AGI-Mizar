@@ -56,6 +56,9 @@ pub struct Core {
     store: RwLock<Store>,
     events: broadcast::Sender<ApiEvent>,
     version: String,
+    /// The phone server, when this build has one. Attached after construction
+    /// because it needs the kernel it serves.
+    pairing: RwLock<Option<Arc<dyn PairingSource>>>,
 }
 
 impl Core {
@@ -67,7 +70,16 @@ impl Core {
             store: RwLock::new(Store::default()),
             events,
             version: env!("CARGO_PKG_VERSION").to_string(),
+            pairing: RwLock::new(None),
         })
+    }
+
+    /// Attach the phone server, so the window can show a pairing code.
+    pub fn attach_pairing(&self, source: Arc<dyn PairingSource>) {
+        *self
+            .pairing
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(source);
     }
 
     /// The version reported in every snapshot.
@@ -247,6 +259,20 @@ impl Core {
     pub async fn dispatch(&self, command: Command) -> CommandResponse {
         match command {
             Command::State => CommandResponse::ok(self.snapshot()),
+            Command::Pairing { refresh } => {
+                let source = self
+                    .pairing
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone();
+                match source {
+                    Some(source) => CommandResponse::ok(source.pairing_view(refresh)),
+                    None => CommandResponse::error(
+                        "NO_PAIRING",
+                        "this build has no phone server to pair with",
+                    ),
+                }
+            }
             Command::Ping => CommandResponse::done(),
             Command::Messages {
                 session,
@@ -325,6 +351,16 @@ impl Core {
             }
         }
     }
+}
+
+/// Something that can issue a pairing code.
+///
+/// A trait rather than a direct call because the phone server depends on the
+/// kernel, not the other way round: the kernel asks whoever is composed, and a
+/// build without a phone server simply has nobody to ask.
+pub trait PairingSource: Send + Sync {
+    /// The code to show, refreshed when asked.
+    fn pairing_view(&self, refresh: bool) -> agi_protocol::api::PairingView;
 }
 
 /// Turn an engine failure into the API's error shape.
