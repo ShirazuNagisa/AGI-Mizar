@@ -14,6 +14,8 @@ pub mod api;
 pub mod domain;
 pub mod engine;
 pub mod link;
+pub mod usage;
 
 pub use domain::{Interaction, InteractionKind, Record, RecordKind, Session, SessionKey, ToolInfo};
 pub use engine::{Capabilities, EngineId};
+pub use usage::SessionUsage;

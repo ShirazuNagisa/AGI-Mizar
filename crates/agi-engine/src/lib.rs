@@ -165,6 +165,19 @@ pub trait Engine: Send + Sync {
         Err(self.unsupported("stats"))
     }
 
+    /// The usage frame a phone's details panel draws, when the engine keeps the
+    /// projections behind it.
+    ///
+    /// An empty frame rather than an error, because every field is optional: an
+    /// engine with no projection model still lets the host answer with the
+    /// title and context it derived itself, and the app merges what it gets.
+    async fn usage(
+        &self,
+        _session: &SessionKey,
+    ) -> Result<agi_protocol::usage::SessionUsage, EngineError> {
+        Ok(agi_protocol::usage::SessionUsage::default())
+    }
+
     /// Files the model said it produced.
     async fn deliverables(&self, _session: &SessionKey) -> Result<Vec<DeliveredFile>, EngineError> {
         Err(self.unsupported("deliverables"))

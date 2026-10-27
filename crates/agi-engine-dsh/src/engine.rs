@@ -942,10 +942,14 @@ fn read_pressure(value: &Value) -> Option<ContextPressure> {
     if window == 0 {
         return None;
     }
+    // Projected first, matching DSH's own client and the phone's usage frame:
+    // the two readings reach the phone through different calls, and a figure
+    // that changes depending on which one arrived last is a figure nobody
+    // trusts.
     let used = value
-        .get("pressureTokens")
+        .get("projectedTokens")
         .and_then(Value::as_u64)
-        .or_else(|| value.get("projectedTokens").and_then(Value::as_u64))
+        .or_else(|| value.get("pressureTokens").and_then(Value::as_u64))
         .unwrap_or(0);
     Some(ContextPressure {
         window,
@@ -1264,6 +1268,7 @@ impl Engine for DshEngine {
                         tool.name.clone()
                     },
                     text,
+                    turn: record.turn,
                 })
             })
             .collect();
@@ -1306,6 +1311,14 @@ impl Engine for DshEngine {
             stats.output_tokens = output;
         }
         Ok(stats)
+    }
+
+    async fn usage(
+        &self,
+        session: &SessionKey,
+    ) -> Result<agi_protocol::usage::SessionUsage, EngineError> {
+        let values = self.projections(session).await?;
+        Ok(crate::usage::from_projections(&values))
     }
 
     async fn deliverables(&self, session: &SessionKey) -> Result<Vec<DeliveredFile>, EngineError> {

@@ -30,6 +30,8 @@ use std::time::{Duration, Instant};
 
 use agi_core::Core;
 use agi_protocol::domain::{InteractionKind, SessionKey};
+use agi_protocol::engine::EngineId;
+use agi_protocol::usage::UsageContext;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
 use axum::response::{IntoResponse, Response};
@@ -334,7 +336,10 @@ impl MizarServer {
                             "window": pressure.window,
                             "pressureTokens": pressure.used,
                             "projectedTokens": pressure.used,
-                            "percent": pressure.percent,
+                            // An integer: the app decodes this as `Int`, and a
+                            // fractional one makes the whole page fail to decode
+                            // rather than merely draw oddly.
+                            "percent": pressure.percent.round().clamp(0.0, 100.0) as u64,
                         })
                     })
                     .unwrap_or(Value::Null);
@@ -354,6 +359,267 @@ impl MizarServer {
                                 // The phone merges this into its cached usage frame;
                                 // `null` means "this host cannot say", not zero.
                                 "context": context,
+                            }),
+                        )
+                    }
+                    Err(error) => ServerFrame::error(
+                        Some(id),
+                        ErrorCode::from_engine(error.code()),
+                        error.to_string(),
+                    ),
+                }
+            }
+
+            // The phone's title, usage panel, model row and permission badge all
+            // come from this one frame; the old plugin answered it straight from
+            // `session/projections`, and this does the same through the engine.
+            "session.stats" => {
+                let Some(key) = self.session_of(frame) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "session.stats needs a sessionId",
+                    );
+                };
+                let Some(engine) = self.core.engine(key.engine) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::RemoteError,
+                        format!("no engine for {}", key.engine),
+                    );
+                };
+                let mut usage = match engine.usage(&key).await {
+                    Ok(usage) => usage,
+                    Err(error) => {
+                        // An empty frame is the right answer — the app keeps what
+                        // it has — but silence would hide a projection that
+                        // stopped answering, which is how the first version of
+                        // this feature went unnoticed for months.
+                        tracing::warn!(
+                            "mizar: session.stats could not read projections for {key} — {error}"
+                        );
+                        Default::default()
+                    }
+                };
+                // Whatever the engine could not project, the host already knows:
+                // the aggregate it keeps for the window has a title and a context
+                // reading for every session it lists.
+                if let Some(session) = self
+                    .core
+                    .snapshot()
+                    .sessions
+                    .iter()
+                    .find(|session| session.key == key)
+                {
+                    if usage.title.is_none() {
+                        usage.title = session.title.clone();
+                    }
+                    if usage.context.is_none() {
+                        // `used` is the pressure reading, not the projected one;
+                        // repeating it in both fields would make the app draw the
+                        // same number twice.
+                        usage.context = session.context.map(|pressure| UsageContext {
+                            window: Some(pressure.window),
+                            pressure_tokens: Some(pressure.used),
+                            projected_tokens: None,
+                            percent: Some(pressure.percent.round().clamp(0.0, 100.0) as u64),
+                            breakdown: None,
+                        });
+                    }
+                }
+                ServerFrame::ok(
+                    id,
+                    json!({
+                        "sessionId": key.to_string(),
+                        "asOfSeq": Value::Null,
+                        "stats": usage,
+                    }),
+                )
+            }
+
+            // The phone groups its session list by workspace. Membership is the
+            // host's, not something the phone can derive: a session started in a
+            // bare directory belongs to no workspace, and two spellings of one
+            // directory are one workspace only because DSH says so.
+            "workspace.list" => {
+                let mut items = Vec::new();
+                let mut complete = true;
+                for engine_id in [EngineId::Dsh, EngineId::Claude, EngineId::Codex] {
+                    let Some(engine) = self.core.engine(engine_id) else {
+                        continue;
+                    };
+                    match engine.workspaces().await {
+                        Ok(spaces) => {
+                            for (index, space) in spaces.into_iter().enumerate() {
+                                // Prefixed so two engines cannot collide, and
+                                // stable across restarts.
+                                let local = if space.id.is_empty() {
+                                    index.to_string()
+                                } else {
+                                    space.id.clone()
+                                };
+                                let title = space
+                                    .name
+                                    .filter(|name| !name.is_empty())
+                                    .or_else(|| {
+                                        space
+                                            .path
+                                            .rsplit('/')
+                                            .find(|part| !part.is_empty())
+                                            .map(str::to_string)
+                                    })
+                                    .unwrap_or_else(|| space.path.clone());
+                                items.push(json!({
+                                    "workspaceId": format!("{}:{local}", engine_id.as_str()),
+                                    "path": space.path,
+                                    "title": title,
+                                    "sessionIds": space.session_ids,
+                                }));
+                            }
+                        }
+                        // An engine that cannot answer is not an engine with no
+                        // workspaces; the phone keeps what it had. But an engine
+                        // with no workspace concept at all (Claude, Codex) is
+                        // not a failure to read the list either.
+                        Err(error) if error.code() != "UNSUPPORTED" => complete = false,
+                        Err(_) => {}
+                    }
+                }
+                ServerFrame::ok(id, json!({ "items": items, "complete": complete }))
+            }
+
+            // Start a session. The phone names a directory, not a product, so the
+            // first engine that can take one answers.
+            "session.create" => {
+                let cwd = frame.payload.get("cwd").and_then(Value::as_str);
+                let mut last: Option<ServerFrame> = None;
+                for engine_id in [EngineId::Dsh, EngineId::Claude, EngineId::Codex] {
+                    let Some(engine) = self.core.engine(engine_id) else {
+                        continue;
+                    };
+                    match engine.create(cwd).await {
+                        Ok(key) => {
+                            return ServerFrame::ok(id, json!({ "sessionId": key.to_string() }))
+                        }
+                        Err(error) => {
+                            last = Some(ServerFrame::error(
+                                Some(id.clone()),
+                                ErrorCode::from_engine(error.code()),
+                                error.to_string(),
+                            ))
+                        }
+                    }
+                }
+                last.unwrap_or_else(|| {
+                    ServerFrame::error(
+                        Some(id),
+                        ErrorCode::RemoteError,
+                        "no engine can start a session",
+                    )
+                })
+            }
+
+            "session.archive" => {
+                let Some(key) = self.session_of(frame) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "session.archive needs a sessionId",
+                    );
+                };
+                let Some(engine) = self.core.engine(key.engine) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::RemoteError,
+                        format!("no engine for {}", key.engine),
+                    );
+                };
+                let stop = frame
+                    .payload
+                    .get("stopActivity")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                match engine.archive(&key, stop).await {
+                    Ok(()) => ServerFrame::ok(id, json!({ "archived": true })),
+                    Err(error) => ServerFrame::error(
+                        Some(id),
+                        ErrorCode::from_engine(error.code()),
+                        error.to_string(),
+                    ),
+                }
+            }
+
+            // The running turn's one-line process rows. The phone polls this a
+            // couple of times a second while a turn runs, and clears the feed
+            // when the host says no turn is running.
+            "session.activity" => {
+                let Some(key) = self.session_of(frame) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "session.activity needs a sessionId",
+                    );
+                };
+                let Some(engine) = self.core.engine(key.engine) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::RemoteError,
+                        format!("no engine for {}", key.engine),
+                    );
+                };
+                let limit = frame
+                    .payload
+                    .get("maxEntries")
+                    .and_then(Value::as_u64)
+                    .map(|value| value.clamp(1, 400) as usize)
+                    .unwrap_or(120);
+                let running = self
+                    .core
+                    .snapshot()
+                    .sessions
+                    .iter()
+                    .find(|session| session.key == key)
+                    .map(|session| session.running)
+                    .unwrap_or(false);
+                match engine.activity(&key, limit).await {
+                    Ok(entries) => {
+                        // Only the turn that is running: the feed is "what now",
+                        // and a finished turn's rows were cleared the moment it
+                        // ended.
+                        let turn = if running {
+                            entries.last().and_then(|entry| entry.turn)
+                        } else {
+                            None
+                        };
+                        let visible: Vec<_> = match turn {
+                            Some(turn) => entries
+                                .iter()
+                                .filter(|entry| entry.turn == Some(turn))
+                                .collect(),
+                            None => Vec::new(),
+                        };
+                        let rows: Vec<Value> = visible
+                            .iter()
+                            .map(|entry| {
+                                json!({
+                                    "id": entry.id,
+                                    "seq": entry.seq,
+                                    "at": entry.at,
+                                    "kind": entry.kind,
+                                    "title": entry.title,
+                                    "text": entry.text,
+                                })
+                            })
+                            .collect();
+                        ServerFrame::ok(
+                            id,
+                            json!({
+                                "sessionId": key.to_string(),
+                                "asOfSeq": Value::Null,
+                                "turn": turn,
+                                "entries": rows,
+                                "hasMore": visible.len() >= limit,
+                                "oldestSeq": visible.first().map(|entry| entry.seq),
                             }),
                         )
                     }

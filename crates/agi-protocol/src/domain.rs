@@ -295,6 +295,12 @@ pub struct ActivityEntry {
     pub title: String,
     /// One line. Anything longer belongs in the transcript.
     pub text: String,
+    /// Which turn this line belongs to, when the engine numbers its turns.
+    ///
+    /// The phone draws the feed per turn and clears it when the turn ends, so a
+    /// line without one cannot be placed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<u32>,
 }
 
 /// What kind of work an activity line describes.

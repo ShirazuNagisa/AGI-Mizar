@@ -202,7 +202,7 @@ async fn an_unknown_method_says_so_instead_of_failing() {
 
     socket
         .send(Message::Text(
-            json!({ "v": 1, "type": "session.activity", "id": "m9", "payload": {} }).to_string(),
+            json!({ "v": 1, "type": "session.fork", "id": "m9", "payload": {} }).to_string(),
         ))
         .await
         .unwrap();

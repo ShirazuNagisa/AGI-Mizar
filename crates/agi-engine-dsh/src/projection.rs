@@ -247,6 +247,49 @@ pub fn project(payload: &Value) -> Option<Projected> {
     }
 }
 
+/// The four buckets DSH reports for one session's usage.
+///
+/// They are disjoint: billed input is the sum of the first three, and output is
+/// billed separately. Both readers of these numbers — the window's usage line
+/// and the phone's usage frame — go through here so a rename cannot make one of
+/// them quietly report zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct TokenParts {
+    pub uncached: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub output: u64,
+}
+
+impl TokenParts {
+    /// Everything billed as input.
+    pub fn billed_input(&self) -> u64 {
+        self.uncached + self.cache_read + self.cache_write
+    }
+}
+
+/// Read the buckets, or `None` when this is not a usage projection.
+///
+/// `uncachedInputTokens` and `outputTokens` are both required: without them
+/// there is no usage to report. The cache buckets are genuinely optional — a
+/// provider that does not cache never reports them.
+pub(crate) fn token_parts(usage: &Value) -> Option<TokenParts> {
+    let uncached = usage.get("uncachedInputTokens").and_then(Value::as_u64)?;
+    let output = usage.get("outputTokens").and_then(Value::as_u64)?;
+    Some(TokenParts {
+        uncached,
+        output,
+        cache_read: usage
+            .get("cacheReadTokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        cache_write: usage
+            .get("cacheWriteTokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+    })
+}
+
 /// Billed input and output tokens, read from the `tokenUsage` projection.
 ///
 /// The projection's wire view is four disjoint buckets — `uncachedInputTokens`,
@@ -257,9 +300,10 @@ pub fn project(payload: &Value) -> Option<Projected> {
 /// reading the one that sounds obvious showed a flat zero next to a correct
 /// output count.
 pub(crate) fn token_usage(usage: &Value) -> (u64, u64) {
-    let part = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
-    let input = part("uncachedInputTokens") + part("cacheReadTokens") + part("cacheWriteTokens");
-    (input, part("outputTokens"))
+    match token_parts(usage) {
+        Some(parts) => (parts.billed_input(), parts.output),
+        None => (0, 0),
+    }
 }
 
 /// The readable part of a `tool/result` payload.
@@ -473,9 +517,16 @@ mod tests {
     }
 
     #[test]
-    fn a_partial_usage_projection_still_adds_up() {
-        assert_eq!(token_usage(&json!({"outputTokens": 7})), (0, 7));
-        assert_eq!(token_usage(&json!({"cacheReadTokens": 5})), (5, 0));
+    fn a_usage_projection_without_its_two_load_bearing_fields_is_no_usage() {
+        // Half a frame is not a smaller frame: the app requires both, and the
+        // same rule keeps the window's line from inventing a zero.
+        assert_eq!(token_usage(&json!({"outputTokens": 7})), (0, 0));
+        assert_eq!(token_usage(&json!({"cacheReadTokens": 5})), (0, 0));
         assert_eq!(token_usage(&json!({})), (0, 0));
+
+        // Cache buckets, on the other hand, are genuinely optional.
+        let parts = token_parts(&json!({"uncachedInputTokens": 10, "outputTokens": 2})).unwrap();
+        assert_eq!(parts.billed_input(), 10);
+        assert_eq!(parts.cache_read, 0);
     }
 }
