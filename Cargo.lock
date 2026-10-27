@@ -26,6 +26,7 @@ version = "0.1.0"
 dependencies = [
  "agi-core",
  "agi-engine",
+ "agi-engine-codex",
  "agi-engine-dsh",
  "agi-protocol",
  "anyhow",
@@ -45,6 +46,20 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "agi-engine-codex"
+version = "0.1.0"
+dependencies = [
+ "agi-engine",
+ "agi-protocol",
+ "async-trait",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

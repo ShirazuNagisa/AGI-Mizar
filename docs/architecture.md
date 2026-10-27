@@ -136,7 +136,61 @@ session/page（unary，throughSeq = cursor）→ records
 
 ---
 
-## 7. 鉴权
+## 7. Codex：唯一由我们 spawn 的引擎
+
+三个引擎里，Codex 是唯一一个**进程属于我们**的：`codex app-server` 由我们拉起，stdio 上跑
+newline-delimited JSON-RPC，死了就重启。DSH 是插件拨进来，Claude Code 是每轮一个子进程。
+
+### 三层的分法
+
+```
+rpc.rs         子进程、分帧、请求关联、服务端请求、重启
+projection.rs  纯函数：thread + turns → 记录（含 seq 编号规则）
+engine.rs      Engine 实现：请求、审批、看护循环
+```
+
+`rpc.rs` 不认识 thread，`projection.rs` 不做 I/O。所以 Codex 改协议是改一个文件，而投影规则
+（哪条 item 是消息、哪条是工具）可以被单测钉住。
+
+### 审批是"请求"，不是"通知"
+
+Codex 停下来等权限时，是**给我们发一个带 `id` 的请求**并等回复。这让它成为三个引擎里最好应答的
+一个：回复就是答案，没有 waterfall 要加入，也没有 broker 要抢。唯一的活是把 JSON-RPC 的 id 留到
+操作者做决定。
+
+回复的形状按方法不同：
+
+| 方法 | 允许 | 拒绝 |
+|---|---|---|
+| `item/commandExecution/requestApproval` | `{decision:"accept"}` | `{decision:"decline"}` |
+| `execCommandApproval`（旧） | `{decision:"approved"}` | `{decision:{denied:{rejection}}}` |
+| `item/permissions/requestApproval` | `{permissions:<请求的>, scope:"turn"}` | `{permissions:{}, scope:"turn"}` |
+
+拒绝时**不回显**请求的权限，否则一次拒绝反而扩大了权限。
+
+### 序号是算出来的，不是等来的
+
+Codex 的 turn 只有 `id` 和 `startedAt`（**秒**），粗到两个 turn 可以同秒。所以记录的 `seq`
+由"第几个 turn × 1,000,000 + 第几个 item × 10"算出来：
+
+```
+turn 1  turn/start     1_000_000
+        user message   1_000_010
+        tool call      1_000_020
+        turn/end       1_001_999
+turn 2  turn/start     2_000_000
+```
+
+跨读取稳定、线程内唯一、顺序显然。这也是为什么实时通知**不**直接追加记录：`item/completed`
+没有序号，编一个就会和历史读取的编号撞车。实时只把行标记为"脏"，转写仍来自
+`thread/turns/list` 这一个来源。
+
+### 子进程死了是"断线"，不是"报错"
+
+app-server 退出时，所有缓存的 thread 视图都作废——新起的 server 加载的 thread 集合不同。所以
+看护循环清空缓存、广播状态变化、退避后重启；UI 看到的是一个状态，不是一叠失败调用。
+
+## 8. 鉴权
 
 两个令牌，不是一个：
 
@@ -152,24 +206,25 @@ WS 的 token 走查询参数——浏览器无法给 WebSocket 设 header。
 
 ---
 
-## 8. 测试策略
+## 9. 测试策略
 
 | 层 | 怎么测 | 为什么可信 |
 |---|---|---|
 | 协议 | 逐帧 JSON 往返 | 与插件侧 `frames.ts` 的形状是同一份文档 |
 | 投影 | 纯函数，真实载荷形状 | 0.8.x 踩过的坑（注入上下文、`message.content` 少一层）都成了用例 |
-| 链路 | 两个 channel 模拟插件 | 握手、错令牌、列表、事件、follow+page、掉线撤卡，全是真的代码路径 |
+| 链路（DSH） | 两个 channel 模拟插件 | 握手、错令牌、列表、事件、follow+page、掉线撤卡，全是真的代码路径 |
+| 链路（Codex） | 真子进程 + Node 假 app-server | 握手、thread 列表、历史、prompt、**审批应答的取值**、模型与权限设置 |
 | 内核 | 端到端跑一次 | 起守护进程 → 假插件连入 → `curl` 查 state / messages |
 
 没有用 mock 替代 WebSocket 来测链路：那样测的是 mock。
 
 ---
 
-## 9. 还没做的（以及为什么现在不做）
+## 10. 还没做的（以及为什么现在不做）
 
 | 项 | 等什么 |
 |---|---|
-| Codex / Claude Code 适配 | M2 / M3；接口已经定死，加的是适配层 |
+| Claude Code 适配 | M3；接口已经定死，加的是适配层 |
 | 持久化 | 等搜索 / 设置 / 交付文件索引 |
 | Mizar 服务端（配对、中继、推送） | M5；手机协议与黄金帧已经在 `protocol/` 里 |
 | 附件、分支、归档、文件预览 | DSH 侧是 `invoke` 直通；接线时把 `capabilities` 打开 |

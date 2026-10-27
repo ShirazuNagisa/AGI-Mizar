@@ -4,8 +4,8 @@ One desktop application that hosts three coding agents — **DSH**, **Claude Cod
 and lets a phone drive all of them through one connection.
 
 This repository currently contains the **backend kernel**. There is no window yet: the kernel runs,
-serves its API, accepts the DSH plugin, and is tested end to end. The React front end and the Tauri
-shell come next.
+serves its API, accepts the DSH plugin, drives a Codex app-server, and is tested end to end. The
+React front end and the Tauri shell come next.
 
 ```
 手机 App ──▶ AGI Mizar ──┬──▶ DSH         （helper plugin 拨回环 WS 进来）
@@ -19,7 +19,7 @@ shell come next.
 |---|---|---|
 | M0 | 仓库、workspace、契约 | ✅ |
 | M1 | 内核：引擎抽象、DSH 链路、状态聚合、本地 API、守护进程 | ✅ |
-| M2 | Codex 引擎 | ⬜ |
+| M2 | Codex 引擎（app-server JSON-RPC、审批、历史投影） | ✅ |
 | M3 | Claude Code 引擎 | ⬜ |
 | M4 | `dsh-mizar` 0.9.0 联调 | 🔶 插件侧已完成，等真机联调 |
 | M5 | Mizar 服务端（配对 / 中继 / 推送） | ⬜ |
@@ -33,6 +33,7 @@ crates/
 ├─ agi-protocol/     共享类型：领域模型、DSH Link v1 帧、本地 API 契约
 ├─ agi-engine/       Engine trait、引擎事件、错误
 ├─ agi-engine-dsh/   DSH 适配：链路服务端 + 原始事件投影
+├─ agi-engine-codex/ Codex 适配：app-server JSON-RPC + 轮次投影
 ├─ agi-core/         内核：状态聚合、本地 API、端点文件
 └─ agi-daemon/       无窗口运行内核（开发 / 诊断 / 无头部署）
 docs/                架构与协议
@@ -42,7 +43,7 @@ protocol/            Mizar v1 黄金帧（手机协议，未来服务端用）
 ## 跑起来
 
 ```sh
-cargo test                     # 29 个测试
+cargo test                     # 40 个测试
 cargo run -p agi-daemon        # 内核，无窗口
 ```
 

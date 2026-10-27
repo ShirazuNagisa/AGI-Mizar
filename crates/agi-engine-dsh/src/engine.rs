@@ -92,10 +92,14 @@ impl DshEngine {
     /// Build an engine that accepts a plugin presenting `token`.
     pub fn new(token: impl Into<String>) -> Arc<Self> {
         let (events, _) = broadcast::channel(512);
+        let mut inner = Inner::new();
+        // Said out loud from the first snapshot: an engine with no detail reads
+        // like an engine that failed, not one that is waiting.
+        inner.detail = Some("no plugin attached".to_string());
         Arc::new(Self {
             token: token.into(),
             events,
-            inner: Mutex::new(Inner::new()),
+            inner: Mutex::new(inner),
             next_id: AtomicU64::new(1),
         })
     }

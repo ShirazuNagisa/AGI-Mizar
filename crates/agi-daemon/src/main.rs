@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use agi_core::{endpoint, server, Core};
 use agi_engine::Engine;
+use agi_engine_codex::{AppServerConfig, CodexEngine};
 use agi_engine_dsh::DshEngine;
 
 #[tokio::main]
@@ -43,7 +44,26 @@ async fn main() -> anyhow::Result<()> {
     let api_token = random_token();
 
     let dsh = DshEngine::new(plugin_token.clone());
-    let engines: Vec<Arc<dyn Engine>> = vec![dsh.clone()];
+    let mut engines: Vec<Arc<dyn Engine>> = vec![dsh.clone()];
+
+    // Codex is spawned, so it is only hosted when there is something to spawn.
+    // An absent binary would otherwise mean a supervisor retrying a missing file
+    // forever, and a permanent red status on a machine that simply has no Codex.
+    let codex_binary = std::env::var("AGI_CODEX_BIN").unwrap_or_else(|_| "codex".to_string());
+    if let Some(path) = which(&codex_binary) {
+        let codex = CodexEngine::new(AppServerConfig {
+            binary: path.to_string_lossy().to_string(),
+            args: Vec::new(),
+            cwd: None,
+        });
+        let supervisor = Arc::clone(&codex);
+        tokio::spawn(async move { supervisor.run().await });
+        engines.push(codex);
+        println!("codex  {}", path.display());
+    } else {
+        println!("codex  not found — set AGI_CODEX_BIN to point at one");
+    }
+
     let core = Core::new(engines);
     core.start().await;
 
@@ -82,4 +102,27 @@ fn random_token() -> String {
         token.push_str(&uuid::Uuid::new_v4().simple().to_string());
     }
     token
+}
+
+/// Find an executable the way a shell would: an absolute path, or `PATH`.
+fn which(binary: &str) -> Option<PathBuf> {
+    let candidate = PathBuf::from(binary);
+    if candidate.is_absolute() {
+        return candidate.exists().then_some(candidate);
+    }
+    let path = std::env::var_os("PATH")?;
+    for directory in std::env::split_paths(&path) {
+        let full = directory.join(binary);
+        if full.is_file() {
+            return Some(full);
+        }
+        #[cfg(windows)]
+        {
+            let exe = directory.join(format!("{binary}.exe"));
+            if exe.is_file() {
+                return Some(exe);
+            }
+        }
+    }
+    None
 }

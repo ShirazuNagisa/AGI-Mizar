@@ -3,6 +3,7 @@ members = [
     "crates/agi-protocol",
     "crates/agi-engine",
     "crates/agi-engine-dsh",
+    "crates/agi-engine-codex",
     "crates/agi-core",
     "crates/agi-daemon",
 ]
@@ -19,6 +20,7 @@ repository = "https://github.com/ShirazuNagisa/AGI-Mizar"
 agi-protocol = { path = "crates/agi-protocol" }
 agi-engine = { path = "crates/agi-engine" }
 agi-engine-dsh = { path = "crates/agi-engine-dsh" }
+agi-engine-codex = { path = "crates/agi-engine-codex" }
 agi-core = { path = "crates/agi-core" }
 
 anyhow = "1"
