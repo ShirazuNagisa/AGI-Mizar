@@ -549,3 +549,84 @@ async fn a_vanished_plugin_withdraws_what_it_was_waiting_on() {
     assert!(resolved, "a dropped plugin left an approval outstanding");
     assert!(!h.engine.connected());
 }
+
+#[tokio::test]
+async fn two_asks_at_once_share_one_fold() {
+    let mut h = start();
+    let mut events = h.engine.subscribe();
+    h.hello().await;
+    assert_eq!(h.next().await["type"], "welcome");
+    h.answer_session_list(json!([
+        { "sessionId": "s1", "updatedAt": 2_000i64, "running": false, "model": "deepseek-v4" }
+    ]))
+    .await;
+    while let Ok(received) = tokio::time::timeout(Duration::from_secs(2), events.recv()).await {
+        if matches!(received, Ok(EngineEvent::SessionUpdated(_))) {
+            break;
+        }
+    }
+
+    // Both ask before either has an answer: a dashboard opened while another
+    // window refreshes must not page the same logs twice.
+    let first = {
+        let engine = Arc::clone(&h.engine);
+        tokio::spawn(async move { engine.usage_history().await })
+    };
+    let second = {
+        let engine = Arc::clone(&h.engine);
+        tokio::spawn(async move { engine.usage_history().await })
+    };
+
+    h.answer_next_list(json!([
+        { "sessionId": "s1", "updatedAt": 2_000i64, "running": false, "model": "deepseek-v4" }
+    ]))
+    .await;
+
+    let follow = h.next_invoke("session/follow").await;
+    let follow_id = follow["id"].as_str().unwrap().to_string();
+    h.send(json!({
+        "v": 1, "type": "stream.item", "id": follow_id,
+        "value": { "type": "baseline", "cursor": 9 }
+    }))
+    .await;
+    h.send(json!({ "v": 1, "type": "stream.end", "id": follow_id, "reason": "done" }))
+        .await;
+
+    let page = h.next_invoke("session/page").await;
+    let page_id = page["id"].as_str().unwrap().to_string();
+    h.send(json!({
+        "v": 1, "type": "result", "id": page_id, "ok": true,
+        "value": { "records": [
+            { "type": "event", "event": {
+                "type": "assistant/message", "seq": 1, "time": 1_700_000_000_000i64,
+                "data": { "turn": 1, "step": 1,
+                          "message": { "content": [{ "type": "text", "text": "hi" }],
+                                       "source": { "kind": "model", "model": "deepseek-flash" } },
+                          "usage": { "inputTokens": 5, "outputTokens": 1 } } } }
+        ], "hasMore": false }
+    }))
+    .await;
+
+    let left = first.await.unwrap().unwrap();
+    let right = second.await.unwrap().unwrap();
+    assert_eq!(left, right);
+    assert_eq!(left.iter().map(|day| day.messages).sum::<u64>(), 1);
+
+    // A second fold would announce itself with one of these three calls.
+    let mut extra = 0;
+    while let Ok(Some(text)) =
+        tokio::time::timeout(Duration::from_millis(400), h.to_plugin.recv()).await
+    {
+        let frame: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        if frame["type"] == "invoke"
+            && matches!(
+                frame["endpoint"].as_str(),
+                Some("session/list" | "session/follow" | "session/page")
+            )
+        {
+            extra += 1;
+        }
+    }
+    assert_eq!(extra, 0, "the second ask folded the logs again");
+    h.handle.abort();
+}

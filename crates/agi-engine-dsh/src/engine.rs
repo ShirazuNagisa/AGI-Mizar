@@ -74,6 +74,10 @@ const MAX_CACHED_RECORDS: usize = 4_000;
 /// freshness on "how much did I do in September".
 const USAGE_CACHE_TTL: Duration = Duration::from_secs(60);
 
+/// How long a short fold may answer other callers, so one burst of asks is one
+/// pass over the logs.
+const USAGE_ATTEMPT_TTL: Duration = Duration::from_secs(5);
+
 /// The fold written for the next launch, and when it was made.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct UsageCacheFile {
@@ -175,6 +179,15 @@ pub struct DshEngine {
     me: Weak<DshEngine>,
     /// Where the folded history is kept between launches, when somebody set it.
     usage_cache_path: Mutex<Option<PathBuf>>,
+    /// One fold at a time. Two windows asking at once should cost one pass over
+    /// the logs, not two.
+    usage_fold_lock: tokio::sync::Mutex<()>,
+    /// The last fold that came back short, with when it was made.
+    ///
+    /// Incomplete folds are not cached for a minute — but they are worth reusing
+    /// for a few seconds, or a burst of requests after one expensive pass folds
+    /// the same three hundred sessions again each time.
+    usage_attempt: Mutex<Option<(std::time::Instant, Vec<agi_protocol::api::UsageDay>)>>,
     /// One background refresh at a time.
     usage_refreshing: std::sync::atomic::AtomicBool,
     /// Tells the socket pump to drop the plugin's connection.
@@ -201,6 +214,8 @@ impl DshEngine {
             next_id: AtomicU64::new(1),
             usage_cache: Mutex::new(None),
             usage_cache_path: Mutex::new(None),
+            usage_fold_lock: tokio::sync::Mutex::new(()),
+            usage_attempt: Mutex::new(None),
             usage_refreshing: std::sync::atomic::AtomicBool::new(false),
             me: me.clone(),
             kick,
@@ -952,6 +967,18 @@ impl DshEngine {
         Ok(value.get("values").cloned().unwrap_or(Value::Null))
     }
 
+    /// A short fold from the last few seconds, if there was one.
+    fn recent_attempt(&self) -> Option<Vec<agi_protocol::api::UsageDay>> {
+        let attempt = self
+            .usage_attempt
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match attempt.as_ref() {
+            Some((at, days)) if at.elapsed() < USAGE_ATTEMPT_TTL => Some(days.clone()),
+            _ => None,
+        }
+    }
+
     /// The last fold written to disk, with how old it is.
     fn read_usage_cache(&self) -> Option<(Vec<agi_protocol::api::UsageDay>, i64)> {
         let path = self
@@ -994,10 +1021,18 @@ impl DshEngine {
             return;
         }
         let Some(engine) = self.me.upgrade() else {
-            self.usage_refreshing.store(false, Ordering::SeqCst);
+            self.usage_refreshing
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             return;
         };
         tokio::spawn(async move {
+            let _fold = engine.usage_fold_lock.lock().await;
+            // A foreground fold may have finished while this one waited for the
+            // lock; folding again would be the duplicate the lock exists to stop.
+            if engine.cached_usage().is_some() || engine.recent_attempt().is_some() {
+                engine.usage_refreshing.store(false, Ordering::SeqCst);
+                return;
+            }
             if let Ok((days, complete)) = engine.fold_usage().await {
                 if complete {
                     engine.write_usage_cache(&days);
@@ -1456,19 +1491,34 @@ impl Engine for DshEngine {
             }
             return Ok(days);
         }
-
-        let (days, complete) = self.fold_usage().await?;
-        if !complete {
+        if let Some(days) = self.recent_attempt() {
             return Ok(days);
         }
-        self.write_usage_cache(&days);
-        let listed = self.inner().sessions.len();
-        {
+
+        // One fold at a time: a second caller waits here and then answers from
+        // the attempt cache above instead of paging every session again.
+        let _fold = self.usage_fold_lock.lock().await;
+        if let Some(days) = self.cached_usage() {
+            return Ok(days);
+        }
+        if let Some(days) = self.recent_attempt() {
+            return Ok(days);
+        }
+        let (days, complete) = self.fold_usage().await?;
+        if complete {
+            self.write_usage_cache(&days);
+            let listed = self.inner().sessions.len();
             let mut cache = self
                 .usage_cache
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             *cache = Some((std::time::Instant::now(), listed, days.clone()));
+        } else {
+            *self
+                .usage_attempt
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                Some((std::time::Instant::now(), days.clone()));
         }
         Ok(days)
     }
