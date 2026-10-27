@@ -831,22 +831,23 @@ impl DshEngine {
 }
 
 /// Read a list of `{currency, balance}` rows.
-fn read_wallets(value: Option<&Value>) -> Vec<Wallet> {
-    value
-        .and_then(Value::as_array)
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|row| {
-                    let currency = row.get("currency").and_then(Value::as_str)?;
-                    let amount = row.get("balance").and_then(Value::as_str)?;
-                    Some(Wallet {
-                        currency: currency.to_string(),
-                        amount: amount.to_string(),
-                    })
-                })
-                .collect()
+/// Read a wallet list, or `None` when the provider sent something malformed.
+///
+/// Dropping a bad row would turn "this answer is not trustworthy" into "the
+/// account has one fewer currency", which is a different claim.
+fn read_wallets(value: Option<&Value>, required: bool) -> Option<Vec<Wallet>> {
+    let rows = value?.as_array()?;
+    if required && rows.is_empty() {
+        return None;
+    }
+    rows.iter()
+        .map(|row| {
+            Some(Wallet {
+                currency: row.get("currency")?.as_str()?.to_string(),
+                amount: row.get("balance")?.as_str()?.to_string(),
+            })
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 /// The first non-empty line, cut to something a feed can show.
@@ -1618,13 +1619,37 @@ impl Engine for DshEngine {
             )
             .await?;
         if value.get("status").and_then(Value::as_str) != Some("ready") {
-            return Ok(Balance::Unavailable);
+            // The account may have signed out between the two calls; asking once
+            // more is what tells "sign in" from "try again". The ready path must
+            // not do this: a second state read would let an A-to-B switch happen
+            // after the balance was proven, without proving whose balance it was.
+            let after = self.call("account/getState", json!({})).await?;
+            return Ok(
+                if after.get("status").and_then(Value::as_str) == Some("signed-out") {
+                    Balance::SignedOut
+                } else {
+                    Balance::Unavailable
+                },
+            );
         }
 
+        let (Some(wallets), Some(bonus)) = (
+            read_wallets(value.get("value"), true),
+            read_wallets(value.get("bonusWallets"), false),
+        ) else {
+            return Ok(Balance::Unavailable);
+        };
+
         Ok(Balance::Ready {
-            wallets: read_wallets(value.get("value")),
-            bonus: read_wallets(value.get("bonusWallets")),
-            top_up_url: Some("https://platform.deepseek.com/top_up".to_string()),
+            wallets,
+            bonus,
+            // The provider's own link, not a constant: a configurable platform is
+            // not necessarily the official one, and the phone checks this value.
+            top_up_url: state
+                .get("links")
+                .and_then(|links| links.get("topUpUrl"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
         })
     }
 

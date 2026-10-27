@@ -6,6 +6,13 @@
     "hostId": "c9b63045-e610-4910-9120-2816d8604cba",
     "hostName": "Shirazus-Mac-mini.local",
     "home": "/Users/shirazu/Documents/project/DSH-Mizar/dsh/.devhome/.mizar",
-    "protocolVersion": 1
+    "protocolVersion": 1,
+    "addresses": ["10.14.217.149:19392"],
+    "desktop": { "os": "macOS", "client": "AGI Mizar" },
+    "relay": null,
+    "plugin": {
+      "id": "dsh-mizar",
+      "capabilities": ["deepseek.balance.v1"]
+    }
   }
 }

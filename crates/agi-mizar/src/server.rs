@@ -275,6 +275,18 @@ impl MizarServer {
                         "protocolVersion": PROTOCOL_VERSION,
                         "addresses": addresses,
                         "desktop": { "os": os_name(), "client": "AGI Mizar" },
+                        // What this host can do beyond the base protocol. The
+                        // app gates the balance card on the capability rather
+                        // than on a probe: without it, the card says the host
+                        // does not support balance and never asks.
+                        "plugin": {
+                            "id": "dsh-mizar",
+                            "capabilities": if self.core.engine(EngineId::Dsh).is_some() {
+                                json!(["deepseek.balance.v1"])
+                            } else {
+                                json!([])
+                            },
+                        },
                         // `null` when no tunnel is configured, which the phone
                         // reads as "there is no relay route".
                         "relay": self.relay_facts(),
@@ -494,6 +506,11 @@ impl MizarServer {
             // default route comes from the first engine that names one.
             "model.catalog" => {
                 let mut catalog = agi_protocol::catalog::ModelCatalog::default();
+                // An engine with no catalog concept is not a failure; one that
+                // broke is. An empty answer would be cached by the app until the
+                // next connection, while an error is retried when the picker
+                // opens.
+                let mut broken = false;
                 for engine_id in [EngineId::Dsh, EngineId::Claude, EngineId::Codex] {
                     let Some(engine) = self.core.engine(engine_id) else {
                         continue;
@@ -509,6 +526,7 @@ impl MizarServer {
                         // An engine with no catalog concept is not a failure to
                         // report; one that broke is worth a line.
                         Err(error) if error.code() != "UNSUPPORTED" => {
+                            broken = true;
                             tracing::warn!(
                                 "mizar: model.catalog from {} failed — {error}",
                                 engine_id.as_str()
@@ -516,6 +534,13 @@ impl MizarServer {
                         }
                         Err(_) => {}
                     }
+                }
+                if broken && catalog.providers.is_empty() && catalog.default.is_none() {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::RemoteError,
+                        "no engine could list its models",
+                    );
                 }
                 ServerFrame::ok(id, serde_json::to_value(catalog).unwrap_or(Value::Null))
             }
@@ -538,7 +563,7 @@ impl MizarServer {
                     (Some(version), Some(locale), Some(offset))
                         if version.len() <= 100
                             && locale.len() <= 100
-                            && offset.abs() <= 86_400 => {}
+                            && offset.unsigned_abs() <= 86_400 => {}
                     _ => {
                         return ServerFrame::error(
                             Some(id),
@@ -583,8 +608,15 @@ impl MizarServer {
                     Ok(Balance::Unavailable) => {
                         ServerFrame::ok(id, json!({ "status": "unavailable" }))
                     }
-                    Ok(Balance::Unsupported) | Err(_) => {
+                    // No provider at all is a capability answer; a provider that
+                    // failed to answer is a transient one, and the app keeps
+                    // "unsupported" for the life of a connection.
+                    Ok(Balance::Unsupported) => {
                         ServerFrame::ok(id, json!({ "status": "unsupported" }))
+                    }
+                    Err(error) => {
+                        tracing::warn!("mizar: account.balance failed — {error}");
+                        ServerFrame::ok(id, json!({ "status": "unavailable" }))
                     }
                 }
             }
@@ -1177,6 +1209,56 @@ impl MizarServer {
 /// The provider's own top-up page, and the only one this host will name.
 const OFFICIAL_TOP_UP: &str = "https://platform.deepseek.com/top_up";
 
+/// Whether a string is a monetary amount the app will also accept.
+///
+/// The grammar is the app's own — `-?digits[.digits]` or `-.digits`, with an
+/// optional exponent — because a value this side calls money and the app
+/// refuses becomes a failed balance card rather than an unavailable one. In
+/// particular `+1` and a padded `" 1 "` are not amounts.
+fn is_money(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() || bytes.len() > 256 {
+        return false;
+    }
+    let mut index = 0;
+    if bytes[index] == b'-' {
+        index += 1;
+    }
+    let integer_start = index;
+    while index < bytes.len() && bytes[index].is_ascii_digit() {
+        index += 1;
+    }
+    let integer_digits = index - integer_start;
+
+    let mut fractional_digits = 0;
+    if index < bytes.len() && bytes[index] == b'.' {
+        index += 1;
+        let fraction_start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        fractional_digits = index - fraction_start;
+    }
+    if integer_digits == 0 && fractional_digits == 0 {
+        return false;
+    }
+
+    if index < bytes.len() && (bytes[index] == b'e' || bytes[index] == b'E') {
+        index += 1;
+        if index < bytes.len() && (bytes[index] == b'+' || bytes[index] == b'-') {
+            index += 1;
+        }
+        let exponent_start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if index == exponent_start {
+            return false;
+        }
+    }
+    index == bytes.len()
+}
+
 /// The wallets in the shape the app decodes, or `None` when the provider sent
 /// something the app must not draw.
 ///
@@ -1196,14 +1278,8 @@ fn wallet_rows(wallets: &[Wallet], required: bool) -> Option<Vec<Value>> {
         if seen.contains(&wallet.currency.as_str()) {
             return None;
         }
-        let amount = wallet.amount.trim();
-        if amount.is_empty()
-            || amount.len() > 256
-            || amount
-                .parse::<f64>()
-                .map(|value| !value.is_finite())
-                .unwrap_or(true)
-        {
+        let amount = wallet.amount.as_str();
+        if !is_money(amount) {
             return None;
         }
         seen.push(wallet.currency.as_str());
@@ -1562,7 +1638,19 @@ mod tests {
         // Prose is not a balance.
         assert!(wallet_rows(&[wallet("CNY", "about ten")], true).is_none());
         assert!(wallet_rows(&[wallet("CNY", "NaN")], true).is_none());
+        assert!(wallet_rows(&[wallet("CNY", "Infinity")], true).is_none());
         assert!(wallet_rows(&[wallet("CNY", "")], true).is_none());
+        // The app's own grammar: no leading plus, no padding.
+        assert!(wallet_rows(&[wallet("CNY", "+1")], true).is_none());
+        assert!(wallet_rows(&[wallet("CNY", " 9.86 ")], true).is_none());
+        // What the app does accept.
+        for amount in ["1", "-1", ".5", "5.", "1e5", "1E+5", "9.86578102"] {
+            assert!(
+                wallet_rows(&[wallet("CNY", amount)], true).is_some(),
+                "{amount} should be accepted"
+            );
+        }
+        assert!(wallet_rows(&[wallet("CNY", &"9".repeat(257))], true).is_none());
         // A paid wallet is required; bonus wallets are optional.
         assert!(wallet_rows(&[], true).is_none());
         assert_eq!(wallet_rows(&[], false), Some(Vec::new()));
