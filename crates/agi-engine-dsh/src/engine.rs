@@ -1106,6 +1106,10 @@ impl Engine for DshEngine {
         self.fetch_page(session, limit, before).await
     }
 
+    fn supports_attachments(&self) -> bool {
+        true
+    }
+
     async fn prompt(&self, session: &SessionKey, text: &str) -> Result<(), EngineError> {
         self.prompt_with(session, text, &[]).await
     }
@@ -1732,8 +1736,7 @@ impl Engine for DshEngine {
                                 .filter_map(Value::as_str)
                                 .map(str::to_string)
                                 .collect()
-                        })
-                        .unwrap_or_default(),
+                        }),
                 })
             })
             .collect())

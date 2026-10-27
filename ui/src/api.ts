@@ -163,7 +163,8 @@ export interface Workspace {
   id: string
   path: string
   name: string | null
-  session_ids: string[]
+  /** `null` when the host did not say; `[]` when it said nothing is filed. */
+  session_ids: string[] | null
 }
 
 export interface FilePreview {

@@ -145,6 +145,14 @@ pub trait Engine: Send + Sync {
     /// Choose a permission preset.
     async fn set_permission(&self, session: &SessionKey, preset: &str) -> Result<(), EngineError>;
 
+    /// Whether this engine can carry an attachment into a prompt.
+    ///
+    /// The default is no: an engine that never implements this must not be
+    /// handed a blob it will quietly drop.
+    fn supports_attachments(&self) -> bool {
+        false
+    }
+
     /// Send a prompt with attachments.
     ///
     /// An engine that cannot carry a blob falls back to the text alone rather

@@ -416,7 +416,12 @@ pub struct Workspace {
     pub path: String,
     pub name: Option<String>,
     /// The sessions the host assigns to it, in its own order.
-    pub session_ids: Vec<String>,
+    ///
+    /// `None` means the host did not say — a phone then matches on the path —
+    /// and `Some(vec![])` means it said nothing is filed here. The two are not
+    /// the same answer, and collapsing them is what draws every session as
+    /// unassigned.
+    pub session_ids: Option<Vec<String>>,
 }
 
 /// One question in a batch, as the agent asked it.

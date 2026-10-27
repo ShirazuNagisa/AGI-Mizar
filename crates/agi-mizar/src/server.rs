@@ -557,12 +557,20 @@ impl MizarServer {
                                             .map(str::to_string)
                                     })
                                     .unwrap_or_else(|| space.path.clone());
-                                items.push(json!({
+                                // The phone compares these against the ids
+                                // `session.list` gave it, which carry the
+                                // engine prefix. Sending the registry's bare
+                                // ids is what makes every session look
+                                // unassigned on the other side.
+                                let mut row = json!({
                                     "workspaceId": format!("{}:{local}", engine_id.as_str()),
                                     "path": space.path,
                                     "title": title,
-                                    "sessionIds": space.session_ids,
-                                }));
+                                });
+                                if let Some(ids) = membership(engine_id, space.session_ids) {
+                                    row["sessionIds"] = json!(ids);
+                                }
+                                items.push(row);
                             }
                         }
                         // An engine that cannot answer is not an engine with no
@@ -1141,11 +1149,41 @@ impl MizarServer {
             }
 
             "upload.abort" => {
-                if let Some(upload_id) = frame.payload.get("uploadId").and_then(Value::as_str) {
-                    self.uploads.abort(&device.id, upload_id);
+                let Some(upload_id) = frame.payload.get("uploadId").and_then(Value::as_str) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "upload.abort needs an uploadId",
+                    );
+                };
+                // Saying "aborted" for an id that was never ours is how a client
+                // comes to believe it cleaned something up.
+                if self.uploads.abort(&device.id, upload_id) {
+                    ServerFrame::ok(id, json!({ "aborted": true }))
+                } else {
+                    ServerFrame::error(
+                        Some(id),
+                        ErrorCode::UploadUnknown,
+                        "upload.abort: no such upload",
+                    )
                 }
-                ServerFrame::ok(id, json!({ "aborted": true }))
             }
+
+            // The limits, for a client that would rather ask than assume.
+            "upload.capabilities" => ServerFrame::ok(
+                id,
+                json!({
+                    "chunkBytes": crate::uploads::CHUNK_BYTES,
+                    "imageBytes": crate::uploads::IMAGE_BYTES,
+                    "fileBytes": crate::uploads::FILE_BYTES,
+                    "promptBytes": crate::uploads::PROMPT_BYTES,
+                    "attachments": crate::uploads::PROMPT_ATTACHMENTS,
+                    "images": crate::uploads::PROMPT_ATTACHMENTS,
+                    "expiresSeconds": crate::uploads::UPLOAD_TTL_MS / 1000,
+                    "imageMediaTypes": crate::uploads::IMAGE_MEDIA_TYPES,
+                    "sha256": false,
+                }),
+            ),
 
             "session.prompt" => {
                 let Some(key) = self.session_of(frame) else {
@@ -1194,6 +1232,13 @@ impl MizarServer {
                         Err(error) => return upload_error(Some(id), error),
                     }
                 };
+                if !attachments.is_empty() && !engine.supports_attachments() {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::AttachmentUnsupported,
+                        "this engine cannot carry an attachment",
+                    );
+                }
                 let request_id = frame
                     .payload
                     .get("requestId")
@@ -1202,6 +1247,12 @@ impl MizarServer {
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                 match engine.prompt_with(&key, text, &attachments).await {
                     Ok(()) => {
+                        // Only now is the attachment spent: a refusal above leaves
+                        // it in place for the retry the client is allowed to make.
+                        if !attachment_ids.is_empty() {
+                            self.uploads
+                                .consume(&device.id, &key.to_string(), &attachment_ids);
+                        }
                         ServerFrame::ok(id, json!({ "accepted": true, "requestId": request_id }))
                     }
                     Err(error) => ServerFrame::error(
@@ -1617,6 +1668,27 @@ impl MizarServer {
     }
 }
 
+/// Membership spelled the way the session list spells ids.
+///
+/// The registry stores bare `session-…` ids; every id this host sends the phone
+/// carries its engine prefix. A workspace list that skipped the prefix made the
+/// phone's set intersection empty, so every session was drawn as unassigned.
+fn membership(engine: EngineId, ids: Option<Vec<String>>) -> Option<Vec<String>> {
+    let ids = ids?;
+    let prefix = format!("{}:", engine.as_str());
+    Some(
+        ids.into_iter()
+            .map(|session| {
+                if session.starts_with(&prefix) {
+                    session
+                } else {
+                    format!("{prefix}{session}")
+                }
+            })
+            .collect(),
+    )
+}
+
 /// The error frame for one refused upload call.
 fn upload_error(id: Option<String>, error: crate::uploads::UploadError) -> ServerFrame {
     let code = match error.code {
@@ -1624,7 +1696,9 @@ fn upload_error(id: Option<String>, error: crate::uploads::UploadError) -> Serve
         "UPLOAD_BAD_CHUNK" => ErrorCode::UploadBadChunk,
         "UPLOAD_TOO_LARGE" | "UPLOAD_LIMITED" => ErrorCode::UploadTooLarge,
         "UPLOAD_INCOMPLETE" => ErrorCode::UploadIncomplete,
+        "ATTACHMENT_UNKNOWN" => ErrorCode::AttachmentUnknown,
         "ATTACHMENT_TOO_LARGE" => ErrorCode::AttachmentTooLarge,
+        "ATTACHMENT_UNSUPPORTED" => ErrorCode::AttachmentUnsupported,
         "ATTACHMENT_FAILED" | "UPLOAD_FAILED" => ErrorCode::AttachmentFailed,
         _ => ErrorCode::MalformedFrame,
     };
@@ -2084,6 +2158,24 @@ mod tests {
             currency: currency.to_string(),
             amount: amount.to_string(),
         }
+    }
+
+    #[test]
+    fn workspace_membership_is_spelled_like_the_session_list() {
+        // The registry stores bare ids; the phone compares them with the ids
+        // `session.list` returned. Without the prefix nothing ever matches.
+        let ids = membership(
+            EngineId::Dsh,
+            Some(vec!["session-1".to_string(), "dsh:session-2".to_string()]),
+        )
+        .unwrap();
+        assert_eq!(ids, vec!["dsh:session-1", "dsh:session-2"]);
+        // "nothing filed here" is an answer; "did not say" is not.
+        assert_eq!(
+            membership(EngineId::Dsh, Some(Vec::new())).unwrap().len(),
+            0
+        );
+        assert!(membership(EngineId::Dsh, None).is_none());
     }
 
     #[test]

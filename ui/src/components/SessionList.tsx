@@ -137,7 +137,9 @@ function engineLabel(key: string): string {
 /** The workspace a session belongs to, as the host named it. */
 function workspaceLabel(session: Session, workspaces: Workspace[]): string | null {
   const raw = session.key.slice(session.key.indexOf(':') + 1)
-  const workspace = workspaces.find((candidate) => candidate.session_ids.includes(raw))
+  const workspace = workspaces.find((candidate) =>
+    (candidate.session_ids ?? []).includes(raw),
+  )
   if (workspace === undefined) return null
   return workspace.name ?? workspace.path ?? null
 }

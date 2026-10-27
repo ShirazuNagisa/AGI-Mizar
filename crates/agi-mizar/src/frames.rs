@@ -148,7 +148,9 @@ pub enum ErrorCode {
     UploadBadChunk,
     UploadTooLarge,
     UploadIncomplete,
+    AttachmentUnknown,
     AttachmentTooLarge,
+    AttachmentUnsupported,
     AttachmentFailed,
 }
 
@@ -178,7 +180,9 @@ impl ErrorCode {
             Self::UploadBadChunk => "UPLOAD_BAD_CHUNK",
             Self::UploadTooLarge => "UPLOAD_TOO_LARGE",
             Self::UploadIncomplete => "UPLOAD_INCOMPLETE",
+            Self::AttachmentUnknown => "ATTACHMENT_UNKNOWN",
             Self::AttachmentTooLarge => "ATTACHMENT_TOO_LARGE",
+            Self::AttachmentUnsupported => "ATTACHMENT_UNSUPPORTED",
             Self::AttachmentFailed => "ATTACHMENT_FAILED",
         }
     }
