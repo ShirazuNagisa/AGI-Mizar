@@ -42,6 +42,15 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a stream may take to produce its opening frame.
 const STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long the first session list may keep retrying while DSH composes.
+///
+/// Measured on a real host: the strict descriptors are registered during
+/// composition, but the service behind `session/list` (`sessionController`) comes
+/// up later. The gateway then answers `service-unavailable` — not because the
+/// endpoint is missing, but because it cannot dispatch yet. There is no API to
+/// wait on a service, so the only honest gate is trying again.
+const COMPOSE_GRACE: Duration = Duration::from_secs(60);
+
 /// Records kept per session in memory. Beyond this the oldest are dropped; a
 /// conversation view pages backwards from the engine when it needs them again.
 const MAX_CACHED_RECORDS: usize = 4_000;
@@ -154,6 +163,16 @@ impl DshEngine {
 
     /// One unary call, correlated by id.
     async fn request(&self, frame: DesktopFrame, id: String) -> Result<Value, EngineError> {
+        self.request_with(frame, id, REQUEST_TIMEOUT).await
+    }
+
+    /// One unary call with an explicit deadline.
+    async fn request_with(
+        &self,
+        frame: DesktopFrame,
+        id: String,
+        timeout: Duration,
+    ) -> Result<Value, EngineError> {
         let (tx, rx) = oneshot::channel();
         {
             self.inner().pending.insert(id.clone(), tx);
@@ -162,7 +181,7 @@ impl DshEngine {
             self.inner().pending.remove(&id);
             return Err(error);
         }
-        match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
+        match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(Ok(value))) => Ok(value),
             Ok(Ok(Err(upstream))) => Err(EngineError::Upstream {
                 code: upstream.code,
@@ -179,9 +198,23 @@ impl DshEngine {
 
     /// Call an endpoint with the `request` wrapper DSH's descriptors use.
     async fn call(&self, endpoint: &str, args: Value) -> Result<Value, EngineError> {
+        self.call_with(endpoint, args, REQUEST_TIMEOUT).await
+    }
+
+    /// Call an endpoint, allowing a longer wait than the default.
+    async fn call_with(
+        &self,
+        endpoint: &str,
+        args: Value,
+        timeout: Duration,
+    ) -> Result<Value, EngineError> {
         let id = self.next_id();
-        self.request(DesktopFrame::invoke(id.clone(), endpoint, args), id)
-            .await
+        self.request_with(
+            DesktopFrame::invoke(id.clone(), endpoint, args),
+            id,
+            timeout,
+        )
+        .await
     }
 
     /// Read the opening frame of a stream, then cancel it.
@@ -283,14 +316,24 @@ impl DshEngine {
         }
 
         while let Some(text) = incoming.recv().await {
-            match LinkFrame::parse(&text) {
-                Some(LinkFrame::Event(event)) => self.on_event(event),
-                Some(LinkFrame::Result(result)) => self.on_result(result),
-                Some(LinkFrame::StreamItem(item)) => self.on_stream_item(item),
-                Some(LinkFrame::StreamEnd(end)) => self.on_stream_end(end),
-                Some(LinkFrame::Approval(frame)) => self.on_approval(frame),
-                Some(LinkFrame::Question(frame)) => self.on_question(frame),
-                Some(LinkFrame::Notice(frame)) => self.on_notice(frame),
+            let Some(frame) = LinkFrame::parse(&text) else {
+                // A frame that fails to parse is otherwise a silence, and a
+                // silence on this link looks like the host hanging.
+                tracing::warn!(
+                    "dsh link: dropped a {} byte frame that did not parse — head {}",
+                    text.len(),
+                    &text[..text.len().min(160)]
+                );
+                continue;
+            };
+            match frame {
+                LinkFrame::Event(event) => self.on_event(event),
+                LinkFrame::Result(result) => self.on_result(result),
+                LinkFrame::StreamItem(item) => self.on_stream_item(item),
+                LinkFrame::StreamEnd(end) => self.on_stream_end(end),
+                LinkFrame::Approval(frame) => self.on_approval(frame),
+                LinkFrame::Question(frame) => self.on_question(frame),
+                LinkFrame::Notice(frame) => self.on_notice(frame),
                 // A second hello, or a frame from a newer plugin: ignored.
                 _ => {}
             }
@@ -501,8 +544,29 @@ impl DshEngine {
     }
 
     /// Re-read the session list and announce the difference.
+    ///
+    /// Retried while the host is still composing: a plugin attaches as soon as
+    /// it can dial, which can be before the services behind the endpoints exist.
     async fn refresh_sessions(&self) -> Result<Vec<Session>, EngineError> {
-        let value = self.call("session/list", json!({ "_request": {} })).await?;
+        let deadline = tokio::time::Instant::now() + COMPOSE_GRACE;
+        let mut wait = Duration::from_millis(250);
+        // Longer than the default: the first list of a few hundred sessions is
+        // the slowest call this plugin makes, and a timeout there looks like a
+        // broken host rather than a big list.
+        const LIST_TIMEOUT: Duration = Duration::from_secs(90);
+        let value = loop {
+            match self
+                .call_with("session/list", json!({ "_request": {} }), LIST_TIMEOUT)
+                .await
+            {
+                Ok(value) => break value,
+                Err(error) if is_not_composed(&error) && tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(Duration::from_secs(2));
+                }
+                Err(error) => return Err(error),
+            }
+        };
         let items = value
             .get("items")
             .and_then(Value::as_array)
@@ -510,6 +574,16 @@ impl DshEngine {
             .unwrap_or_default();
 
         let parsed: Vec<Session> = items.iter().filter_map(parse_session).collect();
+        tracing::info!(
+            "dsh: session/list answered {} rows, {} parsed",
+            items.len(),
+            parsed.len()
+        );
+        if items.len() > 0 && parsed.is_empty() {
+            // The shape changed, or we are reading the wrong keys. One row is
+            // enough to say which.
+            tracing::warn!("dsh: first row looked like {}", items[0]);
+        }
         let mut removed: Vec<SessionKey> = Vec::new();
         {
             let mut inner = self.inner();
@@ -600,6 +674,21 @@ impl DshEngine {
         }
 
         Ok(records)
+    }
+}
+
+/// Whether a failure is "the host is still composing" rather than a real error.
+fn is_not_composed(error: &EngineError) -> bool {
+    match error {
+        EngineError::Upstream { code, message, .. } => {
+            code.contains("service-unavailable")
+                || code.contains("invocation-unavailable")
+                || message.contains("is unavailable")
+        }
+        // A call that has not answered yet is not a call that failed: the host is
+        // still bringing the service up, and the next attempt may well work.
+        EngineError::Timeout(_) => true,
+        _ => false,
     }
 }
 

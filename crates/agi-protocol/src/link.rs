@@ -172,7 +172,14 @@ impl LinkFrame {
     /// frame this build does not implement — all three are "ignore this", never
     /// "drop the connection".
     pub fn parse(text: &str) -> Option<Self> {
-        let value: Value = serde_json::from_str(text).ok()?;
+        // `JSON.stringify` happily writes a lone surrogate (`\ud83d` with no
+        // trailing half) because JavaScript strings allow one. `serde_json`
+        // refuses, and the refusal is all-or-nothing: one half emoji in one
+        // session title made a 946 KB `session/list` answer unparseable, which
+        // looked exactly like the host hanging. Repairing the escape is the
+        // difference between losing a character and losing the connection.
+        let repaired = repair_lone_surrogates(text);
+        let value: Value = serde_json::from_str(&repaired).ok()?;
         let kind = value.get("type")?.as_str()?;
 
         match kind {
@@ -187,6 +194,74 @@ impl LinkFrame {
             _ => None,
         }
     }
+}
+
+/// Replace lone surrogate escapes with U+FFFD.
+///
+/// A high surrogate must be followed by a low one; when it is not, the pair was
+/// never valid and the character it stood for does not exist. Writing the
+/// replacement character keeps the JSON valid and costs one glyph in one string.
+fn repair_lone_surrogates(text: &str) -> std::borrow::Cow<'_, str> {
+    let bytes = text.as_bytes();
+    let mut out: Option<String> = None;
+    let mut index = 0usize;
+    let mut copied = 0usize;
+
+    while index + 5 < bytes.len() {
+        if bytes[index] != b'\\' || bytes[index + 1] != b'u' {
+            index += 1;
+            continue;
+        }
+        let hex = &bytes[index + 2..index + 6];
+        let Some(code) = hex_value(hex) else {
+            index += 2;
+            continue;
+        };
+        // A high surrogate is only valid when a low one follows immediately.
+        // A pair is stepped over whole: stopping between the halves would read
+        // the low half as an orphan and mangle a perfectly good character.
+        let paired = (0xD800..=0xDBFF).contains(&code)
+            && index + 11 < bytes.len()
+            && bytes[index + 6] == b'\\'
+            && bytes[index + 7] == b'u'
+            && hex_value(&bytes[index + 8..index + 12])
+                .is_some_and(|next| (0xDC00..=0xDFFF).contains(&next));
+        if paired {
+            index += 12;
+            continue;
+        }
+
+        let lone_high = (0xD800..=0xDBFF).contains(&code);
+        let orphan_low = (0xDC00..=0xDFFF).contains(&code);
+
+        if lone_high || orphan_low {
+            let buffer = out.get_or_insert_with(|| String::with_capacity(text.len()));
+            buffer.push_str(&text[copied..index]);
+            buffer.push_str("\\uFFFD");
+            index += 6;
+            copied = index;
+            continue;
+        }
+        index += 6;
+    }
+
+    match out {
+        Some(mut buffer) => {
+            buffer.push_str(&text[copied..]);
+            std::borrow::Cow::Owned(buffer)
+        }
+        None => std::borrow::Cow::Borrowed(text),
+    }
+}
+
+/// Read four hex digits.
+fn hex_value(digits: &[u8]) -> Option<u32> {
+    let mut value = 0u32;
+    for byte in digits {
+        let digit = (*byte as char).to_digit(16)?;
+        value = value * 16 + digit;
+    }
+    Some(value)
 }
 
 /// How an endpoint is called.
@@ -349,6 +424,26 @@ mod tests {
         };
         let error = result.into_result().unwrap_err();
         assert_eq!(error.code, "session/writer-held");
+    }
+
+    #[test]
+    fn repairs_a_lone_surrogate_instead_of_refusing_the_frame() {
+        // What `JSON.stringify` writes for a string holding half an emoji.
+        let text = r#"{"v":1,"type":"result","id":"dsh-1","ok":true,"value":{"title":"half \ud83d here"}}"#;
+        let Some(LinkFrame::Result(result)) = LinkFrame::parse(text) else {
+            panic!("a lone surrogate must not cost the whole frame")
+        };
+        let title = result.value.unwrap()["title"].as_str().unwrap().to_string();
+        assert!(title.contains('\u{FFFD}'), "{title}");
+    }
+
+    #[test]
+    fn leaves_a_valid_pair_alone() {
+        let text = r#"{"v":1,"type":"result","id":"dsh-1","ok":true,"value":{"title":"\ud83d\ude00"}}"#;
+        let Some(LinkFrame::Result(result)) = LinkFrame::parse(text) else {
+            panic!("a valid pair must parse")
+        };
+        assert_eq!(result.value.unwrap()["title"].as_str().unwrap(), "\u{1F600}");
     }
 
     #[test]
