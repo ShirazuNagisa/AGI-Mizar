@@ -124,6 +124,7 @@ dependencies = [
  "agi-protocol",
  "async-trait",
  "chrono",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

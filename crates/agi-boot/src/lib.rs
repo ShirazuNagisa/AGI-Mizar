@@ -61,10 +61,15 @@ pub struct Booted {
 
 impl Booted {
     /// The URL a window should load.
+    ///
+    /// The theme rides along so the page paints itself correctly on the first
+    /// frame instead of flashing the wrong background while it asks the kernel.
     pub fn window_url(&self) -> String {
         format!(
-            "http://127.0.0.1:{}/?token={}",
-            self.api_port, self.api_token
+            "http://127.0.0.1:{}/?token={}&theme={}",
+            self.api_port,
+            self.api_token,
+            self.core.theme()
         )
     }
 }
@@ -126,6 +131,12 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
     engines.push(claude.clone());
 
     let core = Core::new(engines);
+    // The window's own preferences live beside the endpoint file, not in the
+    // browser: the window's origin changes with the port on every launch.
+    if let Some(home) = endpoint_file.parent() {
+        core.load_preferences(home.join("preferences.json"));
+        dsh.set_usage_cache_path(home.join("usage-dsh.json"));
+    }
     core.start().await;
 
     let dsh_home = std::env::var("DSH_HOME")

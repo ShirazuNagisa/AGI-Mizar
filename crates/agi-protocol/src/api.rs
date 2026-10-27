@@ -24,6 +24,9 @@ use crate::engine::{Capabilities, EngineId};
 pub struct StateSnapshot {
     /// The application version, for the about panel and bug reports.
     pub version: String,
+    /// `system`, `light` or `dark` — the window paints itself before it has
+    /// asked the kernel, and this is the stored answer for the next launch.
+    pub theme: String,
     pub engines: Vec<EngineStatus>,
     pub sessions: Vec<Session>,
     pub interactions: Vec<Interaction>,
@@ -49,7 +52,7 @@ pub struct EngineStatus {
 /// buckets into its own local day and the kernel adds the buckets up, so a host
 /// whose engines disagree about the time zone cannot produce a day that no clock
 /// showed.
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageDay {
     /// "YYYY-MM-DD", local time zone.
@@ -69,7 +72,7 @@ pub struct UsageDay {
 }
 
 /// What one model did on one day.
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelUsage {
     pub model: String,
@@ -170,6 +173,9 @@ pub enum Command {
         #[serde(default)]
         refresh: bool,
     },
+    /// Remember the window's appearance across launches.
+    SetTheme { theme: String },
+
     /// Liveness probe, used by the shell before it shows a window.
     Ping,
 }

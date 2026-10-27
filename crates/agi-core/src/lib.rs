@@ -15,15 +15,16 @@
 //!
 //! ### What is deliberately not here
 //!
-//! No persistence. The kernel is a live view of what the engines report; the
-//! session logs are the engines' own durable record, and a second copy would be a
-//! second truth. SQLite arrives with the features that need it (search, settings,
-//! the deliverable index), not before.
+//! No session persistence. The kernel is a live view of what the engines report;
+//! the session logs are the engines' own durable record, and a second copy would
+//! be a second truth. The one exception is the window's own preferences — a
+//! theme name — which belongs to this app rather than to any engine.
 
 pub mod endpoint;
 pub mod server;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use agi_engine::{Engine, EngineError, EngineEvent};
@@ -32,6 +33,7 @@ use agi_protocol::api::{
 };
 use agi_protocol::domain::{Interaction, Record, Session, SessionKey};
 use agi_protocol::engine::EngineId;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 /// How many events a slow subscriber may fall behind before it is told it missed
@@ -53,6 +55,33 @@ struct Store {
 }
 
 /// The kernel.
+/// What the window remembers between launches.
+///
+/// The page's origin changes with the kernel's port, so the browser's own
+/// storage cannot hold this; it lives beside the device roster instead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Preferences {
+    #[serde(default = "default_theme")]
+    pub theme: String,
+}
+
+fn default_theme() -> String {
+    "system".to_string()
+}
+
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            theme: default_theme(),
+        }
+    }
+}
+
+/// Whether a theme name is one this window can paint.
+pub fn valid_theme(theme: &str) -> bool {
+    matches!(theme, "system" | "light" | "dark")
+}
+
 pub struct Core {
     engines: Vec<Arc<dyn Engine>>,
     store: RwLock<Store>,
@@ -61,6 +90,9 @@ pub struct Core {
     /// The phone server, when this build has one. Attached after construction
     /// because it needs the kernel it serves.
     pairing: RwLock<Option<Arc<dyn PairingSource>>>,
+    preferences: RwLock<Preferences>,
+    /// Where preferences are written, once a launch tells us.
+    preferences_path: RwLock<Option<PathBuf>>,
 }
 
 impl Core {
@@ -73,6 +105,8 @@ impl Core {
             events,
             version: env!("CARGO_PKG_VERSION").to_string(),
             pairing: RwLock::new(None),
+            preferences: RwLock::new(Preferences::default()),
+            preferences_path: RwLock::new(None),
         })
     }
 
@@ -82,6 +116,67 @@ impl Core {
             .pairing
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(source);
+    }
+
+    /// Read the stored preferences, then remember where to write them.
+    pub fn load_preferences(&self, path: PathBuf) {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(stored) = serde_json::from_str::<Preferences>(&text) {
+                if valid_theme(&stored.theme) {
+                    *self
+                        .preferences
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = stored;
+                }
+            }
+        }
+        *self
+            .preferences_path
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(path);
+    }
+
+    /// The appearance the window should start with.
+    pub fn theme(&self) -> String {
+        self.preferences
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .theme
+            .clone()
+    }
+
+    /// Remember the appearance for the next launch.
+    pub fn set_theme(&self, theme: &str) {
+        if !valid_theme(theme) {
+            return;
+        }
+        let path = {
+            let mut preferences = self
+                .preferences
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if preferences.theme == theme {
+                return;
+            }
+            preferences.theme = theme.to_string();
+            self.preferences_path
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        };
+        let Some(path) = path else {
+            return;
+        };
+        let stored = Preferences {
+            theme: theme.to_string(),
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&stored).unwrap_or_default(),
+        );
     }
 
     /// The version reported in every snapshot.
@@ -251,6 +346,7 @@ impl Core {
 
         StateSnapshot {
             version: self.version.clone(),
+            theme: self.theme(),
             engines,
             sessions,
             interactions: store.interactions.values().cloned().collect(),
@@ -314,6 +410,13 @@ impl Core {
     pub async fn dispatch(&self, command: Command) -> CommandResponse {
         match command {
             Command::State => CommandResponse::ok(self.snapshot()),
+            Command::SetTheme { theme } => {
+                if !valid_theme(&theme) {
+                    return CommandResponse::error("MALFORMED_FRAME", "unknown theme");
+                }
+                self.set_theme(&theme);
+                CommandResponse::done()
+            }
             Command::Reconnect { engine: id } => {
                 let Some(engine) = self.engine(id) else {
                     return CommandResponse::error("UNKNOWN_ENGINE", "no such engine");
@@ -567,6 +670,27 @@ mod tests {
                 events,
             })
         }
+    }
+
+    #[test]
+    fn the_theme_is_remembered_between_launches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preferences.json");
+        let core = Core::new(Vec::new());
+        core.load_preferences(path.clone());
+        assert_eq!(core.theme(), "system");
+
+        core.set_theme("dark");
+        assert_eq!(core.theme(), "dark");
+
+        // A second launch reads what the first one wrote.
+        let again = Core::new(Vec::new());
+        again.load_preferences(path);
+        assert_eq!(again.theme(), "dark");
+
+        // A name this window cannot paint is refused rather than stored.
+        core.set_theme("neon");
+        assert_eq!(core.theme(), "dark");
     }
 
     #[async_trait]

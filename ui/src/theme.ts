@@ -26,7 +26,10 @@ export function applyTheme(preference: ThemePreference): void {
 /** Read the stored preference; `system` when nothing was chosen. */
 export function storedTheme(): ThemePreference {
   const value = localStorage.getItem(STORAGE_KEY)
-  return value === 'light' || value === 'dark' ? value : 'system'
+  if (value === 'light' || value === 'dark') return value
+  // The kernel appends what it remembered to the window's URL.
+  const fromUrl = new URLSearchParams(window.location.search).get('theme')
+  return fromUrl === 'light' || fromUrl === 'dark' ? fromUrl : 'system'
 }
 
 /** Remember the choice. */

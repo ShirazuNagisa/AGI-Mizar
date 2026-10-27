@@ -235,6 +235,7 @@ export type Command =
   | { op: 'reconnect'; engine: EngineId }
   | { op: 'pairing'; refresh: boolean }
   | { op: 'usage_overview' }
+  | { op: 'set_theme'; theme: 'system' | 'light' | 'dark' }
   | { op: 'ping' }
 
 export interface ApiError {

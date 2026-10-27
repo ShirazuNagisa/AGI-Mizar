@@ -5,7 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
     <title>AGI Mizar</title>
-    <script type="module" crossorigin src="/assets/index-BxX9EaEp.js"></script>
+    <script>
+      // Paint the right background before any module loads: the theme is in the
+      // URL because the kernel's port, and so this page's origin, changes on
+      // every launch.
+      (function () {
+        var choice = new URLSearchParams(location.search).get('theme')
+        var systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+        var dark = choice === 'dark' || (choice !== 'light' && systemDark)
+        document.documentElement.classList.toggle('dark', dark)
+        document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
+      })()
+    </script>
+    <script type="module" crossorigin src="/assets/index-BmeqSian.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-C-peEMEX.css">
   </head>
   <body>

@@ -144,6 +144,13 @@ export function App() {
     }
   }, [])
 
+  const chooseTheme = (next: ThemePreference) => {
+    setTheme(next)
+    // The kernel remembers it for the next launch; the local copy only smooths
+    // over a reload of this same window.
+    void kernel.send({ op: 'set_theme', theme: next }).catch(() => {})
+  }
+
   const setAccount = (next: boolean) => {
     setLoggedIn(next)
     if (next) localStorage.setItem(ACCOUNT_KEY, '1')
@@ -192,7 +199,7 @@ export function App() {
             loggedIn={loggedIn}
             serverConnected={false}
             theme={theme}
-            onThemeChange={setTheme}
+            onThemeChange={chooseTheme}
             kernel={kernel}
           />
         ) : null}

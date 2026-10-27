@@ -19,6 +19,7 @@
 //! The engine deliberately does not retry: it is not the one dialling.
 
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
@@ -72,6 +73,28 @@ const MAX_CACHED_RECORDS: usize = 4_000;
 /// home page asks again whenever it draws, and nobody needs second-level
 /// freshness on "how much did I do in September".
 const USAGE_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// The fold written for the next launch, and when it was made.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct UsageCacheFile {
+    folded_at: i64,
+    days: Vec<agi_protocol::api::UsageDay>,
+}
+
+impl UsageCacheFile {
+    /// Age in milliseconds; a clock that went backwards reads as fresh.
+    fn age_ms(&self) -> i64 {
+        now_ms().saturating_sub(self.folded_at).max(0)
+    }
+}
+
+/// Epoch milliseconds.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 /// How many messages one usage page asks for.
 ///
@@ -150,6 +173,10 @@ pub struct DshEngine {
     /// A weak handle to self, so `refresh_sessions(&self)` can start a task that
     /// outlives the call. `Arc::new_cyclic` fills it in after construction.
     me: Weak<DshEngine>,
+    /// Where the folded history is kept between launches, when somebody set it.
+    usage_cache_path: Mutex<Option<PathBuf>>,
+    /// One background refresh at a time.
+    usage_refreshing: std::sync::atomic::AtomicBool,
     /// Tells the socket pump to drop the plugin's connection.
     ///
     /// The desktop does not dial the plugin — the plugin dials in — so the only
@@ -173,6 +200,8 @@ impl DshEngine {
             inner: Mutex::new(inner),
             next_id: AtomicU64::new(1),
             usage_cache: Mutex::new(None),
+            usage_cache_path: Mutex::new(None),
+            usage_refreshing: std::sync::atomic::AtomicBool::new(false),
             me: me.clone(),
             kick,
         })
@@ -198,6 +227,15 @@ impl DshEngine {
 
     fn next_id(&self) -> String {
         format!("dsh-{}", self.next_id.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Keep the folded history in this file, so the first window of the next
+    /// launch does not start from zero while hundreds of sessions are re-read.
+    pub fn set_usage_cache_path(&self, path: PathBuf) {
+        *self
+            .usage_cache_path
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(path);
     }
 
     /// Watch for a request to hang up on the plugin.
@@ -914,6 +952,67 @@ impl DshEngine {
         Ok(value.get("values").cloned().unwrap_or(Value::Null))
     }
 
+    /// The last fold written to disk, with how old it is.
+    fn read_usage_cache(&self) -> Option<(Vec<agi_protocol::api::UsageDay>, i64)> {
+        let path = self
+            .usage_cache_path
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()?;
+        let text = std::fs::read_to_string(path).ok()?;
+        let stored: UsageCacheFile = serde_json::from_str(&text).ok()?;
+        let age = stored.age_ms();
+        Some((stored.days, age))
+    }
+
+    /// Write one complete fold for the next launch.
+    fn write_usage_cache(&self, days: &[agi_protocol::api::UsageDay]) {
+        let path = self
+            .usage_cache_path
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let Some(path) = path else {
+            return;
+        };
+        let stored = UsageCacheFile {
+            folded_at: now_ms(),
+            days: days.to_vec(),
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(text) = serde_json::to_vec(&stored) {
+            let _ = std::fs::write(path, text);
+        }
+    }
+
+    /// Fold again in the background, at most once at a time.
+    fn refresh_usage_in_background(&self) {
+        use std::sync::atomic::Ordering;
+        if self.usage_refreshing.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let Some(engine) = self.me.upgrade() else {
+            self.usage_refreshing.store(false, Ordering::SeqCst);
+            return;
+        };
+        tokio::spawn(async move {
+            if let Ok((days, complete)) = engine.fold_usage().await {
+                if complete {
+                    engine.write_usage_cache(&days);
+                    let listed = engine.inner().sessions.len();
+                    *engine
+                        .usage_cache
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                        Some((std::time::Instant::now(), listed, days));
+                }
+            }
+            engine.usage_refreshing.store(false, Ordering::SeqCst);
+        });
+    }
+
     /// The folded usage history, when it is still fresh *and* was folded from
     /// as many sessions as the engine knows about now.
     ///
@@ -961,6 +1060,9 @@ impl DshEngine {
         // the next minute: caching it is how the dashboard showed a quarter of
         // the history until the cache expired.
         let mut every_session_read = true;
+        let mut failed = 0usize;
+        let mut truncated = 0usize;
+        let mut unreadable = 0usize;
         for session in &sessions {
             // One session that cannot be paged must not blank the whole chart.
             let mut usage = crate::history::SessionUsage::default();
@@ -970,6 +1072,16 @@ impl DshEngine {
                 let records = match self.raw_page(&session.key, USAGE_PAGE, before).await {
                     Ok(records) => records,
                     Err(error) => {
+                        // A session the host will not open a stream for is not a
+                        // failed read: subagent sessions and archived ones answer
+                        // exactly this, and counting them as failures keeps the
+                        // whole fold out of the cache forever.
+                        if is_unaddressable(&error) {
+                            unreadable += 1;
+                            complete = true;
+                        } else {
+                            failed += 1;
+                        }
                         tracing::debug!("dsh: no records for {} — {error}", session.key);
                         break;
                     }
@@ -995,6 +1107,7 @@ impl DshEngine {
                 before = oldest;
             }
             if !complete {
+                truncated += 1;
                 every_session_read = false;
                 // Said once per fold, because a silent truncation reads as a
                 // cheaper month than the operator had.
@@ -1006,8 +1119,26 @@ impl DshEngine {
             }
             usage.finish(&mut days);
         }
+        if !every_session_read || failed > 0 {
+            tracing::warn!(
+                "dsh: usage fold incomplete — {failed} failed, {truncated} truncated, of {}",
+                sessions.len()
+            );
+        }
+        if unreadable > 0 {
+            tracing::debug!("dsh: {unreadable} sessions the host would not open");
+        }
         Ok((days.finish(), every_session_read))
     }
+}
+
+/// Whether an error means "this session has no stream to read" rather than
+/// "reading it failed".
+fn is_unaddressable(error: &EngineError) -> bool {
+    let text = error.to_string();
+    text.contains("stream closed before its opening frame")
+        || text.contains("NOT_FOUND")
+        || text.contains("UNKNOWN_SESSION")
 }
 
 /// The log sequence number a page record carries, wrapped or bare.
@@ -1206,12 +1337,6 @@ fn parse_session(value: &Value) -> Option<Session> {
 }
 
 /// Epoch milliseconds, without pulling in a date library for one call.
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as i64)
-        .unwrap_or(0)
-}
 
 #[async_trait]
 impl Engine for DshEngine {
@@ -1323,11 +1448,20 @@ impl Engine for DshEngine {
         if let Some(days) = self.cached_usage() {
             return Ok(days);
         }
+        // A previous launch's fold is better than a zero dashboard: serve it and
+        // fold again behind the window's back.
+        if let Some((days, age)) = self.read_usage_cache() {
+            if age > USAGE_CACHE_TTL.as_millis() as i64 {
+                self.refresh_usage_in_background();
+            }
+            return Ok(days);
+        }
 
         let (days, complete) = self.fold_usage().await?;
         if !complete {
             return Ok(days);
         }
+        self.write_usage_cache(&days);
         let listed = self.inner().sessions.len();
         {
             let mut cache = self
