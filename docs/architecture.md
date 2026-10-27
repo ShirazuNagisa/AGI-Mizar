@@ -244,23 +244,90 @@ hook 每次工具调用都会跑，而且是被 Claude Code 调起来的——�
 `agi-daemon --install-claude-hooks` 才会改 `~/.claude/settings.json`：先备份、按命令里的标记识别
 （幂等）、只增不删别人的 hook、卸载时只删自己的。为了快速看一眼而起的守护进程不该动用户的家目录。
 
-## 9. 鉴权
+## 9. Mizar 服务端：唯一一张对外的脸
 
-两个令牌，不是一个：
+桌面端有三张脸：本地 API 给自己的窗口、DSH 链路给插件、**Mizar v1 给手机**。只有最后一张要在操作者
+控制不了的网络上工作，所以只有它有配对、令牌和限流。
 
-| 令牌 | 谁持有 | 放哪 |
+### 三条路由，两条免鉴权
+
+| 路由 | 鉴权 | 干什么 |
 |---|---|---|
-| plugin token | `dsh-mizar` 插件 | `~/.agi-mizar/endpoint.json`（`0600`） |
-| api token | 窗口 / CLI | 只打印到终端，或注入页面 |
+| `GET /mizar/v1/hello` | 无 | "这个地址能拨通吗，是谁" |
+| `POST /mizar/v1/pair` | 无，一次性 | 用配对码换设备令牌 |
+| `GET /mizar/v1/ws` | 第一帧里的设备令牌 | 其余全部 |
+
+免鉴权的暴露面是刻意划死的：`hello` 只说主机 id 和名字；`pair` 需要一个存在 5 分钟、单次使用、
+每分钟最多试 5 次的码。除此之外任何东西都要令牌。
+
+### 配对码是给人读的
+
+八位 Crockford base32，显示成 `K7QP-3M2X`。这个字母表没有 `I`、`L`、`O`、`U`：前三个是人从屏幕上
+抄错的那三个，`U` 去掉是为了随机码不会拼出难听的字。大小写不敏感，规范化会把 `O`→`0`、`I`/`L`→`1`。
+
+**单次使用是在发令牌之前就把码清掉**，所以两部手机抢同一个码只会有一个赢。过期码也会被清掉——
+留着它会让"重新生成一个"之后旧码还能用。
+
+### 令牌只存哈希
+
+`~/.agi-mizar/devices.json`（`0600`）里只有 SHA-256。状态文件泄漏——备份、同步目录、别人拍的一张
+目录截图——不等于泄漏访问权。明文令牌只在配对响应里出现一次。
+
+吊销过的设备与从未存在的设备**回同一个错误**：否则一个被吊销的手机就能确认自己曾经是真的。
+
+### 记录要翻译，不能转发
+
+手机的对话界面解的是 DSH 的事件词表（`{type:"user/message", seq, time, data:{turn, content}}`）。
+我们的共享模型更平，所以 `record_to_event()` 把它**拼回手机已经认识的那个形状**。这是刻意的：
+否则每加一个引擎就要发一次手机版本，而手机不该知道 Codex 和 Claude Code 的存在。
+
+工具调用与结果不翻译——手机的摘要视图本来就不画它们。
+
+### 这一版实现了什么
+
+| 已实现 | 说明 |
+|---|---|
+| `host.info` | 含 `addresses` 与 `desktop:{os, client}` |
+| `session.list` | 三个引擎的会话，`sessionId` 是 `engine:id` |
+| `session.messages` | 从共享记录翻译成 DSH 事件形状；`context` 暂时 `null` |
+| `session.prompt` / `session.cancel` | 直通引擎 |
+| `interactions.pending` / `approval.answer` | 审批走内核的分发（它已经知道是哪个引擎问的） |
+| `session.model.set` / `session.permission.set` | DSH 收 `provider/model`，另两个收裸模型名 |
+| 事件 | `approval.request` / `approval.resolved` / `interactions.changed` |
+
+| 未实现（回 `NOT_IMPLEMENTED`） | 等什么 |
+|---|---|
+| `relay.set`、中继隧道、`push.register` | 中继客户端与 APNs 转发 |
+| `upload.*`、附件 prompt | 分片暂存与 content part 构造 |
+| `file.stat` / `file.read` | 工作区围栏与预览缓存 |
+| `workspace.list`、`session.activity`、`session.stats`、`session.create/rename/archive` | 各自的投影与注册表读 |
+| `question.*` | 提问还没有进共享模型，`interactions.pending` 的 `questions` 恒为空 |
+
+`NOT_IMPLEMENTED` 是协议自己的信号，意思是"这台主机比你旧"——比一个看起来成功的桩好得多。
+
+## 10. 鉴权
+
+四类凭据，各管一件事：
+
+| 凭据 | 谁持有 | 放哪 | 能做什么 |
+|---|---|---|---|
+| plugin token | `dsh-mizar` 插件 | `~/.agi-mizar/endpoint.json`（`0600`） | 拨 `/dsh` |
+| api token | 窗口 / CLI | 只打印到终端，或注入页面 | 读状态、发命令 |
+| hook token | `agi-mizar-hook` | `~/.agi-mizar/hook.json`（`0600`） | 只有 `/hooks/claude/*` |
+| device token | 手机 | 手机钥匙串 | 只走 `/mizar/v1/ws` |
 
 分开的理由：地址文件任何同用户进程都能读，把 UI 的入口也放进去等于把 UI 的门钥匙放在门口垫子下。
+同理，一个每次工具调用都会跑、而且被 Claude Code 调起来的 shim，不该拿着能驱动窗口的令牌；一台
+经过网络才能到达的手机，更不该。
+
+设备的令牌在主机侧只存 SHA-256，见 §9。
 
 API 只绑 `127.0.0.1`，绑定通配地址在代码构造上就不可能（`TcpListener::bind(("127.0.0.1", 0))`）。
 WS 的 token 走查询参数——浏览器无法给 WebSocket 设 header。
 
 ---
 
-## 10. 测试策略
+## 11. 测试策略
 
 | 层 | 怎么测 | 为什么可信 |
 |---|---|---|
@@ -270,16 +337,19 @@ WS 的 token 走查询参数——浏览器无法给 WebSocket 设 header。
 | 链路（Codex） | 真子进程 + Node 假 app-server | 握手、thread 列表、历史、prompt、**审批应答的取值**、模型与权限设置 |
 | 链路（Claude） | 临时 transcript 目录 + 直接调 hook 入口 | 列表、历史、轮次边界、`isMeta`/sidechain/包装、审批允许与拒绝、无人在场不阻塞 |
 | 安装器 | 临时 settings.json | 幂等、保留别人的 hook、卸载只删自己的、坏 JSON 不覆盖 |
+| Mizar 服务端 | 真 HTTP + 真 WebSocket（无 mock） | 配对码单次、错误码、welcome 无 `id`、未握手、吊销、未知方法 |
 | 内核 | 端到端跑一次 | 起守护进程 → 假插件连入 → `curl` 查 state / messages |
 
 没有用 mock 替代 WebSocket 来测链路：那样测的是 mock。
 
 ---
 
-## 11. 还没做的（以及为什么现在不做）
+## 12. 还没做的（以及为什么现在不做）
 
 | 项 | 等什么 |
 |---|---|
+| 中继隧道、推送、上传、文件预览 | M5b；见 §9 的未实现表 |
+| 提问进共享模型 | 现在 `Interaction` 只带标题与详情，`questions` 恒为空 |
 | Claude 的提问工具（`AskUserQuestion`） | 目前只有审批走 hook；提问要借"拒绝的理由"回传答案，属独立一项 |
 
 | 持久化 | 等搜索 / 设置 / 交付文件索引 |

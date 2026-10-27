@@ -17,6 +17,7 @@ agi-engine = { workspace = true }
 agi-engine-claude = { workspace = true }
 agi-engine-codex = { workspace = true }
 agi-engine-dsh = { workspace = true }
+agi-mizar = { workspace = true }
 agi-protocol = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }

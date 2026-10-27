@@ -20,6 +20,7 @@ use agi_engine::Engine;
 use agi_engine_claude::ClaudeEngine;
 use agi_engine_codex::{AppServerConfig, CodexEngine};
 use agi_engine_dsh::DshEngine;
+use agi_mizar::{DeviceStore, MizarServer};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -83,8 +84,10 @@ async fn main() -> anyhow::Result<()> {
     let core = Core::new(engines);
     core.start().await;
 
+    let dsh_home = std::env::var("DSH_HOME")
+        .unwrap_or_else(|_| format!("{}/.dsh", std::env::var("HOME").unwrap_or_default()));
     let (port, _server) = server::bind(
-        core,
+        core.clone(),
         dsh,
         Some(claude),
         server::Config {
@@ -122,12 +125,32 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // The phone's server. A separate listener from the local API: this one binds
+    // every interface, because a phone on the same network has to reach it, and
+    // the local API deliberately does not.
+    let roster = DeviceStore::open(agi_mizar::store::default_store_path(), agi_mizar::store::host_name())?;
+    let mizar = MizarServer::new(core.clone(), roster, dsh_home.clone());
+    let mizar_handle = match mizar.bind(agi_mizar::frames::DEFAULT_PORT).await {
+        Ok(handle) => handle,
+        Err(error) => {
+            println!("mizar port {} unavailable ({error}) — using a free one", agi_mizar::frames::DEFAULT_PORT);
+            mizar.bind(0).await?
+        }
+    };
+    let _ = mizar_handle;
+    let code = mizar.issue_code();
+
     println!("AGI Mizar kernel {}", env!("CARGO_PKG_VERSION"));
     println!("  api    http://127.0.0.1:{port}/api/v1/state");
     println!("  events ws://127.0.0.1:{port}/api/v1/events?token={api_token}");
     println!("  dsh    ws://127.0.0.1:{port}/dsh");
     println!("  file   {}", endpoint_path.display());
     println!("  token  {api_token}");
+    println!("  phone  ws://0.0.0.0:{}/mizar/v1/ws", mizar.port());
+    println!();
+    println!("Pair a phone with this code (valid 5 minutes):");
+    println!("  {}", code.display);
+    println!("  {}", mizar.pairing_uri(&code));
     println!();
     println!("Ctrl-C to stop.");
 

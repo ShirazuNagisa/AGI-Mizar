@@ -30,6 +30,7 @@ dependencies = [
  "agi-engine-claude",
  "agi-engine-codex",
  "agi-engine-dsh",
+ "agi-mizar",
  "agi-protocol",
  "anyhow",
  "tokio",
@@ -98,6 +99,26 @@ name = "agi-hook-shim"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+]
+
+[[package]]
+name = "agi-mizar"
+version = "0.1.0"
+dependencies = [
+ "agi-core",
+ "agi-engine",
+ "agi-protocol",
+ "anyhow",
+ "axum",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -740,6 +761,17 @@ name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
  "cpufeatures",
