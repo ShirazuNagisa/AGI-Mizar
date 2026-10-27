@@ -71,6 +71,19 @@ impl Booted {
 
 /// Start everything.
 pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
+    // One subscriber for the process. Without it every `tracing` call below is
+    // compiled to nothing, which is how "the tunnel never came up" stayed
+    // invisible: the relay had said why on a channel nobody was listening to.
+    // The default level stays quiet; `RUST_LOG=info` is the switch for watching
+    // a link come up.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
+
     let endpoint_file = config
         .endpoint_file
         .clone()
