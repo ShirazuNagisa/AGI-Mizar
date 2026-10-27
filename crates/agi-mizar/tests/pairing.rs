@@ -240,3 +240,32 @@ async fn a_socket_without_hello_is_told_to_handshake() {
     assert_eq!(answer["type"], "error");
     assert_eq!(answer["code"], "UNAUTHENTICATED");
 }
+
+/// The window asks for the code every time it draws the pairing card, and the
+/// slot is empty until the first code is issued — and empty again after one is
+/// used. Taking the code lock twice on one thread froze the whole server; this
+/// test holds the door shut.
+#[tokio::test]
+async fn asking_for_the_code_again_does_not_deadlock() {
+    let (server, _, _dir) = start().await;
+
+    let mut views = Vec::new();
+    for _ in 0..3 {
+        let server = Arc::clone(&server);
+        let view = tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::task::spawn_blocking(move || server.pairing_view(false)),
+        )
+        .await
+        .expect("pairing_view deadlocked on the code lock")
+        .expect("the blocking task panicked");
+        views.push(view);
+    }
+
+    assert!(!views[0].code.is_empty());
+    assert_eq!(
+        views[1].code, views[0].code,
+        "a window that redraws must not invalidate the code on screen"
+    );
+    assert!(views[0].uri.starts_with("mizar://pair?"));
+}

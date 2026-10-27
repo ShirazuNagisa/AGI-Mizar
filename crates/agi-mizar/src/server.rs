@@ -183,10 +183,15 @@ impl MizarServer {
         let code = if refresh {
             self.issue_code()
         } else {
-            self.code()
-                .as_ref()
-                .map(|active| active.code.clone())
-                .unwrap_or_else(|| self.issue_code())
+            // Drop the lock before issuing: `issue_code` takes the same one, and
+            // a `unwrap_or_else` reached while the guard is still alive waits on
+            // a mutex this very thread holds. That froze the server the first
+            // time the window asked again after a code had been used.
+            let showing = self.code().as_ref().map(|active| active.code.clone());
+            match showing {
+                Some(code) => code,
+                None => self.issue_code(),
+            }
         };
         let uri = self.pairing_uri(&code);
         let svg = qrcode::QrCode::new(uri.as_bytes()).ok().map(|qr| {
