@@ -16,6 +16,7 @@ axum = { workspace = true }
 futures-util = { workspace = true }
 if-addrs = "0.13"
 qrcode = { version = "0.14", features = ["svg"] }
+rustls = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
@@ -25,4 +26,5 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+base64 = "0.22"
 tempfile = { workspace = true }

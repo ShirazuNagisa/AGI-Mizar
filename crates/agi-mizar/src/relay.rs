@@ -122,11 +122,23 @@ impl RelayClient {
     /// that prefix to this computer.
     pub fn phone_base_url(&self) -> Option<String> {
         let room = self.current_room()?;
+        // A relay that welcomed us without a room would otherwise produce
+        // `https://relay/r/`, a URL that 404s on every request a phone makes.
+        if room.is_empty() {
+            return None;
+        }
         Some(format!("{}/r/{room}", self.base.trim_end_matches('/')))
     }
 
     /// Dial, serve, redial. Runs until the process ends.
     pub async fn run(self: Arc<Self>) {
+        // rustls 0.23 refuses to guess which crypto provider to use when the
+        // dependency graph leaves more than one (or none) reachable, and it does
+        // so by panicking inside whichever thread dialled first. The tunnel is
+        // the only TLS client in this process, so the choice is made here, next
+        // to the code that depends on it, before the first handshake.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         let mut backoff = RECONNECT_MIN;
         loop {
             match self.serve_once().await {
@@ -264,10 +276,15 @@ impl RelayClient {
             let socket = match tokio_tungstenite::connect_async(url).await {
                 Ok((socket, _)) => socket,
                 Err(error) => {
+                    // Not `ws-close`: the relay has not heard `ws-open-ok` yet,
+                    // so a close lands on a stream with no phone attached, and
+                    // the relay drops its own deadline instead of failing the
+                    // upgrade — the phone then waits out its own timeout with a
+                    // slot held. `error` is the frame that ends it now.
                     let _ = out
                         .send(json!({
-                            "t": "ws-close", "id": id, "code": 1011,
-                            "reason": format!("the local listener refused the stream: {error}")
+                            "t": "error", "id": id,
+                            "message": format!("the local listener refused the stream: {error}")
                         }))
                         .await;
                     return;
@@ -275,6 +292,11 @@ impl RelayClient {
             };
 
             let (mut sink, mut stream) = socket.split();
+
+            // The relay holds the phone until the computer says the stream is
+            // up, and gives up on a timer if it never hears: `ws-open-ok` is not
+            // optional bookkeeping.
+            let _ = out.send(json!({ "t": "ws-open-ok", "id": id })).await;
 
             // Local → relay.
             let relay_out = out.clone();
@@ -284,12 +306,16 @@ impl RelayClient {
                     let Ok(message) = message else { break };
                     match message {
                         Message::Text(text) => {
+                            // Base64 even for text: the tunnel is JSON, and the
+                            // relay decodes every `ws-msg` the same way.
                             let _ = relay_out
-                                .send(json!({ "t": "ws-msg", "id": local_id, "data": text, "binary": false }))
+                                .send(json!({
+                                    "t": "ws-msg", "id": local_id,
+                                    "data": base64(text.as_bytes()), "binary": false
+                                }))
                                 .await;
                         }
                         Message::Binary(bytes) => {
-                            // The tunnel is JSON; binary rides as base64.
                             let _ = relay_out
                                 .send(json!({
                                     "t": "ws-msg", "id": local_id,
@@ -332,13 +358,18 @@ impl RelayClient {
         let Some(data) = frame.get("data").and_then(Value::as_str) else {
             return;
         };
-        // The local listener is a Mizar socket, which speaks JSON text. A binary
-        // frame from a phone is not part of that protocol, so it is dropped rather
-        // than invented into text.
-        let text = if frame.get("binary").and_then(Value::as_bool) == Some(true) {
-            String::from_utf8(unbase64(data).unwrap_or_default()).unwrap_or_default()
-        } else {
-            data.to_string()
+        // Every `ws-msg` is base64, text included: the tunnel is JSON and the
+        // relay does not special-case a text frame. The local listener is a
+        // Mizar socket, which speaks JSON text, so a binary frame from a phone is
+        // dropped rather than invented into text.
+        if frame.get("binary").and_then(Value::as_bool) == Some(true) {
+            return;
+        }
+        let Some(bytes) = unbase64(data) else {
+            return;
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
+            return;
         };
         if let Some(sender) = self.streams().get(id) {
             let _ = sender.try_send(StreamCommand::Text(text));
@@ -377,11 +408,15 @@ async fn replay_request(target: LocalTarget, frame: Value, out: mpsc::Sender<Val
         .and_then(Value::as_str)
         .unwrap_or("/")
         .to_string();
+    // The tunnel is JSON, so a body rides as base64 in both directions. Sending
+    // the text itself was invisible on a fake relay and fatal on the real one:
+    // the relay base64-decodes whatever a computer answers, so a JSON document
+    // arrived at the phone as 82 bytes of noise.
     let body = frame
         .get("body")
         .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
+        .map(|text| unbase64(text).unwrap_or_default())
+        .unwrap_or_default();
 
     let answer = match tokio::time::timeout(
         REPLAY_TIMEOUT,
@@ -393,17 +428,21 @@ async fn replay_request(target: LocalTarget, frame: Value, out: mpsc::Sender<Val
             "t": "res", "id": id,
             "status": response.status,
             "headers": response.headers,
-            "body": response.body,
+            "body": base64(&response.body),
         }),
         Ok(Err(error)) => json!({
             "t": "res", "id": id, "status": 502,
             "headers": { "content-type": "application/json" },
-            "body": json!({ "error": format!("the local listener did not answer: {error}") }).to_string(),
+            "body": base64(
+                json!({ "error": format!("the local listener did not answer: {error}") })
+                    .to_string()
+                    .as_bytes()
+            ),
         }),
         Err(_) => json!({
             "t": "res", "id": id, "status": 504,
             "headers": { "content-type": "application/json" },
-            "body": json!({ "error": "the local listener timed out" }).to_string(),
+            "body": base64(b"{\"error\":\"the local listener timed out\"}"),
         }),
     };
 
@@ -414,37 +453,41 @@ async fn replay_request(target: LocalTarget, frame: Value, out: mpsc::Sender<Val
 struct LocalResponse {
     status: u16,
     headers: HashMap<String, String>,
-    body: String,
+    body: Vec<u8>,
 }
 
 /// Perform one loopback HTTP request.
 ///
 /// `Connection: close` and read to end: the listener is ours, it honours the
 /// header, and this avoids a content-length parser that would have to handle
-/// chunked encoding to be correct.
+/// chunked encoding to be correct. The bytes are kept as bytes — a body is not
+/// necessarily UTF-8, and it is the relay's job to hand the phone what the
+/// listener wrote.
 async fn local_request(
     port: u16,
     method: &str,
     path: &str,
-    body: &str,
+    body: &[u8],
 ) -> std::io::Result<LocalResponse> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).await?;
-    let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nAccept-Encoding: identity\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
-    stream.write_all(request.as_bytes()).await?;
+    stream.write_all(head.as_bytes()).await?;
+    stream.write_all(body).await?;
     stream.flush().await?;
 
     let mut buffer = Vec::new();
     stream.read_to_end(&mut buffer).await?;
-    let text = String::from_utf8_lossy(&buffer);
-    let Some((head, body)) = text.split_once("\r\n\r\n") else {
+    let Some(end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") else {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "the listener answered without headers",
         ));
     };
+    let head = String::from_utf8_lossy(&buffer[..end]).to_string();
+    let mut body = buffer[end + 4..].to_vec();
 
     let mut lines = head.lines();
     let status = lines
@@ -460,11 +503,54 @@ async fn local_request(
         }
     }
 
+    // Undo chunked framing when the listener used it: the relay wants the
+    // payload, not the transport. An incomplete body is an error rather than an
+    // empty 200 — a truncated answer that looks successful is the worst answer.
+    if headers
+        .get("transfer-encoding")
+        .is_some_and(|value| value.eq_ignore_ascii_case("chunked"))
+    {
+        let Some(decoded) = dechunk(&body) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the listener's chunked body was incomplete",
+            ));
+        };
+        body = decoded;
+        headers.remove("transfer-encoding");
+    }
+
+    // Hop-by-hop headers describe our loopback hop, not the phone's: forwarding
+    // `connection: close` would make the relay hang up after every request.
+    const HOP_BY_HOP: [&str; 5] = ["connection", "keep-alive", "te", "trailer", "upgrade"];
+    headers.retain(|name, _| !HOP_BY_HOP.contains(&name.as_str()));
+
     Ok(LocalResponse {
         status,
         headers,
-        body: body.to_string(),
+        body,
     })
+}
+
+/// Strip HTTP chunked framing from a body.
+fn dechunk(body: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut rest = body;
+    loop {
+        let line_end = rest.windows(2).position(|window| window == b"\r\n")?;
+        let size = std::str::from_utf8(&rest[..line_end])
+            .ok()?
+            .split(';')
+            .next()?
+            .trim();
+        let size = usize::from_str_radix(size, 16).ok()?;
+        rest = &rest[line_end + 2..];
+        if size == 0 {
+            return Some(out);
+        }
+        out.extend_from_slice(rest.get(..size)?);
+        rest = rest.get(size.checked_add(2)?..)?;
+    }
 }
 
 /// Turn `https://relay` into `wss://relay/tunnel`.
@@ -575,5 +661,34 @@ mod tests {
         }
         assert_eq!(base64(b"abc"), "YWJj");
         assert_eq!(base64(b"ab"), "YWI=");
+    }
+
+    #[test]
+    fn a_relay_that_names_no_room_gets_no_phone_url() {
+        let client = RelayClient::new("https://relay.example.com", "t", 1);
+        *client.room() = Some(String::new());
+        assert!(client.phone_base_url().is_none());
+    }
+
+    #[test]
+    fn dechunks_what_a_listener_sends() {
+        assert_eq!(
+            dechunk(b"4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n").unwrap(),
+            b"Wikipedia"
+        );
+        // Chunk extensions and uppercase hex are both legal.
+        assert_eq!(
+            dechunk(b"4;name=value\r\nWiki\r\n0\r\n\r\n").unwrap(),
+            b"Wiki"
+        );
+        assert_eq!(
+            dechunk(b"A\r\n0123456789\r\n0\r\n\r\n").unwrap(),
+            b"0123456789"
+        );
+        assert_eq!(dechunk(b"0\r\n\r\n").unwrap(), b"");
+        // A truncated chunk is an error, not an empty answer.
+        assert!(dechunk(b"4\r\nWiki").is_none());
+        assert!(dechunk(b"5\r\nWiki\r\n0\r\n\r\n").is_none());
+        assert!(dechunk(b"zz\r\n").is_none());
     }
 }
