@@ -190,7 +190,61 @@ turn 2  turn/start     2_000_000
 app-server 退出时，所有缓存的 thread 视图都作废——新起的 server 加载的 thread 集合不同。所以
 看护循环清空缓存、广播状态变化、退避后重启；UI 看到的是一个状态，不是一叠失败调用。
 
-## 8. 鉴权
+## 8. Claude Code：三条缝拼起来的引擎
+
+三个引擎里最难接的一个：它**没有入站服务**，也不会让别人往一个开着的窗口里塞消息。所以"控制"
+不是一个通道，而是三条互不相干的缝拼起来的：
+
+| 缝 | 用来做什么 | 局限 |
+|---|---|---|
+| transcript（`~/.claude/projects/<slug>/<id>.jsonl`） | 读会话与历史 | 只读；文件追加不代表"在跑" |
+| hooks（8 个事件） | 观察运行中的会话；`PreToolUse` 能应答 | 要写进 `~/.claude/settings.json` |
+| `claude -p --resume <id>` | 发起一轮 | 一轮一个进程 |
+
+### 一轮的边界是推出来的
+
+文件里没有"第 3 轮"。轮次由**人类提问**界定：一条 `type:"user"`、内容有文本、不是 tool result、
+不是 sidechain、不是 `isMeta` 的记录。后面三条都是实测出来的——真实 transcript 里，由 skill 启动的
+会话第一条 user 记录是 900 字的 skill 正文，把它当标题会让所有这类会话看起来一样。
+
+`<command-message>`、`<task-notification>` 这类包装也是真实的一轮（操作者确实输入了 `/命令`），
+但**不是标题**：它们全都长一样，说不出这个会话在做什么。
+
+### 序号也是字节偏移
+
+一行可能同时承载轮次标记和消息，所以 `seq = 行首字节偏移 * 10 + 槽位`。行号会在重写时移动，时间戳
+在毫秒级会撞、而且 `custom-title` 这类记录根本没有时间戳；字节偏移不会动。
+
+### 会话"在跑"只能靠 hook 说
+
+transcript 只能证明"写过什么"，不能证明"还在写"——被中断的会话和正在跑的会话在磁盘上长得一样。
+所以 `UserPromptSubmit` 打开一个 active 标记、`Stop` 关掉它，`records()` 据此决定最后一轮要不要
+画结束标记。
+
+### hooks 是阻塞的，所以必须有人看着
+
+`PreToolUse` 会一直等到我们回答（上限 55 秒，比 Claude Code 自己的 60 秒短）。如果没人看着就阻塞，
+操作者自己的终端会为每次工具调用停一分钟——比不装 hook 更糟。所以内核数着打开的 UI 事件连接，
+零个的时候 hook 立刻返回空，把决定权还给 Claude Code。
+
+这也是唯一一个"内核知道 UI 在不在"的地方，见 `server.rs` 的 `Attendance`。
+
+### 三个令牌
+
+| 令牌 | 谁用 | 放哪 |
+|---|---|---|
+| plugin token | DSH 插件 | `endpoint.json` |
+| api token | UI | 只打印 / 注入页面 |
+| hook token | `agi-mizar-hook` | `hook.json` |
+
+hook 每次工具调用都会跑，而且是被 Claude Code 调起来的——一个能应答审批的令牌不该同时能驱动窗口。
+
+### 安装是显式的
+
+`agi-daemon --install-claude-hooks` 才会改 `~/.claude/settings.json`：先备份、按命令里的标记识别
+（幂等）、只增不删别人的 hook、卸载时只删自己的。为了快速看一眼而起的守护进程不该动用户的家目录。
+
+## 9. 鉴权
 
 两个令牌，不是一个：
 
@@ -206,7 +260,7 @@ WS 的 token 走查询参数——浏览器无法给 WebSocket 设 header。
 
 ---
 
-## 9. 测试策略
+## 10. 测试策略
 
 | 层 | 怎么测 | 为什么可信 |
 |---|---|---|
@@ -214,17 +268,20 @@ WS 的 token 走查询参数——浏览器无法给 WebSocket 设 header。
 | 投影 | 纯函数，真实载荷形状 | 0.8.x 踩过的坑（注入上下文、`message.content` 少一层）都成了用例 |
 | 链路（DSH） | 两个 channel 模拟插件 | 握手、错令牌、列表、事件、follow+page、掉线撤卡，全是真的代码路径 |
 | 链路（Codex） | 真子进程 + Node 假 app-server | 握手、thread 列表、历史、prompt、**审批应答的取值**、模型与权限设置 |
+| 链路（Claude） | 临时 transcript 目录 + 直接调 hook 入口 | 列表、历史、轮次边界、`isMeta`/sidechain/包装、审批允许与拒绝、无人在场不阻塞 |
+| 安装器 | 临时 settings.json | 幂等、保留别人的 hook、卸载只删自己的、坏 JSON 不覆盖 |
 | 内核 | 端到端跑一次 | 起守护进程 → 假插件连入 → `curl` 查 state / messages |
 
 没有用 mock 替代 WebSocket 来测链路：那样测的是 mock。
 
 ---
 
-## 10. 还没做的（以及为什么现在不做）
+## 11. 还没做的（以及为什么现在不做）
 
 | 项 | 等什么 |
 |---|---|
-| Claude Code 适配 | M3；接口已经定死，加的是适配层 |
+| Claude 的提问工具（`AskUserQuestion`） | 目前只有审批走 hook；提问要借"拒绝的理由"回传答案，属独立一项 |
+
 | 持久化 | 等搜索 / 设置 / 交付文件索引 |
 | Mizar 服务端（配对、中继、推送） | M5；手机协议与黄金帧已经在 `protocol/` 里 |
 | 附件、分支、归档、文件预览 | DSH 侧是 `invoke` 直通；接线时把 `capabilities` 打开 |

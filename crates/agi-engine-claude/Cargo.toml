@@ -1,0 +1,22 @@
+[package]
+name = "agi-engine-claude"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The Claude Code adapter: transcripts for reading, hooks for observing and answering, `claude -p` for prompting."
+
+[dependencies]
+agi-protocol = { workspace = true }
+agi-engine = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

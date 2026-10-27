@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use agi_core::{endpoint, server, Core};
 use agi_engine::Engine;
+use agi_engine_claude::ClaudeEngine;
 use agi_engine_codex::{AppServerConfig, CodexEngine};
 use agi_engine_dsh::DshEngine;
 
@@ -42,6 +43,10 @@ async fn main() -> anyhow::Result<()> {
     // into the UI.
     let plugin_token = random_token();
     let api_token = random_token();
+    // A third token, for the hooks. The shim runs on every tool call and is
+    // invoked by Claude Code, not by the UI: a token that can answer an approval
+    // has no business also being able to drive the window.
+    let hook_token = random_token();
 
     let dsh = DshEngine::new(plugin_token.clone());
     let mut engines: Vec<Arc<dyn Engine>> = vec![dsh.clone()];
@@ -64,15 +69,28 @@ async fn main() -> anyhow::Result<()> {
         println!("codex  not found — set AGI_CODEX_BIN to point at one");
     }
 
+    // Claude Code is always hosted: even with no `claude` executable there are
+    // transcripts to read, and a session list is useful without the ability to
+    // start a turn.
+    let claude = ClaudeEngine::from_environment();
+    let claude_binary = which(&std::env::var("AGI_CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string()));
+    match &claude_binary {
+        Some(path) => println!("claude {}", path.display()),
+        None => println!("claude not found — transcripts are readable, prompts are not"),
+    }
+    engines.push(claude.clone());
+
     let core = Core::new(engines);
     core.start().await;
 
     let (port, _server) = server::bind(
         core,
         dsh,
+        Some(claude),
         server::Config {
             api_token: api_token.clone(),
             plugin_token: plugin_token.clone(),
+            hook_token: hook_token.clone(),
         },
     )
     .await?;
@@ -80,6 +98,29 @@ async fn main() -> anyhow::Result<()> {
     // Published after the listener is up, so the plugin never dials a port that
     // is not answering yet.
     endpoint::write_endpoint_file(&endpoint_path, port, &plugin_token)?;
+    endpoint::write_hook_file(&endpoint::default_hook_path(), port, &hook_token)?;
+
+    // Opt-in: editing `~/.claude/settings.json` is the user's file, and a daemon
+    // started for a quick look should not touch it.
+    if std::env::args().any(|argument| argument == "--install-claude-hooks") {
+        match shim_path() {
+            Some(shim) => {
+                match agi_engine_claude::install(&agi_engine_claude::paths::settings_path(), &shim) {
+                    Ok(outcome) => println!(
+                        "hooks  {} added, {} already present (backup: {})",
+                        outcome.added,
+                        outcome.present,
+                        outcome
+                            .backup
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|| "none".to_string())
+                    ),
+                    Err(error) => println!("hooks  could not be installed — {error}"),
+                }
+            }
+            None => println!("hooks  agi-mizar-hook not found next to this binary"),
+        }
+    }
 
     println!("AGI Mizar kernel {}", env!("CARGO_PKG_VERSION"));
     println!("  api    http://127.0.0.1:{port}/api/v1/state");
@@ -102,6 +143,19 @@ fn random_token() -> String {
         token.push_str(&uuid::Uuid::new_v4().simple().to_string());
     }
     token
+}
+
+/// The hook shim, which is installed beside this binary.
+fn shim_path() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let directory = exe.parent()?;
+    let name = if cfg!(windows) {
+        "agi-mizar-hook.exe"
+    } else {
+        "agi-mizar-hook"
+    };
+    let candidate = directory.join(name);
+    candidate.is_file().then_some(candidate)
 }
 
 /// Find an executable the way a shell would: an absolute path, or `PATH`.

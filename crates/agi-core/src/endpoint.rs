@@ -22,6 +22,37 @@ pub struct EndpointFile {
     pub pid: u32,
 }
 
+/// The hook shim's copy: the API port and a token that only the hooks may use.
+///
+/// A separate file and a separate token because the shim runs on every tool
+/// call and is invoked by a process (Claude Code) that is not the UI: a token
+/// that can answer an approval has no business also being able to drive the UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookFile {
+    pub port: u16,
+    pub token: String,
+}
+
+/// `~/.agi-mizar/hook.json`.
+pub fn default_hook_path() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(".agi-mizar").join("hook.json")
+}
+
+/// Publish the hook endpoint atomically, owner-readable only.
+pub fn write_hook_file(path: &Path, port: u16, token: &str) -> io::Result<()> {
+    write_private_json(
+        path,
+        &HookFile {
+            port,
+            token: token.to_string(),
+        },
+    )
+}
+
 /// `~/.agi-mizar/endpoint.json`.
 pub fn default_endpoint_path() -> PathBuf {
     let home = std::env::var_os("HOME")
@@ -36,16 +67,23 @@ pub fn default_endpoint_path() -> PathBuf {
 /// A reader that catches the file mid-write would see truncated JSON and treat it
 /// as "no desktop", which is exactly the wrong answer while we are starting.
 pub fn write_endpoint_file(path: &Path, port: u16, token: &str) -> io::Result<()> {
+    write_private_json(
+        path,
+        &EndpointFile {
+            port,
+            token: token.to_string(),
+            pid: std::process::id(),
+        },
+    )
+}
+
+/// Write one JSON file atomically, readable only by its owner.
+fn write_private_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    let contents = serde_json::to_vec_pretty(&EndpointFile {
-        port,
-        token: token.to_string(),
-        pid: std::process::id(),
-    })?;
-
+    let contents = serde_json::to_vec_pretty(value)?;
     let temp = path.with_extension("json.tmp");
     std::fs::write(&temp, &contents)?;
 

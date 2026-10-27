@@ -4,6 +4,8 @@ members = [
     "crates/agi-engine",
     "crates/agi-engine-dsh",
     "crates/agi-engine-codex",
+    "crates/agi-engine-claude",
+    "crates/agi-hook-shim",
     "crates/agi-core",
     "crates/agi-daemon",
 ]
@@ -21,6 +23,7 @@ agi-protocol = { path = "crates/agi-protocol" }
 agi-engine = { path = "crates/agi-engine" }
 agi-engine-dsh = { path = "crates/agi-engine-dsh" }
 agi-engine-codex = { path = "crates/agi-engine-codex" }
+agi-engine-claude = { path = "crates/agi-engine-claude" }
 agi-core = { path = "crates/agi-core" }
 
 anyhow = "1"

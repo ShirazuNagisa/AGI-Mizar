@@ -10,6 +10,7 @@ description = "The kernel: engine registry, aggregated state, and the loopback A
 [dependencies]
 agi-protocol = { workspace = true }
 agi-engine = { workspace = true }
+agi-engine-claude = { workspace = true }
 agi-engine-dsh = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }

@@ -1,0 +1,15 @@
+[package]
+name = "agi-hook-shim"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The tiny binary Claude Code's hooks invoke: reads the payload on stdin, posts it to the kernel, prints the answer."
+
+[[bin]]
+name = "agi-mizar-hook"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { workspace = true }

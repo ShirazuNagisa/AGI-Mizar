@@ -22,18 +22,21 @@
 //! reachable from the network it happens to be attached to, and the DSH plugin
 //! already runs on this machine.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use agi_engine_claude::ClaudeEngine;
 use agi_engine_dsh::DshEngine;
 use agi_protocol::api::{Command, StateSnapshot};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
+use serde_json::Value;
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -49,13 +52,22 @@ pub struct Config {
     pub api_token: String,
     /// Presented by the plugin inside its `hello` frame.
     pub plugin_token: String,
+    /// Presented by the hook shim on every hook invocation.
+    pub hook_token: String,
 }
 
 #[derive(Clone)]
 struct AppState {
     core: Arc<Core>,
     dsh: Arc<DshEngine>,
+    /// Present when a `claude` executable was found. Absent means the hook route
+    /// answers 404, which is the honest answer on a machine without Claude Code.
+    claude: Option<Arc<ClaudeEngine>>,
     api_token: Arc<String>,
+    hook_token: Arc<String>,
+    /// How many UI sockets are open. Claude's `PreToolUse` only blocks while
+    /// somebody is watching.
+    watchers: Arc<AtomicUsize>,
 }
 
 /// Bind the server on a loopback ephemeral port and start serving.
@@ -65,12 +77,16 @@ struct AppState {
 pub async fn bind(
     core: Arc<Core>,
     dsh: Arc<DshEngine>,
+    claude: Option<Arc<ClaudeEngine>>,
     config: Config,
 ) -> anyhow::Result<(u16, JoinHandle<()>)> {
     let state = AppState {
         core,
         dsh,
+        claude,
         api_token: Arc::new(config.api_token),
+        hook_token: Arc::new(config.hook_token),
+        watchers: Arc::new(AtomicUsize::new(0)),
     };
 
     let router = Router::new()
@@ -79,6 +95,7 @@ pub async fn bind(
         .route("/api/v1/command", post(command_handler))
         .route("/api/v1/events", get(events_handler))
         .route("/dsh", get(dsh_handler))
+        .route("/hooks/claude/:event", post(hook_handler))
         .with_state(state);
 
     // Loopback, ephemeral. `0` asks the OS for a free port, which is what makes
@@ -131,11 +148,12 @@ async fn events_handler(
     if !constant_time_eq(&query.token, &app.api_token) {
         return unauthorized();
     }
-    upgrade.on_upgrade(move |socket| pump_events(app.core, socket))
+    let attendance = Attendance::join(&app.claude, &app.watchers);
+    upgrade.on_upgrade(move |socket| pump_events(app.core, socket, attendance))
 }
 
 /// Forward every API event to one client.
-async fn pump_events(core: Arc<Core>, socket: WebSocket) {
+async fn pump_events(core: Arc<Core>, socket: WebSocket, _attendance: Attendance) {
     let (mut sink, mut stream) = socket.split();
     let mut events = core.subscribe();
 
@@ -165,6 +183,67 @@ async fn pump_events(core: Arc<Core>, socket: WebSocket) {
                 }
             }
         }
+    }
+}
+
+
+/// Counts UI sockets, and tells the Claude engine whether anyone is watching.
+///
+/// A `PreToolUse` hook blocks until the operator decides. Blocking when no window
+/// is open would stall the operator's own terminal for a minute per tool call,
+/// which is worse than the hook not existing — so the count is what makes the
+/// feature safe to install.
+struct Attendance {
+    engine: Option<Arc<ClaudeEngine>>,
+    count: Arc<AtomicUsize>,
+}
+
+impl Attendance {
+    fn join(engine: &Option<Arc<ClaudeEngine>>, count: &Arc<AtomicUsize>) -> Self {
+        if let Some(engine) = engine {
+            count.fetch_add(1, Ordering::Relaxed);
+            engine.set_attended(true);
+        }
+        Self {
+            engine: engine.clone(),
+            count: Arc::clone(count),
+        }
+    }
+}
+
+impl Drop for Attendance {
+    fn drop(&mut self) {
+        let Some(engine) = &self.engine else { return };
+        let remaining = self.count.fetch_sub(1, Ordering::Relaxed).saturating_sub(1);
+        if remaining == 0 {
+            engine.set_attended(false);
+        }
+    }
+}
+
+/// One hook invocation from Claude Code, relayed to the engine.
+///
+/// The answer is whatever the engine produced: a permission decision for
+/// `PreToolUse`, or nothing at all — which tells the shim to print nothing and
+/// leaves Claude Code's own behaviour untouched.
+async fn hook_handler(
+    State(app): State<AppState>,
+    Path(event): Path<String>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if !authorized(&headers, &app.hook_token) {
+        return unauthorized();
+    }
+    let Some(claude) = &app.claude else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Ok(payload) = serde_json::from_str::<Value>(&body) else {
+        return (StatusCode::BAD_REQUEST, "the hook payload is not JSON").into_response();
+    };
+    match claude.handle_hook(&event, &payload).await {
+        Some(answer) => Json(answer).into_response(),
+        None => StatusCode::NO_CONTENT.into_response(),
     }
 }
 
