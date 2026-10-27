@@ -83,6 +83,37 @@ impl Harness {
         .await;
     }
 
+    /// Answer the next `session/list`, tolerating the projection reads the
+    /// background enrichment sends while we wait.
+    async fn answer_next_list(&mut self, items: Value) {
+        loop {
+            let frame = self.next().await;
+            if frame["type"] != "invoke" {
+                continue;
+            }
+            let endpoint = frame["endpoint"].as_str().unwrap_or_default();
+            let id = frame["id"].as_str().unwrap_or_default().to_string();
+            match endpoint {
+                "session/list" => {
+                    self.send(json!({
+                        "v": 1, "type": "result", "id": id, "ok": true,
+                        "value": { "items": items }
+                    }))
+                    .await;
+                    return;
+                }
+                "session/projections" => {
+                    self.send(json!({
+                        "v": 1, "type": "result", "id": id, "ok": true,
+                        "value": { "values": {} }
+                    }))
+                    .await;
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Read frames until the next call to `endpoint`, ignoring cancels.
     async fn next_invoke(&mut self, endpoint: &str) -> Value {
         loop {
@@ -251,6 +282,225 @@ async fn reads_a_history_page_from_follow_then_page() {
     assert_eq!(records.len(), 2);
     assert_eq!(records[0].text.as_deref(), Some("older"));
     assert_eq!(records[1].kind, RecordKind::AssistantMessage);
+    h.handle.abort();
+}
+
+#[tokio::test]
+async fn usage_history_pages_every_session_once_and_reuses_the_fold() {
+    let mut h = start();
+    let mut events = h.engine.subscribe();
+    h.hello().await;
+    assert_eq!(h.next().await["type"], "welcome");
+    h.answer_session_list(json!([
+        { "sessionId": "s1", "updatedAt": 2_000i64, "running": false, "model": "deepseek-v4" },
+        { "sessionId": "s2", "updatedAt": 1_000i64, "running": false, "model": "deepseek-v4" }
+    ]))
+    .await;
+
+    // Both sessions are folded before the fold starts: a fold that begins
+    // before the attach-time list landed would ask the host for the list again.
+    let mut listed = 0;
+    while listed < 2 {
+        if let Ok(Ok(EngineEvent::SessionUpdated(_))) =
+            tokio::time::timeout(Duration::from_secs(2), events.recv()).await
+        {
+            listed += 1;
+        }
+    }
+
+    let engine = Arc::clone(&h.engine);
+    let folding = tokio::spawn(async move { engine.usage_history().await });
+    // The fold lists sessions itself, so that a fold started before the attach
+    // list landed still sees every session.
+    h.answer_next_list(json!([
+        { "sessionId": "s1", "updatedAt": 2_000i64, "running": false, "model": "deepseek-v4" },
+        { "sessionId": "s2", "updatedAt": 1_000i64, "running": false, "model": "deepseek-v4" }
+    ]))
+    .await;
+
+    // Two sessions, so two follows and two pages, newest session first.
+    let pages = [
+        json!([
+            { "type": "user/message", "seq": 1, "time": 1_700_000_000_000i64,
+              "data": { "turn": 1, "content": [{ "type": "text", "text": "hello" }] } },
+            { "type": "tool/call", "seq": 2, "time": 1_700_000_001_000i64,
+              "data": { "turn": 1, "step": 1, "callId": "c1", "name": "bash" } },
+            { "type": "assistant/message", "seq": 3, "time": 1_700_000_002_000i64,
+              "data": { "turn": 1, "step": 1,
+                        "message": { "content": [{ "type": "text", "text": "hi" }],
+                                     "source": { "kind": "model", "provider": "deepseek-account",
+                                                 "model": "deepseek-flash" } },
+                        "usage": { "inputTokens": 100, "outputTokens": 10,
+                                   "cacheReadTokens": 50, "cacheWriteTokens": 0 } } }
+        ]),
+        json!([
+            { "type": "user/message", "seq": 1, "time": 1_700_000_003_000i64,
+              "data": { "turn": 1, "source": { "kind": "runtime-context" },
+                        "content": [{ "type": "text", "text": "injected" }] } },
+            { "type": "user/message", "seq": 2, "time": 1_700_000_004_000i64,
+              "data": { "turn": 1, "content": [{ "type": "text", "text": "second" }] } }
+        ]),
+    ];
+    for records in pages {
+        let follow = h.next_invoke("session/follow").await;
+        let follow_id = follow["id"].as_str().unwrap().to_string();
+        h.send(json!({
+            "v": 1, "type": "stream.item", "id": follow_id,
+            "value": { "type": "baseline", "cursor": 42 }
+        }))
+        .await;
+        h.send(json!({ "v": 1, "type": "stream.end", "id": follow_id, "reason": "done" }))
+            .await;
+
+        let page = h.next_invoke("session/page").await;
+        let page_id = page["id"].as_str().unwrap().to_string();
+        // The shape the host's `session/page` descriptor answers with: each
+        // record wrapped in an event, which is what a live page looks like.
+        let wrapped: Vec<Value> = records
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| json!({ "type": "event", "event": event }))
+            .collect();
+        h.send(json!({
+            "v": 1, "type": "result", "id": page_id, "ok": true,
+            "value": { "records": wrapped, "hasMore": false }
+        }))
+        .await;
+    }
+
+    let days = folding.await.unwrap().unwrap();
+    assert_eq!(days.len(), 1);
+    // The tool call is not a message, the injected context is not a person's.
+    assert_eq!(days[0].messages, 3);
+    assert_eq!(days[0].hours.iter().sum::<u64>(), 3);
+    // The record's own `data.usage` lands on the day: billed input is
+    // uncached + written + read, the sum the host's projection reports.
+    assert_eq!(days[0].input_tokens, 150);
+    assert_eq!(days[0].output_tokens, 10);
+    // The record's own model wins over the one the session list named; the
+    // prompts, which name none, keep the session's.
+    assert_eq!(days[0].models.len(), 2);
+    let answered = days[0]
+        .models
+        .iter()
+        .find(|entry| entry.model == "deepseek-flash")
+        .expect("the record's own model");
+    assert_eq!(answered.input_tokens, 150);
+    assert_eq!(answered.messages, 1);
+    let prompted = days[0]
+        .models
+        .iter()
+        .find(|entry| entry.model == "deepseek-v4")
+        .expect("the session's model");
+    assert_eq!(prompted.messages, 2);
+    assert_eq!(prompted.input_tokens, 0);
+
+    // A second ask inside the cache window pages nothing again.
+    let again = h.engine.usage_history().await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&again).unwrap(),
+        serde_json::to_value(&days).unwrap()
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+    while let Ok(Some(text)) = tokio::time::timeout_at(deadline, h.to_plugin.recv()).await {
+        let frame: Value = serde_json::from_str(&text).expect("invalid JSON");
+        let endpoint = frame["endpoint"].as_str().unwrap_or_default();
+        assert!(
+            endpoint != "session/follow" && endpoint != "session/page",
+            "the fold was not reused: {frame}"
+        );
+    }
+    h.handle.abort();
+}
+
+#[tokio::test]
+async fn usage_history_pages_backwards_through_a_long_session() {
+    let mut h = start();
+    let mut events = h.engine.subscribe();
+    h.hello().await;
+    assert_eq!(h.next().await["type"], "welcome");
+    h.answer_session_list(json!([
+        { "sessionId": "long", "updatedAt": 1i64, "running": false, "model": "deepseek-v4" }
+    ]))
+    .await;
+    // The attach-time list has to be folded in before the fold starts, or the
+    // engine would ask the host for the list again mid-test.
+    while let Ok(received) = tokio::time::timeout(Duration::from_secs(2), events.recv()).await {
+        if matches!(received, Ok(EngineEvent::SessionUpdated(_))) {
+            break;
+        }
+    }
+
+    let engine = Arc::clone(&h.engine);
+    let folding = tokio::spawn(async move { engine.usage_history().await });
+    // The fold lists sessions itself; answer that call, then the pages.
+    h.answer_next_list(json!([
+        { "sessionId": "long", "updatedAt": 1i64, "running": false, "model": "deepseek-v4" }
+    ]))
+    .await;
+
+    // One full page, so the engine must ask for the one below it, then a short
+    // page, which is the start of the history.
+    let full: Vec<Value> = (1..=500i64)
+        .map(|index| {
+            json!({
+                "type": "event",
+                "event": {
+                    "type": "assistant/message", "seq": index, "time": 1_700_000_000_000i64,
+                    "data": { "turn": 1, "step": index,
+                              "message": { "content": [{ "type": "text", "text": "step" }],
+                                           "source": { "kind": "model", "model": "deepseek-flash" } },
+                              "usage": { "inputTokens": 2, "outputTokens": 1 } }
+                }
+            })
+        })
+        .collect();
+    let mut pages = vec![full];
+    pages.push(vec![json!({
+        "type": "event",
+        "event": {
+            "type": "assistant/message", "seq": 3, "time": 1_600_000_000_000i64,
+            "data": { "turn": 0, "step": 0,
+                      "message": { "content": [{ "type": "text", "text": "older" }] },
+                      "usage": { "inputTokens": 7, "outputTokens": 3 } }
+        }
+    })]);
+
+    let mut cursors = Vec::new();
+    for records in pages {
+        let follow = h.next_invoke("session/follow").await;
+        let follow_id = follow["id"].as_str().unwrap().to_string();
+        h.send(json!({
+            "v": 1, "type": "stream.item", "id": follow_id,
+            "value": { "type": "baseline", "cursor": 5_000 }
+        }))
+        .await;
+        h.send(json!({ "v": 1, "type": "stream.end", "id": follow_id, "reason": "done" }))
+            .await;
+
+        let page = h.next_invoke("session/page").await;
+        cursors.push(page["args"]["request"]["beforeSeq"].clone());
+        let page_id = page["id"].as_str().unwrap().to_string();
+        h.send(json!({
+            "v": 1, "type": "result", "id": page_id, "ok": true,
+            "value": { "records": records, "hasMore": true }
+        }))
+        .await;
+    }
+
+    let days = folding.await.unwrap().unwrap();
+    // The first page asked from the cut, the second from the oldest seq it got.
+    assert!(cursors[0].is_null(), "the first page is read from the cut");
+    assert_eq!(cursors[1], 1);
+
+    let input: u64 = days.iter().map(|day| day.input_tokens).sum();
+    let output: u64 = days.iter().map(|day| day.output_tokens).sum();
+    let messages: u64 = days.iter().map(|day| day.messages).sum();
+    assert_eq!(input, 500 * 2 + 7);
+    assert_eq!(output, 500 + 3);
+    assert_eq!(messages, 501);
+    assert_eq!(days.len(), 2, "the older page belongs to an earlier day");
     h.handle.abort();
 }
 

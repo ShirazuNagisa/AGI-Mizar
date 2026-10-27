@@ -104,6 +104,36 @@ export interface Interaction {
   questions: Question[]
 }
 
+/**
+ * One day of usage, as the dashboard draws it.
+ *
+ * Every day that had any activity is present; the window does the range
+ * arithmetic itself so switching 全部/30 天/7 天 never refetches.
+ */
+export interface UsageDay {
+  /** `YYYY-MM-DD`, local time. */
+  date: string
+  messages: number
+  inputTokens: number
+  outputTokens: number
+  /** Activity per local hour, 24 buckets. */
+  hours: number[]
+  models: ModelUsage[]
+}
+
+export interface ModelUsage {
+  model: string
+  messages: number
+  inputTokens: number
+  outputTokens: number
+}
+
+export interface UsageOverview {
+  /** Top-level sessions across every engine. */
+  sessions: number
+  days: UsageDay[]
+}
+
 export interface StateSnapshot {
   version: string
   engines: EngineStatus[]
@@ -202,7 +232,9 @@ export type Command =
   | { op: 'workspaces'; engine: EngineId }
   | { op: 'balance'; engine: EngineId }
   | { op: 'read_file'; session: string; path: string }
+  | { op: 'reconnect'; engine: EngineId }
   | { op: 'pairing'; refresh: boolean }
+  | { op: 'usage_overview' }
   | { op: 'ping' }
 
 export interface ApiError {

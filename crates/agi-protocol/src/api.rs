@@ -42,6 +42,56 @@ pub struct EngineStatus {
     pub sessions: usize,
 }
 
+/// One day of work, as the home page charts it.
+///
+/// A day is a local calendar day, because that is the unit an operator thinks
+/// in: "what did I do on Tuesday" is not a question about UTC. Every engine
+/// buckets into its own local day and the kernel adds the buckets up, so a host
+/// whose engines disagree about the time zone cannot produce a day that no clock
+/// showed.
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageDay {
+    /// "YYYY-MM-DD", local time zone.
+    pub date: String,
+    /// Every user or assistant message counts once; tool calls and tool results
+    /// are not messages and do not.
+    pub messages: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// 24 buckets, local hours, index 0 being midnight.
+    ///
+    /// Each bucket counts messages, not tokens: the window reads this as "when
+    /// in the day do I work", and an hour that was active but cheap is still an
+    /// hour somebody was at the machine.
+    pub hours: [u64; 24],
+    pub models: Vec<ModelUsage>,
+}
+
+/// What one model did on one day.
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelUsage {
+    pub model: String,
+    pub messages: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+/// The whole usage history, one row per day that had any activity.
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageOverview {
+    /// Top-level, unarchived sessions, the three engines added together.
+    ///
+    /// A delegated child (a subagent, a fork's source) is not a session the
+    /// operator started, so counting it would inflate the number they read as
+    /// "how much have I been working".
+    pub sessions: u64,
+    /// Only days with activity, oldest first.
+    pub days: Vec<UsageDay>,
+}
+
 /// One command from a client.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -107,6 +157,12 @@ pub enum Command {
     Balance { engine: EngineId },
     /// Read a file a session delivered.
     ReadFile { session: SessionKey, path: String },
+
+    /// Every day of work, across every engine, as the home page charts it.
+    UsageOverview,
+
+    /// Drop an engine's current link and let it dial again.
+    Reconnect { engine: EngineId },
 
     /// The pairing code to show a phone, and a QR for its URI.
     Pairing {
@@ -200,4 +256,79 @@ pub enum ApiEvent {
     EngineStatus { status: EngineStatus },
     /// Something the operator should see but that is not an error.
     Notice { level: String, message: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn a_day() -> UsageDay {
+        let mut hours = [0u64; 24];
+        hours[9] = 3;
+        UsageDay {
+            date: "2026-10-27".to_string(),
+            messages: 3,
+            input_tokens: 1_200,
+            output_tokens: 340,
+            hours,
+            models: vec![ModelUsage {
+                model: "deepseek-v4".to_string(),
+                messages: 3,
+                input_tokens: 1_200,
+                output_tokens: 340,
+            }],
+        }
+    }
+
+    #[test]
+    fn the_overview_wires_camel_case_and_a_full_day_of_hours() {
+        // The window decodes this by key name, and twelve of the twenty-four
+        // hours are `0`, which a serializer that skips defaults would drop.
+        let wire = serde_json::to_value(UsageOverview {
+            sessions: 12,
+            days: vec![a_day()],
+        })
+        .unwrap();
+
+        assert_eq!(wire["sessions"], 12);
+        let day = &wire["days"][0];
+        for key in [
+            "date",
+            "messages",
+            "inputTokens",
+            "outputTokens",
+            "hours",
+            "models",
+        ] {
+            assert!(day.get(key).is_some(), "missing {key} in {day}");
+        }
+        let hours = day["hours"].as_array().expect("hours is an array");
+        assert_eq!(hours.len(), 24);
+        assert!(hours.iter().all(serde_json::Value::is_u64));
+        assert_eq!(hours[9], 3);
+
+        let model = &day["models"][0];
+        for key in ["model", "messages", "inputTokens", "outputTokens"] {
+            assert!(model.get(key).is_some(), "missing {key} in {model}");
+        }
+        // No snake_case spelling anywhere: the app would read a missing key.
+        assert!(wire.get("input_tokens").is_none());
+        assert!(day.get("input_tokens").is_none());
+    }
+
+    #[test]
+    fn an_empty_overview_is_still_a_full_shape() {
+        let wire = serde_json::to_value(UsageOverview::default()).unwrap();
+        assert_eq!(wire["sessions"], 0);
+        assert_eq!(wire["days"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn the_command_is_spelled_like_its_neighbours() {
+        let command: Command = serde_json::from_value(serde_json::json!({
+            "op": "usage_overview"
+        }))
+        .unwrap();
+        assert!(matches!(command, Command::UsageOverview));
+    }
 }

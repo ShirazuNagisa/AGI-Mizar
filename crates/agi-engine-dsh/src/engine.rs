@@ -65,6 +65,42 @@ const ENRICH_SPACING: Duration = Duration::from_millis(60);
 /// conversation view pages backwards from the engine when it needs them again.
 const MAX_CACHED_RECORDS: usize = 4_000;
 
+/// How long a folded usage history is reused.
+///
+/// Folding it means reading a page of records for every session, which on a host
+/// with three hundred of them is the most expensive thing this adapter does. The
+/// home page asks again whenever it draws, and nobody needs second-level
+/// freshness on "how much did I do in September".
+const USAGE_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// How many messages one usage page asks for.
+///
+/// `session/page` is a page, not a stream. Measured on this host, a page of two
+/// thousand messages covers a whole session for all but three of 312, and the
+/// longest is 4675 messages.
+/// Records asked for per page while folding usage.
+///
+/// A page is one WebSocket frame, and a streamed assistant message carries a few
+/// kilobytes of stream chunks: two thousand of those is a seventeen-megabyte
+/// frame, past the transport's limit, and the connection dies mid-fold. Five
+/// hundred keeps the frame small and costs a few more round trips.
+const USAGE_PAGE: usize = 500;
+
+/// How many pages one session's usage fold reads before it gives up.
+///
+/// Eight pages is 16 thousand messages, four times the longest session measured
+/// here, and the cap is what stops a corrupted `beforeSeq` from turning one fold
+/// into an unbounded walk.
+const USAGE_PAGES_MAX: usize = 24;
+
+/// How many sessions one usage fold reads.
+///
+/// The chart is a year of days, and the host's own list is what fills them.
+/// Sorting newest first means a machine with more sessions than this loses the
+/// oldest ones, which are outside a 365-day heatmap in practice — and the cap is
+/// what keeps one window opening from spending a minute on the link.
+const USAGE_SESSION_LIMIT: usize = 600;
+
 /// Everything the frame loop mutates.
 struct Inner {
     /// The channel to the socket writer, while a plugin is attached.
@@ -105,15 +141,28 @@ pub struct DshEngine {
     events: broadcast::Sender<EngineEvent>,
     inner: Mutex<Inner>,
     next_id: AtomicU64,
+    /// The folded usage history, and when it was folded.
+    ///
+    /// Kept on the engine rather than in a task because the only thing that
+    /// invalidates it is time: a record that arrives after a fold is at most a
+    /// minute of history, and the fold it belongs to is one request away.
+    usage_cache: Mutex<Option<(std::time::Instant, usize, Vec<agi_protocol::api::UsageDay>)>>,
     /// A weak handle to self, so `refresh_sessions(&self)` can start a task that
     /// outlives the call. `Arc::new_cyclic` fills it in after construction.
     me: Weak<DshEngine>,
+    /// Tells the socket pump to drop the plugin's connection.
+    ///
+    /// The desktop does not dial the plugin — the plugin dials in — so the only
+    /// way to make it reconnect is to hang up on it and let its own retry loop
+    /// bring it back.
+    kick: broadcast::Sender<()>,
 }
 
 impl DshEngine {
     /// Build an engine that accepts a plugin presenting `token`.
     pub fn new(token: impl Into<String>) -> Arc<Self> {
         let (events, _) = broadcast::channel(512);
+        let (kick, _) = broadcast::channel(4);
         let mut inner = Inner::new();
         // Said out loud from the first snapshot: an engine with no detail reads
         // like an engine that failed, not one that is waiting.
@@ -123,7 +172,9 @@ impl DshEngine {
             events,
             inner: Mutex::new(inner),
             next_id: AtomicU64::new(1),
+            usage_cache: Mutex::new(None),
             me: me.clone(),
+            kick,
         })
     }
 
@@ -147,6 +198,25 @@ impl DshEngine {
 
     fn next_id(&self) -> String {
         format!("dsh-{}", self.next_id.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Watch for a request to hang up on the plugin.
+    pub fn kick_receiver(&self) -> broadcast::Receiver<()> {
+        self.kick.subscribe()
+    }
+
+    /// Forget the current link after the socket pump hung up on it.
+    ///
+    /// `serve` cannot run its own cleanup when the pump drops its future, so the
+    /// pump calls this instead: without it the engine keeps claiming a
+    /// connection whose writer is gone, and folds an empty history into the
+    /// cache for the next minute.
+    pub fn forget_link(&self) {
+        *self
+            .usage_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        self.detach();
     }
 
     /// Whether a plugin is attached.
@@ -674,13 +744,18 @@ impl DshEngine {
         Ok(parsed)
     }
 
-    /// Read one page from DSH: the log cut from `follow`, then `page` below it.
-    async fn fetch_page(
+    /// Read one raw page from DSH: the log cut from `follow`, then `page` below
+    /// it, as the plugin sent them.
+    ///
+    /// Untouched records, because two callers need different halves of one: the
+    /// conversation view reads what the projection keeps, and the usage fold
+    /// reads the provider's `usage` object it drops.
+    async fn raw_page(
         &self,
         session: &SessionKey,
         limit: usize,
         before: Option<i64>,
-    ) -> Result<Vec<Record>, EngineError> {
+    ) -> Result<Vec<Value>, EngineError> {
         let address = json!({ "kind": "session", "sessionId": session.raw() });
         let opening = self
             .stream_opening(
@@ -711,12 +786,22 @@ impl DshEngine {
             .call("session/page", json!({ "request": request }))
             .await?;
 
-        let raw = page
+        Ok(page
             .get("records")
             .or_else(|| page.get("items"))
             .and_then(Value::as_array)
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_default())
+    }
+
+    /// Read one page of records for the conversation view.
+    async fn fetch_page(
+        &self,
+        session: &SessionKey,
+        limit: usize,
+        before: Option<i64>,
+    ) -> Result<Vec<Record>, EngineError> {
+        let raw = self.raw_page(session, limit, before).await?;
 
         let records: Vec<Record> = raw
             .iter()
@@ -828,6 +913,106 @@ impl DshEngine {
             .await?;
         Ok(value.get("values").cloned().unwrap_or(Value::Null))
     }
+
+    /// The folded usage history, when it is still fresh *and* was folded from
+    /// as many sessions as the engine knows about now.
+    ///
+    /// The second half matters at startup: the dashboard is the first screen,
+    /// and it asks before the session list has finished arriving. A fold made
+    /// from four sessions is not an answer for a host with eighty-one, and
+    /// caching it for a minute would show a wrong number for a minute.
+    fn cached_usage(&self) -> Option<Vec<agi_protocol::api::UsageDay>> {
+        let listed = self.inner().sessions.len();
+        let cache = self
+            .usage_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match cache.as_ref() {
+            Some((folded_at, folded_listed, days))
+                if folded_at.elapsed() < USAGE_CACHE_TTL && *folded_listed == listed =>
+            {
+                Some(days.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// Fold every session's records into days of activity.
+    ///
+    /// Newest session first, so a host with more sessions than
+    /// [`USAGE_SESSION_LIMIT`] spends its budget on the ones whose days the chart
+    /// actually shows.
+    ///
+    /// A delegated child's session is folded too: the operator did not start it,
+    /// but its turns ran on the same account, and the chart is a picture of work
+    /// rather than of clicks.
+    async fn fold_usage(&self) -> Result<(Vec<agi_protocol::api::UsageDay>, bool), EngineError> {
+        // Ask the engine for its own list rather than reading whatever has been
+        // folded into memory so far. The dashboard is the first screen, and the
+        // in-memory map fills progressively while a few hundred sessions are
+        // enriched: folding it early is how a host with eighty-one sessions
+        // answered "four" and cached that for a minute.
+        let mut sessions: Vec<Session> = self.sessions().await?;
+        sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+        sessions.truncate(USAGE_SESSION_LIMIT);
+
+        let mut days = agi_engine::UsageDays::new();
+        // A fold that could not read every session is an answer for now, not for
+        // the next minute: caching it is how the dashboard showed a quarter of
+        // the history until the cache expired.
+        let mut every_session_read = true;
+        for session in &sessions {
+            // One session that cannot be paged must not blank the whole chart.
+            let mut usage = crate::history::SessionUsage::default();
+            let mut before: Option<i64> = None;
+            let mut complete = false;
+            for _ in 0..USAGE_PAGES_MAX {
+                let records = match self.raw_page(&session.key, USAGE_PAGE, before).await {
+                    Ok(records) => records,
+                    Err(error) => {
+                        tracing::debug!("dsh: no records for {} — {error}", session.key);
+                        break;
+                    }
+                };
+                if records.is_empty() {
+                    complete = true;
+                    break;
+                }
+                usage.absorb(&mut days, &records, session.model.as_deref());
+
+                // A short page is the start of the history: there is nothing
+                // below it to read.
+                if records.len() < USAGE_PAGE {
+                    complete = true;
+                    break;
+                }
+                // Page backwards from the oldest record this page carried; a
+                // cursor that does not move would loop forever.
+                let oldest = records.iter().filter_map(record_seq).min();
+                if oldest.is_none() || oldest == before {
+                    break;
+                }
+                before = oldest;
+            }
+            if !complete {
+                every_session_read = false;
+                // Said once per fold, because a silent truncation reads as a
+                // cheaper month than the operator had.
+                tracing::debug!(
+                    "dsh: {} is longer than {} pages; its oldest usage is not in this fold",
+                    session.key,
+                    USAGE_PAGES_MAX
+                );
+            }
+            usage.finish(&mut days);
+        }
+        Ok((days.finish(), every_session_read))
+    }
+}
+
+/// The log sequence number a page record carries, wrapped or bare.
+fn record_seq(record: &Value) -> Option<i64> {
+    projection::event_of(record)?.get("seq")?.as_i64()
 }
 
 /// Read a list of `{currency, balance}` rows.
@@ -1056,6 +1241,17 @@ impl Engine for DshEngine {
         (inner.out.is_some(), inner.detail.clone())
     }
 
+    async fn reconnect(&self) -> Result<(), EngineError> {
+        {
+            let mut inner = self.inner();
+            inner.detail = Some("reconnecting".to_string());
+        }
+        // Nobody listening means nobody attached, which is already the state the
+        // caller wanted; the plugin's own retry loop will attach when it can.
+        let _ = self.kick.send(());
+        Ok(())
+    }
+
     async fn sessions(&self) -> Result<Vec<Session>, EngineError> {
         if !self.connected() {
             return Err(EngineError::NotConnected {
@@ -1104,6 +1300,43 @@ impl Engine for DshEngine {
             });
         }
         self.fetch_page(session, limit, before).await
+    }
+
+    /// Every day of activity this host has recorded, folded from the sessions it
+    /// lists.
+    ///
+    /// The records are read raw rather than projected: each `assistant/message`
+    /// carries the provider's own `data.usage`, and that is the only place a
+    /// token count can be placed on the day it was spent. [`crate::history`]
+    /// documents the shape and the fold's rules.
+    ///
+    /// The fold is cached for [`USAGE_CACHE_TTL`] because it pages every session
+    /// it can see — on a host with three hundred sessions this is the most
+    /// expensive thing the adapter does, and nobody needs second-level freshness
+    /// on "how much did I do in September".
+    async fn usage_history(&self) -> Result<Vec<agi_protocol::api::UsageDay>, EngineError> {
+        if !self.connected() {
+            return Err(EngineError::NotConnected {
+                engine: EngineId::Dsh,
+            });
+        }
+        if let Some(days) = self.cached_usage() {
+            return Ok(days);
+        }
+
+        let (days, complete) = self.fold_usage().await?;
+        if !complete {
+            return Ok(days);
+        }
+        let listed = self.inner().sessions.len();
+        {
+            let mut cache = self
+                .usage_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *cache = Some((std::time::Instant::now(), listed, days.clone()));
+        }
+        Ok(days)
     }
 
     fn supports_attachments(&self) -> bool {

@@ -9,12 +9,15 @@
 //!   no I/O, so the cases that took a live host to discover are unit tests.
 //! - [`usage`] is pure too: the `session/projections` values in, the phone's
 //!   usage frame out.
+//! - [`history`] is pure too: a session's records in, the days the desktop's home
+//!   page charts out.
 //!
 //! The transport is deliberately absent. The HTTP server owns the socket and
 //! hands [`engine::DshEngine::serve`] two channels of text frames.
 
 pub mod catalog;
 pub mod engine;
+pub mod history;
 pub mod projection;
 pub mod usage;
 

@@ -25,6 +25,10 @@ use agi_protocol::engine::{Capabilities, EngineId};
 use async_trait::async_trait;
 use serde_json::Value;
 
+pub mod usage;
+
+pub use usage::UsageDays;
+
 /// Something that happened in an engine.
 #[derive(Debug, Clone)]
 pub enum EngineEvent {
@@ -145,6 +149,14 @@ pub trait Engine: Send + Sync {
     /// Choose a permission preset.
     async fn set_permission(&self, session: &SessionKey, preset: &str) -> Result<(), EngineError>;
 
+    /// Drop whatever link the engine holds and let it try again.
+    ///
+    /// A default that refuses is the honest answer for an engine whose
+    /// connection is a file on disk rather than a socket.
+    async fn reconnect(&self) -> Result<(), EngineError> {
+        Err(self.unsupported("RECONNECT_UNSUPPORTED"))
+    }
+
     /// Whether this engine can carry an attachment into a prompt.
     ///
     /// The default is no: an engine that never implements this must not be
@@ -207,6 +219,17 @@ pub trait Engine: Send + Sync {
     /// Files the model said it produced.
     async fn deliverables(&self, _session: &SessionKey) -> Result<Vec<DeliveredFile>, EngineError> {
         Err(self.unsupported("deliverables"))
+    }
+
+    /// Every day of work this engine can account for, oldest first.
+    ///
+    /// The home page's charts are one graph across three products, so each
+    /// adapter answers with days it folded itself: only the adapter knows where
+    /// its own usage records live. Days with no activity are absent rather than
+    /// zero, because the window draws a 365-day heatmap and a day that never
+    /// happened is not a quiet day.
+    async fn usage_history(&self) -> Result<Vec<agi_protocol::api::UsageDay>, EngineError> {
+        Err(self.unsupported("USAGE_UNSUPPORTED"))
     }
 
     /// Every model this engine offers.

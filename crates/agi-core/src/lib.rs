@@ -27,7 +27,9 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 
 use agi_engine::{Engine, EngineError, EngineEvent};
-use agi_protocol::api::{ApiEvent, Command, CommandResponse, EngineStatus, StateSnapshot};
+use agi_protocol::api::{
+    ApiEvent, Command, CommandResponse, EngineStatus, StateSnapshot, UsageOverview,
+};
 use agi_protocol::domain::{Interaction, Record, Session, SessionKey};
 use agi_protocol::engine::EngineId;
 use tokio::sync::broadcast;
@@ -255,10 +257,73 @@ impl Core {
         }
     }
 
+    /// Every day of work, across every engine, as the home page charts it.
+    ///
+    /// Asked of all three adapters at once: each one folds its own store (two
+    /// file scans and a link fold), and doing them one after another makes the
+    /// window wait for the sum of the three.
+    ///
+    /// An engine that cannot answer — a machine that has never run Codex, an
+    /// adapter that has no usage records — is skipped rather than failing the
+    /// command. A year of Claude Code history is worth showing on a host where
+    /// Codex is not installed, and the alternative is an error panel instead of
+    /// two working charts.
+    async fn usage_overview(&self) -> CommandResponse {
+        let answers = futures_util::future::join_all(
+            self.engines
+                .iter()
+                .map(|engine| async move { (engine.id(), engine.usage_history().await) }),
+        )
+        .await;
+
+        // One accumulator for the three, so a date that two engines worked on is
+        // one row rather than two rows the window has to add up itself.
+        let mut days = agi_engine::UsageDays::new();
+        for (id, answer) in answers {
+            match answer {
+                Ok(found) => days.merge(found),
+                Err(error) => tracing::debug!("{id}: no usage history — {error}"),
+            }
+        }
+
+        CommandResponse::ok(UsageOverview {
+            sessions: self.counted_sessions(),
+            days: days.finish(),
+        })
+    }
+
+    /// Top-level sessions across every engine.
+    ///
+    /// Archived sessions are not in the store at all: archiving is answered by
+    /// the engine withdrawing the session (`EngineEvent::SessionRemoved`), so
+    /// being in the snapshot *is* being unarchived. A delegated child — a
+    /// subagent, a fork's source — is not a session the operator started, and
+    /// counting it would inflate the number they read as "how much have I been
+    /// working".
+    fn counted_sessions(&self) -> u64 {
+        self.snapshot()
+            .sessions
+            .iter()
+            // A delegated child and a codex fork are both conversations the
+            // operator did not start; the dashboard counts the ones they did.
+            .filter(|session| !matches!(session.origin.as_deref(), Some("subagent") | Some("fork")))
+            .count() as u64
+    }
+
     /// Run one command.
     pub async fn dispatch(&self, command: Command) -> CommandResponse {
         match command {
             Command::State => CommandResponse::ok(self.snapshot()),
+            Command::Reconnect { engine: id } => {
+                let Some(engine) = self.engine(id) else {
+                    return CommandResponse::error("UNKNOWN_ENGINE", "no such engine");
+                };
+                match engine.reconnect().await {
+                    Ok(()) => CommandResponse::done(),
+                    Err(error) => failure(error),
+                }
+            }
+            Command::UsageOverview => self.usage_overview().await,
             Command::Activity { session, limit } => {
                 let Some(engine) = self.engine(session.engine) else {
                     return CommandResponse::error("UNKNOWN_ENGINE", "no such engine");
@@ -471,4 +536,203 @@ pub trait PairingSource: Send + Sync {
 /// Turn an engine failure into the API's error shape.
 fn failure(error: EngineError) -> CommandResponse {
     CommandResponse::error(error.code(), error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agi_engine::Answer;
+    use agi_protocol::api::{ModelUsage, UsageDay};
+    use agi_protocol::engine::Capabilities;
+    use async_trait::async_trait;
+
+    /// An adapter that answers from memory, so the kernel's own logic is what
+    /// these tests exercise.
+    struct Fake {
+        id: EngineId,
+        sessions: Vec<Session>,
+        /// `None` means this adapter cannot say — what a machine without the
+        /// product installed does.
+        usage: Option<Vec<UsageDay>>,
+        events: broadcast::Sender<EngineEvent>,
+    }
+
+    impl Fake {
+        fn new(id: EngineId, sessions: Vec<Session>, usage: Option<Vec<UsageDay>>) -> Arc<Self> {
+            let (events, _) = broadcast::channel(8);
+            Arc::new(Self {
+                id,
+                sessions,
+                usage,
+                events,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Engine for Fake {
+        fn id(&self) -> EngineId {
+            self.id
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                attachments: false,
+                file_preview: false,
+                fork: false,
+                archive: false,
+                activity: false,
+                balance: false,
+                models: false,
+                permissions: false,
+            }
+        }
+
+        fn status(&self) -> (bool, Option<String>) {
+            (true, None)
+        }
+
+        async fn sessions(&self) -> Result<Vec<Session>, EngineError> {
+            Ok(self.sessions.clone())
+        }
+
+        async fn records(
+            &self,
+            _session: &SessionKey,
+            _limit: usize,
+            _before: Option<i64>,
+        ) -> Result<Vec<Record>, EngineError> {
+            Ok(Vec::new())
+        }
+
+        async fn prompt(&self, _session: &SessionKey, _text: &str) -> Result<(), EngineError> {
+            Ok(())
+        }
+
+        async fn cancel(&self, _session: &SessionKey) -> Result<(), EngineError> {
+            Ok(())
+        }
+
+        async fn answer(&self, _id: &str, _answer: Answer) -> Result<(), EngineError> {
+            Ok(())
+        }
+
+        async fn set_model(&self, _session: &SessionKey, _model: &str) -> Result<(), EngineError> {
+            Ok(())
+        }
+
+        async fn set_permission(
+            &self,
+            _session: &SessionKey,
+            _preset: &str,
+        ) -> Result<(), EngineError> {
+            Ok(())
+        }
+
+        async fn usage_history(&self) -> Result<Vec<UsageDay>, EngineError> {
+            match &self.usage {
+                Some(days) => Ok(days.clone()),
+                None => Err(self.unsupported("USAGE_UNSUPPORTED")),
+            }
+        }
+
+        fn subscribe(&self) -> broadcast::Receiver<EngineEvent> {
+            self.events.subscribe()
+        }
+    }
+
+    fn session(engine: EngineId, id: &str, origin: Option<&str>) -> Session {
+        Session {
+            origin: origin.map(str::to_string),
+            ..Session::bare(SessionKey::new(engine, id), 0)
+        }
+    }
+
+    fn day(date: &str, messages: u64, input: u64, hour: usize, model: &str) -> UsageDay {
+        let mut hours = [0u64; 24];
+        hours[hour] = messages;
+        UsageDay {
+            date: date.to_string(),
+            messages,
+            input_tokens: input,
+            output_tokens: input / 10,
+            hours,
+            models: vec![ModelUsage {
+                model: model.to_string(),
+                messages,
+                input_tokens: input,
+                output_tokens: input / 10,
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn the_overview_adds_three_engines_up_by_date() {
+        let dsh = Fake::new(
+            EngineId::Dsh,
+            vec![
+                session(EngineId::Dsh, "s1", None),
+                session(EngineId::Dsh, "child", Some("subagent")),
+            ],
+            Some(vec![day("2026-10-20", 2, 0, 9, "dsh-model")]),
+        );
+        let claude = Fake::new(
+            EngineId::Claude,
+            vec![session(EngineId::Claude, "c1", None)],
+            Some(vec![
+                day("2026-10-20", 3, 500, 9, "claude-model"),
+                day("2026-10-19", 1, 100, 14, "claude-model"),
+            ]),
+        );
+        // A machine without Codex: the adapter says so instead of answering.
+        let codex = Fake::new(
+            EngineId::Codex,
+            vec![session(EngineId::Codex, "x1", None)],
+            None,
+        );
+
+        let core = Core::new(vec![
+            Arc::clone(&dsh) as Arc<dyn Engine>,
+            Arc::clone(&claude) as Arc<dyn Engine>,
+            Arc::clone(&codex) as Arc<dyn Engine>,
+        ]);
+        core.start().await;
+
+        let response = core.dispatch(Command::UsageOverview).await;
+        assert!(response.ok, "{:?}", response.error);
+        let wire = response.value.unwrap();
+
+        // Top level only: the subagent is not a session the operator started,
+        // but the Codex session still counts even though Codex has no history.
+        assert_eq!(wire["sessions"], 3);
+        let days = wire["days"].as_array().unwrap();
+        assert_eq!(days.len(), 2);
+        assert_eq!(days[0]["date"], "2026-10-19");
+        assert_eq!(days[1]["date"], "2026-10-20");
+        // The date both engines worked on is one row, added up.
+        assert_eq!(days[1]["messages"], 5);
+        assert_eq!(days[1]["inputTokens"], 500);
+        assert_eq!(days[1]["outputTokens"], 50);
+        let hours = days[1]["hours"].as_array().unwrap();
+        assert_eq!(hours.len(), 24);
+        assert_eq!(hours[9], 5);
+        // Both models survive, most-used first.
+        let models = days[1]["models"].as_array().unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0]["model"], "claude-model");
+        assert_eq!(models[1]["model"], "dsh-model");
+    }
+
+    #[tokio::test]
+    async fn an_engine_that_cannot_answer_costs_nobody_their_charts() {
+        let nothing = Fake::new(EngineId::Dsh, Vec::new(), None);
+        let core = Core::new(vec![Arc::clone(&nothing) as Arc<dyn Engine>]);
+        core.start().await;
+
+        let response = core.dispatch(Command::UsageOverview).await;
+        assert!(response.ok, "{:?}", response.error);
+        let wire = response.value.unwrap();
+        assert_eq!(wire["sessions"], 0);
+        assert_eq!(wire["days"], serde_json::json!([]));
+    }
 }

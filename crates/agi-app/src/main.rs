@@ -54,13 +54,38 @@ fn main() {
     let _kernel = booted;
 
     tauri::Builder::default()
+        // A menu bar of File/Edit/View is the default, and it is not what this
+        // window is: it has one screen for each agent and nothing to open. macOS
+        // still needs an application menu for About and Quit.
+        .menu(|handle| {
+            use tauri::menu::{MenuBuilder, SubmenuBuilder};
+            let app = SubmenuBuilder::new(handle, "AGI Mizar")
+                .about(None)
+                .separator()
+                .quit()
+                .build()?;
+            MenuBuilder::new(handle).items(&[&app]).build()
+        })
         .setup(move |app| {
             let parsed = url.parse().expect("the kernel URL is not a URL");
-            tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::External(parsed))
-                .title("AGI Mizar")
-                .inner_size(1100.0, 720.0)
-                .min_inner_size(720.0, 480.0)
-                .build()?;
+            let mut builder =
+                tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::External(parsed))
+                    .title("AGI Mizar")
+                    .inner_size(1100.0, 720.0)
+                    .min_inner_size(720.0, 480.0);
+
+            // The window draws its own chrome: the page reserves a strip for the
+            // traffic lights, and everything below it is the app's. Windows has no
+            // such overlay, so it keeps the system title bar.
+            #[cfg(target_os = "macos")]
+            {
+                builder = builder
+                    .title_bar_style(tauri::TitleBarStyle::Overlay)
+                    .hidden_title(true)
+                    .traffic_light_position(tauri::LogicalPosition::new(18.0, 20.0));
+            }
+
+            builder.build()?;
             Ok(())
         })
         .run(tauri::generate_context!())

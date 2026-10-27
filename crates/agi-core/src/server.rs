@@ -369,46 +369,82 @@ async fn hook_handler(
 }
 
 async fn dsh_handler(State(app): State<AppState>, upgrade: WebSocketUpgrade) -> Response {
-    upgrade.on_upgrade(move |socket| pump_dsh(app.dsh, socket))
+    // A page of a long session is megabytes of JSON in one frame. The default
+    // sixteen-megabyte ceiling is close enough that one big page kills the link
+    // mid-read, so leave room for the largest page this side asks for.
+    upgrade
+        .max_message_size(64 * 1024 * 1024)
+        .max_frame_size(64 * 1024 * 1024)
+        .on_upgrade(move |socket| pump_dsh(app.dsh, socket))
 }
 
 /// Hand one accepted socket to the DSH engine.
 ///
-/// The engine speaks in text frames, not sockets, so the socket is split into two
-/// channels here. That is the whole seam: everything above it is protocol.
-async fn pump_dsh(dsh: Arc<DshEngine>, socket: WebSocket) {
-    let (mut sink, mut stream) = socket.split();
+/// The socket has exactly one owner. Splitting it between a reader and a writer
+/// looks tidier and loses the transport's control frames: the plugin's watchdog
+/// pings this side and closes the link after two missed replies, which showed up
+/// as a reconnect every minute. Handling both directions in one loop lets every
+/// ping be answered, and gives the reconnect kick a single place to hang up.
+async fn pump_dsh(dsh: Arc<DshEngine>, mut socket: WebSocket) {
     let (incoming_tx, incoming_rx) = mpsc::channel::<String>(CHANNEL_DEPTH);
     let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<String>(CHANNEL_DEPTH);
 
-    let reader = tokio::spawn(async move {
-        while let Some(frame) = stream.next().await {
-            match frame {
-                Ok(Message::Text(text)) => {
+    let mut kick = dsh.kick_receiver();
+    let engine = Arc::clone(&dsh);
+    let serve = dsh.serve(incoming_rx, outgoing_tx);
+    tokio::pin!(serve);
+
+    let hang_up = loop {
+        tokio::select! {
+            // The engine finished on its own (the plugin sent a close, or the
+            // protocol said so); its own detach has already run.
+            _ = &mut serve => break false,
+            // Somebody asked this link to be dropped: hanging up is how the
+            // plugin is told to dial again.
+            _ = kick.recv() => break true,
+            frame = socket.next() => match frame {
+                Some(Ok(Message::Text(text))) => {
                     if incoming_tx.send(text).await.is_err() {
-                        break;
+                        break true;
                     }
                 }
-                Ok(Message::Close(_)) | Err(_) => break,
-                // Ping/Pong are answered by the transport; binary is not part of
-                // this protocol.
-                _ => {}
-            }
+                // Answering the plugin's watchdog is what keeps this link up.
+                Some(Ok(Message::Ping(payload))) => {
+                    let _ = socket.send(Message::Pong(payload)).await;
+                    let _ = socket.flush().await;
+                }
+                Some(Ok(Message::Close(frame))) => {
+                    tracing::debug!("dsh link: plugin asked to close ({frame:?})");
+                    break true;
+                }
+                Some(Ok(_)) => {}
+                Some(Err(error)) => {
+                    tracing::warn!("dsh link: socket failed — {error}");
+                    break true;
+                }
+                None => {
+                    tracing::debug!("dsh link: socket ended");
+                    break true;
+                }
+            },
+            outgoing = outgoing_rx.recv() => match outgoing {
+                Some(text) => {
+                    if socket.send(Message::Text(text)).await.is_err() {
+                        break true;
+                    }
+                }
+                None => break true,
+            },
         }
-    });
+    };
 
-    let writer = tokio::spawn(async move {
-        while let Some(text) = outgoing_rx.recv().await {
-            if sink.send(Message::Text(text)).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    dsh.serve(incoming_rx, outgoing_tx).await;
-
-    reader.abort();
-    writer.abort();
+    // Dropping the serve future is how the channels close. If it never reached
+    // its own detach (every path but the first), do that here, or the engine
+    // keeps claiming a connection whose socket is gone.
+    drop(incoming_tx);
+    if hang_up {
+        DshEngine::forget_link(&engine);
+    }
 }
 
 /// Whether the request carries this launch's API token.

@@ -22,6 +22,7 @@ pub mod engine;
 pub mod installer;
 pub mod paths;
 pub mod transcript;
+pub mod usage;
 
 pub use engine::ClaudeEngine;
 pub use installer::{install, uninstall, InstallOutcome, HOOK_EVENTS};

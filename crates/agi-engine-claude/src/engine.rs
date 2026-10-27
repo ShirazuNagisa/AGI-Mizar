@@ -664,6 +664,12 @@ impl Engine for ClaudeEngine {
         }
     }
 
+    async fn reconnect(&self) -> Result<(), EngineError> {
+        // There is no link to drop: the transcripts are read straight off disk,
+        // so the next read is the reconnection.
+        Ok(())
+    }
+
     fn status(&self) -> (bool, Option<String>) {
         // There is nothing to connect to: the engine is usable exactly when a
         // projects directory exists, and a missing one is the normal state on a
@@ -732,6 +738,14 @@ impl Engine for ClaudeEngine {
         }
         let start = records.len().saturating_sub(limit);
         Ok(records.split_off(start))
+    }
+
+    /// Every day of activity in every transcript.
+    ///
+    /// A directory read rather than a call: Claude Code writes the usage the
+    /// provider billed into each `assistant` line, so there is nothing to ask.
+    async fn usage_history(&self) -> Result<Vec<agi_protocol::api::UsageDay>, EngineError> {
+        Ok(crate::usage::days(&self.projects))
     }
 
     async fn prompt(&self, session: &SessionKey, text: &str) -> Result<(), EngineError> {

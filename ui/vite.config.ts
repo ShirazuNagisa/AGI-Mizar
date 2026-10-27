@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
 
 /**
  * The dev server proxies the kernel's API, so `pnpm dev` talks to a real kernel
@@ -7,7 +8,7 @@ import react from '@vitejs/plugin-react'
  * kernel that is not on the default port.
  */
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   server: {
     port: 5273,
     proxy: {

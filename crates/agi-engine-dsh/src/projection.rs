@@ -139,10 +139,10 @@ fn authorship(data: &Value) -> Authorship {
 
 /// The `{seq, time, type, data}` record inside a forwarded payload.
 ///
-/// The plugin forwards `{header, event}`; a build that forwarded the record
-/// itself is read as the record, so one wire change cannot silently empty every
-/// conversation.
-fn event_of(payload: &Value) -> Option<&Value> {
+/// The plugin forwards `{header, event}`, `session/page` answers
+/// `{type: "event", event}`, and a build that forwarded the record itself is read
+/// as the record, so one wire change cannot silently empty every conversation.
+pub(crate) fn event_of(payload: &Value) -> Option<&Value> {
     match payload.get("event") {
         Some(event) if event.is_object() => Some(event),
         _ if payload.get("type").is_some() => Some(payload),

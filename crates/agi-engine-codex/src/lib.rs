@@ -13,6 +13,7 @@
 pub mod engine;
 pub mod projection;
 pub mod rpc;
+pub mod usage;
 
 pub use engine::CodexEngine;
 pub use rpc::{AppServerConfig, RpcError};

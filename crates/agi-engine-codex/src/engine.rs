@@ -479,6 +479,12 @@ impl Engine for CodexEngine {
         }
     }
 
+    async fn reconnect(&self) -> Result<(), EngineError> {
+        // Re-reading the session index is what re-probes the CLI and its files.
+        self.refresh_sessions().await?;
+        Ok(())
+    }
+
     fn status(&self) -> (bool, Option<String>) {
         let state = self.state();
         (state.connected, state.detail.clone())
@@ -526,6 +532,16 @@ impl Engine for CodexEngine {
         }
         let start = records.len().saturating_sub(limit);
         Ok(records.split_off(start))
+    }
+
+    /// Every day of activity in the local rollout tree.
+    ///
+    /// Codex's app-server answers about *loaded* threads only, and history is a
+    /// page at a time, so a year of usage cannot be asked for over RPC. The
+    /// rollouts under `~/.codex/sessions` are the durable record of what was
+    /// billed, and they are read from disk instead.
+    async fn usage_history(&self) -> Result<Vec<agi_protocol::api::UsageDay>, EngineError> {
+        Ok(crate::usage::days(&crate::usage::sessions_dir()))
     }
 
     async fn prompt(&self, session: &SessionKey, text: &str) -> Result<(), EngineError> {
