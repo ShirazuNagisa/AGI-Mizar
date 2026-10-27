@@ -35,6 +35,12 @@ export interface EngineStatus {
   sessions: number
 }
 
+export interface ContextPressure {
+  window: number
+  used: number
+  percent: number
+}
+
 export interface Session {
   key: string
   cwd: string | null
@@ -45,6 +51,8 @@ export interface Session {
   parent: string | null
   origin: string | null
   turns: number
+  /** `null` means this engine cannot say, which is not the same as empty. */
+  context: ContextPressure | null
 }
 
 export type RecordKind =

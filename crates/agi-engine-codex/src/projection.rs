@@ -89,6 +89,8 @@ pub fn session_from_thread(thread: &Value) -> Option<Session> {
             .and_then(Value::as_array)
             .map(|turns| turns.len() as u32)
             .unwrap_or(0),
+        // Codex reports usage per turn, not a live window reading.
+        context: None,
     })
 }
 

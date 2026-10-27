@@ -243,6 +243,23 @@ impl MizarServer {
                         format!("no engine for {}", key.engine),
                     );
                 };
+                let context = self
+                    .core
+                    .snapshot()
+                    .sessions
+                    .iter()
+                    .find(|session| session.key == key)
+                    .and_then(|session| session.context)
+                    .map(|pressure| {
+                        json!({
+                            "window": pressure.window,
+                            "pressureTokens": pressure.used,
+                            "projectedTokens": pressure.used,
+                            "percent": pressure.percent,
+                        })
+                    })
+                    .unwrap_or(Value::Null);
+
                 match engine.records(&key, limit, before).await {
                     Ok(records) => {
                         let as_of = records.last().map(|record| record.seq).unwrap_or(0);
@@ -255,8 +272,9 @@ impl MizarServer {
                                 "asOfSeq": as_of,
                                 "records": events,
                                 "hasMore": records.len() >= limit,
-                                // The phone merges this; `null` means "this host cannot say".
-                                "context": Value::Null,
+                                // The phone merges this into its cached usage frame;
+                                // `null` means "this host cannot say", not zero.
+                                "context": context,
                             }),
                         )
                     }

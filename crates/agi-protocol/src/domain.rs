@@ -92,7 +92,11 @@ impl From<SessionKey> for String {
 }
 
 /// One session as the list draws it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Not : the context reading is a float. Nothing keys a map by a session, so
+/// the weaker bound costs nothing and the alternative is a percentage stored as
+/// an integer someone has to remember to divide.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     pub key: SessionKey,
     /// Working directory, when the engine has one.
@@ -110,6 +114,23 @@ pub struct Session {
     pub origin: Option<String>,
     /// How many turns the engine has recorded.
     pub turns: u32,
+    /// How full the model's context window is, when the engine can say.
+    ///
+    /// `None` is "this host cannot tell", which is not the same as zero: a
+    /// session that has not run yet has no reading at all, and drawing an empty
+    /// ring for it would be a claim nobody made.
+    pub context: Option<ContextPressure>,
+}
+
+/// How much of the model's context window a session is using.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ContextPressure {
+    /// The window's size in tokens.
+    pub window: u64,
+    /// Tokens currently occupied.
+    pub used: u64,
+    /// `used / window`, as the engine computes it.
+    pub percent: f64,
 }
 
 impl Session {
@@ -125,6 +146,7 @@ impl Session {
             parent: None,
             origin: None,
             turns: 0,
+            context: None,
         }
     }
 }

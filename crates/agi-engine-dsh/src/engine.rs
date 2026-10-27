@@ -20,11 +20,11 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 use agi_engine::{Answer, Engine, EngineError, EngineEvent};
-use agi_protocol::domain::{Interaction, InteractionKind, Record, Session, SessionKey};
+use agi_protocol::domain::{ContextPressure, Interaction, InteractionKind, Record, Session, SessionKey};
 use agi_protocol::engine::{Capabilities, EngineId};
 use agi_protocol::link::{
     ApprovalFrame, DesktopFrame, EventFrame, LinkFrame, NoticeFrame, QuestionFrame, ResultFrame,
@@ -50,6 +50,12 @@ const STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 /// endpoint is missing, but because it cannot dispatch yet. There is no API to
 /// wait on a service, so the only honest gate is trying again.
 const COMPOSE_GRACE: Duration = Duration::from_secs(60);
+
+/// How many sessions get their projections read after a list.
+const ENRICH_LIMIT: usize = 40;
+
+/// How long to wait between projection reads.
+const ENRICH_SPACING: Duration = Duration::from_millis(60);
 
 /// Records kept per session in memory. Beyond this the oldest are dropped; a
 /// conversation view pages backwards from the engine when it needs them again.
@@ -95,6 +101,9 @@ pub struct DshEngine {
     events: broadcast::Sender<EngineEvent>,
     inner: Mutex<Inner>,
     next_id: AtomicU64,
+    /// A weak handle to self, so `refresh_sessions(&self)` can start a task that
+    /// outlives the call. `Arc::new_cyclic` fills it in after construction.
+    me: Weak<DshEngine>,
 }
 
 impl DshEngine {
@@ -105,11 +114,12 @@ impl DshEngine {
         // Said out loud from the first snapshot: an engine with no detail reads
         // like an engine that failed, not one that is waiting.
         inner.detail = Some("no plugin attached".to_string());
-        Arc::new(Self {
+        Arc::new_cyclic(|me| Self {
             token: token.into(),
             events,
             inner: Mutex::new(inner),
             next_id: AtomicU64::new(1),
+            me: me.clone(),
         })
     }
 
@@ -608,6 +618,26 @@ impl DshEngine {
         for key in removed {
             self.emit(EngineEvent::SessionRemoved(key));
         }
+
+        // Then, in the background, give the newest rows the things a list needs
+        // to be readable. Sequentially and slowly: three hundred projection reads
+        // at once would be a stampede on the host for data nobody has scrolled to.
+        if let Some(engine) = self.me.upgrade() {
+            let newest: Vec<String> = parsed
+                .iter()
+                .take(ENRICH_LIMIT)
+                .map(|session| session.key.id.clone())
+                .collect();
+            tokio::spawn(async move {
+                for id in newest {
+                    if !engine.connected() {
+                        return;
+                    }
+                    engine.enrich(&id).await;
+                    tokio::time::sleep(ENRICH_SPACING).await;
+                }
+            });
+        }
         Ok(parsed)
     }
 
@@ -675,6 +705,103 @@ impl DshEngine {
 
         Ok(records)
     }
+
+    /// Fill in what `session/list` does not carry: the title, the model, and how
+    /// full the context window is.
+    ///
+    /// `session/list` answers identity and timing; everything a person recognises
+    /// a session by lives in its projections. Reading them costs one call per
+    /// session, so it happens for the rows somebody can actually see rather than
+    /// for all three hundred at attach.
+    async fn enrich(&self, session_id: &str) {
+        let value = match self
+            .call(
+                "session/projections",
+                json!({ "request": { "sessionId": session_id } }),
+            )
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::debug!("dsh: no projections for {session_id} — {error}");
+                return;
+            }
+        };
+        let Some(values) = value.get("values") else {
+            return;
+        };
+
+        let title = values
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .filter(|title| !title.trim().is_empty());
+        // `modelSelection` is `{lastUsed, next}`, each `{provider, model}`: the
+        // model in force and the one the next turn would use. Reading the wrong
+        // level is why every row showed no model at all.
+        let model = values
+            .get("modelSelection")
+            .and_then(|selection| {
+                selection
+                    .get("lastUsed")
+                    .or_else(|| selection.get("next"))
+                    .or(Some(selection))
+            })
+            .and_then(|selection| selection.get("model"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let turns = values
+            .get("sessionStats")
+            .and_then(|stats| stats.get("turns"))
+            .and_then(Value::as_u64)
+            .and_then(|turns| u32::try_from(turns).ok());
+        let context = values.get("contextPressure").and_then(read_pressure);
+
+        if title.is_none() && model.is_none() && context.is_none() {
+            return;
+        }
+        let updated = {
+            let mut inner = self.inner();
+            let Some(session) = inner.sessions.get_mut(session_id) else {
+                return;
+            };
+            if title.is_some() {
+                session.title = title;
+            }
+            if model.is_some() {
+                session.model = model;
+            }
+            if context.is_some() {
+                session.context = context;
+            }
+            if let Some(turns) = turns {
+                session.turns = turns;
+            }
+            session.clone()
+        };
+        self.emit(EngineEvent::SessionUpdated(updated));
+    }
+}
+
+/// Read a `contextPressure` projection value.
+///
+/// Every field is optional on the host's side: a session that has not run has no
+/// reading, and a partial one is still worth drawing.
+fn read_pressure(value: &Value) -> Option<ContextPressure> {
+    let window = value.get("contextWindow").and_then(Value::as_u64)?;
+    if window == 0 {
+        return None;
+    }
+    let used = value
+        .get("pressureTokens")
+        .and_then(Value::as_u64)
+        .or_else(|| value.get("projectedTokens").and_then(Value::as_u64))
+        .unwrap_or(0);
+    Some(ContextPressure {
+        window,
+        used,
+        percent: (used as f64 / window as f64) * 100.0,
+    })
 }
 
 /// Whether a failure is "the host is still composing" rather than a real error.
@@ -726,6 +853,8 @@ fn parse_session(value: &Value) -> Option<Session> {
             .and_then(Value::as_u64)
             .and_then(|turns| u32::try_from(turns).ok())
             .unwrap_or(0),
+        // `session/list` carries none of these; `enrich` fills them in.
+        context: None,
     })
 }
 
