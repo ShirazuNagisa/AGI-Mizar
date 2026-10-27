@@ -71,6 +71,11 @@ pub struct MizarServer {
     relay: Mutex<Option<Arc<RelayClient>>>,
     /// Notices every connected phone receives: today, that the tunnel moved.
     notices: broadcast::Sender<Value>,
+    /// Devices whose app is on screen: they see an approval already, so waking
+    /// them for it is noise. Presence is host-local, never sent to the relay.
+    foreground: Mutex<std::collections::HashSet<String>>,
+    /// The client that talks to the relay's push API.
+    http: reqwest::Client,
 }
 
 impl MizarServer {
@@ -85,6 +90,11 @@ impl MizarServer {
             port: AtomicU16::new(0),
             relay: Mutex::new(None),
             notices: broadcast::channel(16).0,
+            foreground: Mutex::new(std::collections::HashSet::new()),
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
         })
     }
 
@@ -272,6 +282,26 @@ impl MizarServer {
         let bound = listener.local_addr()?.port();
         self.port.store(bound, Ordering::Relaxed);
 
+        // One listener for the whole host. A phone that is asleep still needs
+        // to know the agent is blocked, and that must not depend on a socket
+        // being open at the time.
+        {
+            let server = Arc::clone(self);
+            let mut events = server.core.subscribe();
+            tokio::spawn(async move {
+                loop {
+                    match events.recv().await {
+                        Ok(agi_protocol::api::ApiEvent::InteractionRequested { interaction }) => {
+                            server.notify_interaction(&interaction).await;
+                        }
+                        Ok(_) => {}
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => return,
+                    }
+                }
+            });
+        }
+
         Ok(tokio::spawn(async move {
             // With peer addresses: "the phone says it cannot connect" is
             // otherwise indistinguishable from "nothing arrived", and a request
@@ -302,7 +332,7 @@ impl MizarServer {
     }
 
     /// One Mizar method call.
-    async fn call(&self, frame: &ClientFrame) -> ServerFrame {
+    async fn call(&self, device: &crate::store::Device, frame: &ClientFrame) -> ServerFrame {
         let id = frame.id.clone().unwrap_or_default();
 
         match frame.kind.as_str() {
@@ -1251,6 +1281,86 @@ impl MizarServer {
                 }
             }
 
+            // Where this phone's notifications go. The plugin cannot talk to
+            // Apple — the signing key lives on the relay — so its job is to tell
+            // the relay what happened and who this device is.
+            "push.register" => {
+                let Some(token) = frame.payload.get("token").and_then(Value::as_str) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "push.register needs a token",
+                    );
+                };
+                let mut body = json!({
+                    "deviceId": device.id,
+                    "token": token,
+                    "platform": frame.payload.get("platform").and_then(Value::as_str).unwrap_or("ios"),
+                });
+                for field in [
+                    "environment",
+                    "locale",
+                    "liveActivityToken",
+                    "liveActivityStartToken",
+                ] {
+                    if let Some(value) = frame.payload.get(field) {
+                        body[field] = value.clone();
+                    }
+                }
+                match self.relay_post("/push/v1/register", body).await {
+                    Ok(answer) => ServerFrame::ok(
+                        id,
+                        json!({ "registered": answer.get("ok").and_then(Value::as_bool).unwrap_or(false) }),
+                    ),
+                    Err(error) => {
+                        tracing::warn!("mizar: push.register was not carried — {error}");
+                        ServerFrame::ok(id, json!({ "registered": false }))
+                    }
+                }
+            }
+
+            "push.unregister" => {
+                match self
+                    .relay_post("/push/v1/unregister", json!({ "deviceId": device.id }))
+                    .await
+                {
+                    Ok(answer) => ServerFrame::ok(
+                        id,
+                        json!({ "unregistered": answer.get("ok").and_then(Value::as_bool).unwrap_or(false) }),
+                    ),
+                    Err(error) => {
+                        tracing::warn!("mizar: push.unregister was not carried — {error}");
+                        ServerFrame::ok(id, json!({ "unregistered": false }))
+                    }
+                }
+            }
+
+            // Host-local bookkeeping: a phone that is on screen sees the
+            // approval already, so it is left out of the wake-up. This never
+            // reaches the relay.
+            "push.presence" => {
+                let Some(foreground) = frame.payload.get("foreground").and_then(Value::as_bool)
+                else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "push.presence needs a foreground flag",
+                    );
+                };
+                {
+                    let mut known = self
+                        .foreground
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if foreground {
+                        known.insert(device.id.clone());
+                    } else {
+                        known.remove(&device.id);
+                    }
+                }
+                ServerFrame::ok(id, json!({ "accepted": true }))
+            }
+
             // Everything else is a method this build has not grown yet. Saying so
             // is what lets the phone tell "older host" from "broken host".
             other => ServerFrame::error(
@@ -1258,6 +1368,93 @@ impl MizarServer {
                 ErrorCode::NotImplemented,
                 format!("{other} is not implemented by this host"),
             ),
+        }
+    }
+
+    /// POST to the relay's API with this tunnel's credential.
+    ///
+    /// The credential is read out of the lock before the await: holding a
+    /// `std::sync::Mutex` across one is how a server stops answering.
+    async fn relay_post(&self, path: &str, body: Value) -> Result<Value, String> {
+        let (base, token) = {
+            let guard = self
+                .relay
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(relay) = guard.as_ref() else {
+                return Err("this host has no tunnel".to_string());
+            };
+            (relay.base().to_string(), relay.token().to_string())
+        };
+        let url = format!("{}{path}", base.trim_end_matches('/'));
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+        if !response.status().is_success() {
+            return Err(format!("the relay answered {}", response.status()));
+        }
+        response
+            .json::<Value>()
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Wake the phones that are not looking at an approval or a question.
+    ///
+    /// A device that has said it is on screen is left out: it already has the
+    /// card. Everything else on this host gets one notification per interaction,
+    /// addressed to the session that is blocked.
+    async fn notify_interaction(&self, interaction: &agi_protocol::domain::Interaction) {
+        let (kind, title, body) = match interaction.kind {
+            InteractionKind::Approval => (
+                "approval",
+                "Approval needed".to_string(),
+                interaction.title.clone(),
+            ),
+            _ => {
+                let question = interaction
+                    .questions
+                    .first()
+                    .map(|question| {
+                        question
+                            .options
+                            .first()
+                            .map(|_| question.text.clone())
+                            .unwrap_or_else(|| question.text.clone())
+                    })
+                    .unwrap_or_else(|| interaction.title.clone());
+                (
+                    "question",
+                    "The agent asked a question".to_string(),
+                    question,
+                )
+            }
+        };
+        let except: Vec<String> = {
+            let known = self
+                .foreground
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            known.iter().cloned().collect()
+        };
+        let session = interaction.session.as_ref().map(|key| key.to_string());
+        let body = json!({
+            "kind": kind,
+            "title": title,
+            "body": body,
+            "sessionId": session,
+            "threadId": session,
+            "timeSensitive": true,
+            "exceptDeviceIds": except,
+        });
+        if let Err(error) = self.relay_post("/push/v1/notify", body).await {
+            // A phone that cannot be woken is a worse app, not a broken host.
+            tracing::debug!("mizar: no notification for {kind} — {error}");
         }
     }
 
@@ -1628,7 +1825,7 @@ async fn serve_socket(server: Arc<MizarServer>, peer: SocketAddr, socket: WebSoc
         if frame.kind == "hello" {
             continue;
         }
-        let answer = server.call(&frame).await;
+        let answer = server.call(&device, &frame).await;
         if send(&out, answer).await.is_err() {
             break;
         }
