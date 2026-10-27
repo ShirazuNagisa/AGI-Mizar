@@ -1,0 +1,23 @@
+[package]
+name = "agi-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Runs the AGI Mizar kernel without a window: the backend on its own, for development and for a headless deployment."
+
+[[bin]]
+name = "agi-daemon"
+path = "src/main.rs"
+
+[dependencies]
+agi-core = { workspace = true }
+agi-engine = { workspace = true }
+agi-engine-dsh = { workspace = true }
+agi-protocol = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }

@@ -1,0 +1,24 @@
+[package]
+name = "agi-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The kernel: engine registry, aggregated state, and the loopback API the UI and the DSH plugin talk to."
+
+[dependencies]
+agi-protocol = { workspace = true }
+agi-engine = { workspace = true }
+agi-engine-dsh = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
