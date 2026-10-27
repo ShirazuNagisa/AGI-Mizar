@@ -315,6 +315,7 @@ impl ClaudeEngine {
             title: tool.to_string(),
             detail: payload.get("tool_input").and_then(describe_tool_input),
             requested_at: now_ms(),
+            questions: Vec::new(),
         };
         self.emit(EngineEvent::InteractionRequested(interaction));
 

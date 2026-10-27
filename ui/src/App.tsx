@@ -113,10 +113,7 @@ export function App() {
   }, [snapshot, filter])
 
   const active = sessions.find((session) => session.key === selected) ?? null
-  const approvals = useMemo(
-    () => (snapshot?.interactions ?? []).filter((i) => i.kind === 'approval'),
-    [snapshot],
-  )
+  const waiting = useMemo(() => snapshot?.interactions ?? [], [snapshot])
 
   const act = useCallback(async (run: () => Promise<unknown>) => {
     try {
@@ -175,7 +172,7 @@ export function App() {
           sessions={sessions}
           selected={selected}
           onSelect={setSelected}
-          approvals={approvals}
+          approvals={waiting}
         />
 
         <section className="panel">
@@ -198,8 +195,12 @@ export function App() {
           <aside className="panel">
             <Inspector
               session={active}
-              approvals={approvals.filter((approval) => approval.session === active?.key || approval.session === null)}
-              onAnswer={(id, outcome) => act(() => kernel.send({ op: 'answer', id, outcome }))}
+              interactions={waiting.filter(
+                (entry) => entry.session === active?.key || entry.session === null,
+              )}
+              onAnswer={(id, outcome, answers) =>
+                act(() => kernel.send({ op: 'answer', id, outcome, answers }))
+              }
               version={snapshot.version}
               engines={snapshot.engines}
             />

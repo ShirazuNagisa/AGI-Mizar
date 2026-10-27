@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use agi_engine::{Answer, Engine, EngineError, EngineEvent};
 use agi_protocol::domain::{
-    ContextPressure, Interaction, InteractionKind, Record, Session, SessionKey,
+    ContextPressure, Interaction, InteractionKind, Question, Record, Session, SessionKey,
 };
 use agi_protocol::engine::{Capabilities, EngineId};
 use agi_protocol::link::{
@@ -521,6 +521,7 @@ impl DshEngine {
                 .and_then(Value::as_str)
                 .map(str::to_string),
             requested_at: now_ms(),
+            questions: Vec::new(),
         };
         self.inner()
             .interactions
@@ -529,18 +530,17 @@ impl DshEngine {
     }
 
     fn on_question(&self, frame: QuestionFrame) {
-        let questions = frame
-            .request
-            .get("questions")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        let questions = read_questions(&frame.request);
+        if questions.is_empty() {
+            // Nothing answerable: delegating is the honest answer, and a card
+            // with no options would be a card nobody can act on.
+            tracing::debug!("dsh: a question batch arrived with no questions");
+            return;
+        }
         let title = questions
             .first()
-            .and_then(|question| question.get("question"))
-            .and_then(Value::as_str)
-            .unwrap_or("question")
-            .to_string();
+            .map(|question| question.text.clone())
+            .unwrap_or_else(|| "question".to_string());
         let interaction = Interaction {
             id: frame.id.clone(),
             session: frame
@@ -553,6 +553,7 @@ impl DshEngine {
             title,
             detail: None,
             requested_at: now_ms(),
+            questions,
         };
         self.inner()
             .interactions
@@ -798,6 +799,65 @@ impl DshEngine {
         };
         self.emit(EngineEvent::SessionUpdated(updated));
     }
+}
+
+/// Read a `user-questions/request` payload into the shared model.
+///
+/// The host's shape is flat and has no call id: `{questions: [...], agent: {...}}`.
+/// A batch with no usable question is empty, which the caller treats as "nothing
+/// this layer can answer" and delegates.
+fn read_questions(request: &Value) -> Vec<Question> {
+    let raw = request
+        .get("questions")
+        .or_else(|| {
+            request
+                .get("request")
+                .and_then(|inner| inner.get("questions"))
+        })
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    raw.iter()
+        .filter_map(|entry| {
+            let id = entry.get("id").and_then(Value::as_str)?;
+            if id.is_empty() {
+                return None;
+            }
+            let options = entry
+                .get("options")
+                .and_then(Value::as_array)
+                .map(|options| {
+                    options
+                        .iter()
+                        .filter_map(|option| option.get("label").and_then(Value::as_str))
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(Question {
+                id: id.to_string(),
+                text: entry
+                    .get("question")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                header: entry
+                    .get("header")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                detail: entry
+                    .get("detail")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                options,
+                multi_select: entry
+                    .get("multiSelect")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            })
+        })
+        .collect()
 }
 
 /// Read a `contextPressure` projection value.

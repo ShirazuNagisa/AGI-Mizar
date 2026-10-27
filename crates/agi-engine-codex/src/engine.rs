@@ -358,6 +358,7 @@ impl CodexEngine {
             title: title.to_string(),
             detail,
             requested_at: now_ms(),
+            questions: Vec::new(),
         };
 
         self.approvals().insert(

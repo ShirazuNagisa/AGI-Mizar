@@ -1,4 +1,5 @@
 import type { EngineStatus, Interaction, Session } from '../api'
+import { Questions } from './Questions'
 import { when } from './SessionList'
 
 /**
@@ -11,16 +12,28 @@ import { when } from './SessionList'
  */
 export function Inspector(props: {
   session: Session | null
-  approvals: Interaction[]
+  interactions: Interaction[]
   engines: EngineStatus[]
   version: string
-  onAnswer: (id: string, outcome: string) => void
+  onAnswer: (id: string, outcome?: string, answers?: unknown[]) => void
 }) {
   return (
     <>
       <div className="panel-head">Details</div>
       <div className="inspector">
-        {props.approvals.map((approval) => (
+        {props.interactions
+          .filter((entry) => entry.kind === 'question')
+          .map((question) => (
+            <Questions
+              key={question.id}
+              interaction={question}
+              onAnswer={(id, answers) => props.onAnswer(id, undefined, answers)}
+            />
+          ))}
+
+        {props.interactions
+          .filter((entry) => entry.kind === 'approval')
+          .map((approval) => (
           <div className="approval" key={approval.id}>
             <div className="head">
               <span className="badge">Approval</span>

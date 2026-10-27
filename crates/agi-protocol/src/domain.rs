@@ -238,6 +238,23 @@ pub enum InteractionKind {
     Question,
 }
 
+/// One question in a batch, as the agent asked it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Question {
+    /// The id the answer must name.
+    pub id: String,
+    /// The question itself.
+    pub text: String,
+    /// A short label the agent suggested, when it offered one.
+    pub header: Option<String>,
+    /// Supporting detail, when the agent supplied any.
+    pub detail: Option<String>,
+    /// The choices, in the order the agent offered them.
+    pub options: Vec<String>,
+    /// Whether more than one option may be chosen.
+    pub multi_select: bool,
+}
+
 /// One pending approval or question, as the UI shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Interaction {
@@ -251,6 +268,11 @@ pub struct Interaction {
     pub detail: Option<String>,
     /// Epoch milliseconds.
     pub requested_at: i64,
+    /// The questions of a [`InteractionKind::Question`], in the agent's order.
+    ///
+    /// Empty for an approval. A question batch that arrives with none is not
+    /// answerable and is not stored.
+    pub questions: Vec<Question>,
 }
 
 #[cfg(test)]

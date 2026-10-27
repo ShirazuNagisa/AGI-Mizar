@@ -416,10 +416,38 @@ impl MizarServer {
                         })
                     })
                     .collect();
-                // Questions are not modelled on this host yet. An empty list is
-                // the honest answer: it says "nothing is waiting", which is true,
-                // rather than inventing a question shape the phone cannot answer.
-                ServerFrame::ok(id, json!({ "approvals": approvals, "questions": [] }))
+                let questions: Vec<Value> = snapshot
+                    .interactions
+                    .iter()
+                    .filter(|interaction| interaction.kind == InteractionKind::Question)
+                    .map(|interaction| {
+                        json!({
+                            "callId": interaction.id,
+                            "sessionId": interaction.session.as_ref().map(|key| key.to_string()),
+                            "requestedAt": interaction.requested_at,
+                            "questions": interaction
+                                .questions
+                                .iter()
+                                .map(|question| json!({
+                                    "id": question.id,
+                                    "question": question.text,
+                                    "header": question.header,
+                                    "detail": question.detail,
+                                    "multiSelect": question.multi_select,
+                                    "options": question
+                                        .options
+                                        .iter()
+                                        .map(|label| json!({ "label": label }))
+                                        .collect::<Vec<_>>(),
+                                }))
+                                .collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect();
+                ServerFrame::ok(
+                    id,
+                    json!({ "approvals": approvals, "questions": questions }),
+                )
             }
 
             "approval.answer" => {
@@ -444,6 +472,37 @@ impl MizarServer {
                     id: request_id.to_string(),
                     outcome: Some(outcome),
                     answers: None,
+                };
+                let response = self.core.dispatch(command).await;
+                match (response.ok, response.error) {
+                    (true, _) => ServerFrame::ok(id, json!({ "accepted": true })),
+                    (false, Some(error)) => ServerFrame::error(
+                        Some(id),
+                        ErrorCode::from_engine(&error.code),
+                        error.message,
+                    ),
+                    _ => ServerFrame::error(Some(id), ErrorCode::Internal, "the answer failed"),
+                }
+            }
+
+            "question.answer" => {
+                let Some(call_id) = frame.payload.get("callId").and_then(Value::as_str) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "question.answer needs callId",
+                    );
+                };
+                let answers = frame
+                    .payload
+                    .get("answers")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let command = agi_protocol::api::Command::Answer {
+                    id: call_id.to_string(),
+                    outcome: None,
+                    answers: Some(answers),
                 };
                 let response = self.core.dispatch(command).await;
                 match (response.ok, response.error) {
@@ -873,6 +932,7 @@ mod tests {
                 title: "bash".to_string(),
                 detail: Some("rm -rf build".to_string()),
                 requested_at: 1,
+                questions: Vec::new(),
             },
         };
         let frame = interaction_event(&event).unwrap();

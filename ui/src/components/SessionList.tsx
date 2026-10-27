@@ -1,11 +1,16 @@
+import { useMemo, useState } from 'react'
 import type { Interaction, Session } from '../api'
 
 /**
- * The list, newest first.
+ * The list, grouped by the directory the session works in.
  *
- * A row carries three things and no more: what the session is, which product it
- * belongs to, and whether something is waiting. Anything else is a detail the
- * right-hand panel exists for.
+ * A flat list is fine for four sessions and useless for three hundred. The phone
+ * grouped by workspace because that is how DSH itself is organised; a directory
+ * is the same idea and is the one thing all three engines report, so grouping by
+ * it gives one list rather than three.
+ *
+ * A group remembers being folded, because the operator who collapsed
+ * `~/Documents/books` does not want it reopened by the next refresh.
  */
 export function SessionList(props: {
   sessions: Session[]
@@ -13,7 +18,41 @@ export function SessionList(props: {
   approvals: Interaction[]
   onSelect: (key: string) => void
 }) {
-  const waiting = new Set(props.approvals.map((approval) => approval.session))
+  const [query, setQuery] = useState('')
+  const [folded, setFolded] = useState<Record<string, boolean>>({})
+
+  const waiting = useMemo(
+    () => new Set(props.approvals.map((entry) => entry.session)),
+    [props.approvals],
+  )
+
+  const groups = useMemo(() => {
+    const needle = query.trim().toLowerCase()
+    const visible = props.sessions.filter((session) => {
+      if (needle === '') return true
+      return [session.title, session.cwd, session.model, session.key]
+        .filter((value): value is string => value !== null)
+        .some((value) => value.toLowerCase().includes(needle))
+    })
+
+    const byDirectory = new Map<string, Session[]>()
+    for (const session of visible) {
+      const key = session.cwd ?? 'No folder'
+      const bucket = byDirectory.get(key)
+      if (bucket === undefined) byDirectory.set(key, [session])
+      else bucket.push(session)
+    }
+
+    // Newest group first, and newest row first inside it: the same order the
+    // flat list had, kept at both levels.
+    return [...byDirectory.entries()]
+      .map(([directory, sessions]) => ({
+        directory,
+        sessions: sessions.sort((a, b) => b.updated_at - a.updated_at),
+        newest: Math.max(...sessions.map((session) => session.updated_at)),
+      }))
+      .sort((a, b) => b.newest - a.newest)
+  }, [props.sessions, query])
 
   return (
     <section className="panel">
@@ -22,30 +61,64 @@ export function SessionList(props: {
         <span className="spacer" style={{ flex: 1 }} />
         <span style={{ fontWeight: 400, color: 'var(--text-3)' }}>{props.sessions.length}</span>
       </div>
+
+      <div className="search">
+        <input
+          value={query}
+          placeholder="Filter by title or folder"
+          onChange={(event) => setQuery(event.target.value)}
+        />
+      </div>
+
       <div className="sessions">
-        {props.sessions.length === 0 ? (
+        {groups.length === 0 ? (
           <div className="empty" style={{ padding: 24 }}>
-            <strong>Nothing here yet</strong>
-            <span>Start a session in DSH, Claude Code or Codex.</span>
+            <strong>{query === '' ? 'Nothing here yet' : 'Nothing matches'}</strong>
+            <span>
+              {query === '' ? 'Start a session in DSH, Claude Code or Codex.' : 'Try a shorter filter.'}
+            </span>
           </div>
         ) : (
-          props.sessions.map((session) => (
-            <button
-              key={session.key}
-              className="session"
-              data-active={session.key === props.selected}
-              onClick={() => props.onSelect(session.key)}
-            >
-              <span className="name">{session.title ?? 'Untitled'}</span>
-              <span className="dot" data-running={session.running} />
-              <span className="meta">
-                <span>{engineLabel(session.key)}</span>
-                {session.model !== null ? <span>{session.model}</span> : null}
-                <span>{when(session.updated_at)}</span>
-                {waiting.has(session.key) ? <span style={{ color: 'var(--warn)' }}>waiting on you</span> : null}
-              </span>
-            </button>
-          ))
+          groups.map((group) => {
+            const closed = folded[group.directory] === true
+            return (
+              <div key={group.directory}>
+                <button
+                  className="group"
+                  onClick={() =>
+                    setFolded((current) => ({ ...current, [group.directory]: !closed }))
+                  }
+                >
+                  <span className="chevron" data-closed={closed}>
+                    ▾
+                  </span>
+                  <span className="path">{shortPath(group.directory)}</span>
+                  <span className="count">{group.sessions.length}</span>
+                </button>
+                {closed
+                  ? null
+                  : group.sessions.map((session) => (
+                      <button
+                        key={session.key}
+                        className="session"
+                        data-active={session.key === props.selected}
+                        onClick={() => props.onSelect(session.key)}
+                      >
+                        <span className="name">{session.title ?? 'Untitled'}</span>
+                        <span className="dot" data-running={session.running} />
+                        <span className="meta">
+                          <span>{engineLabel(session.key)}</span>
+                          {session.model !== null ? <span>{session.model}</span> : null}
+                          <span>{when(session.updated_at)}</span>
+                          {waiting.has(session.key) ? (
+                            <span style={{ color: 'var(--warn)' }}>waiting on you</span>
+                          ) : null}
+                        </span>
+                      </button>
+                    ))}
+              </div>
+            )
+          })
         )}
       </div>
     </section>
@@ -55,6 +128,14 @@ export function SessionList(props: {
 function engineLabel(key: string): string {
   const engine = key.split(':')[0]
   return engine === 'dsh' ? 'DSH' : engine === 'claude' ? 'Claude' : 'Codex'
+}
+
+/** The last two path segments, which is what tells two folders apart. */
+function shortPath(path: string): string {
+  if (path === 'No folder') return path
+  const parts = path.split('/').filter((part) => part !== '')
+  if (parts.length <= 2) return parts.join('/')
+  return `…/${parts.slice(-2).join('/')}`
 }
 
 /** A short, human distance in time. */

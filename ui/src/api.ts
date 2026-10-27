@@ -84,6 +84,15 @@ export interface TurnRecord {
 
 export type InteractionKind = 'approval' | 'question'
 
+export interface Question {
+  id: string
+  text: string
+  header: string | null
+  detail: string | null
+  options: string[]
+  multi_select: boolean
+}
+
 export interface Interaction {
   id: string
   session: string | null
@@ -91,6 +100,8 @@ export interface Interaction {
   title: string
   detail: string | null
   requested_at: number
+  /** Empty for an approval. */
+  questions: Question[]
 }
 
 export interface StateSnapshot {
