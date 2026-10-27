@@ -1,0 +1,21 @@
+[package]
+name = "agi-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The window: a Tauri shell around the same kernel the daemon runs."
+
+[[bin]]
+name = "agi-mizar"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+agi-boot = { workspace = true }
+agi-core = { workspace = true }
+tauri = { version = "2", features = [] }
+tokio = { workspace = true }

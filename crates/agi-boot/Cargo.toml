@@ -1,0 +1,21 @@
+[package]
+name = "agi-boot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Starts the whole kernel: engines, local API, phone server, tunnel. Shared by the daemon and the window."
+
+[dependencies]
+agi-core = { workspace = true }
+agi-engine = { workspace = true }
+agi-engine-claude = { workspace = true }
+agi-engine-codex = { workspace = true }
+agi-engine-dsh = { workspace = true }
+agi-mizar = { workspace = true }
+agi-protocol = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }

@@ -24,7 +24,7 @@ tokens, and the conversation methods. The React front end and the Tauri shell co
 | M3 | Claude Code 引擎（transcript 解析、hooks、`claude -p`） | ✅ |
 | M4 | `dsh-mizar` 0.9.0 联调 | 🔶 插件侧已完成，等真机联调 |
 | M5 | Mizar 服务端：**局域网配对 + 核心方法 + 中继隧道** ✅；推送 / 上传 / 文件预览 ⬜ |
-| M6 | Tauri 壳、打包签名 | ⬜ |
+| M6 | Tauri 壳 ✅；打包签名脚本已备，需装 `tauri-cli` |
 | M7 | 前端 | ⬜ |
 
 ## 仓库结构
@@ -49,7 +49,11 @@ protocol/            Mizar v1 黄金帧（手机协议，未来服务端用）
 ```sh
 cargo test                     # 100 个测试
 cargo run -p agi-daemon        # 内核，无窗口
+cargo run -p agi-app           # 窗口（会打印它加载的地址）
 ```
+
+窗口加载的是内核自己的页面 `http://127.0.0.1:<port>/?token=…`，不是 Tauri 打包的前端资源——
+所以同一份页面在浏览器里开发、在窗口里运行，只有一条路。现在的页面是占位，M7 换成 React。
 
 内核启动后会打印：
 
@@ -83,6 +87,17 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/jso
    能力走各自的逃生通道，不往 trait 上加方法。
 
 细节见 [`docs/architecture.md`](docs/architecture.md)。
+
+## 打包
+
+```sh
+cargo install tauri-cli --version '^2' --locked   # 一次性
+scripts/package.sh            # 当前平台
+scripts/package.sh --universal # macOS：arm64 + x86_64
+```
+
+`cargo build -p agi-app` 只产出可执行文件，不产出 `.app` / `.dmg` / `.msi`——那些要 CLI。
+签名与公证的环境变量见脚本末尾的说明。
 
 ## 许可
 

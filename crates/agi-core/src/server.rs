@@ -90,6 +90,10 @@ pub async fn bind(
     };
 
     let router = Router::new()
+        // The window loads this. A placeholder until the React app exists, but a
+        // real one: it reads the live state through the same API a front end
+        // will, so the seam is exercised from the first build.
+        .route("/", get(page))
         .route("/healthz", get(healthz))
         .route("/api/v1/state", get(state_handler))
         .route("/api/v1/command", post(command_handler))
@@ -115,6 +119,73 @@ pub async fn bind(
 async fn healthz() -> impl IntoResponse {
     Json(json!({ "ok": true }))
 }
+
+/// The placeholder page the window loads.
+async fn page() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        PLACEHOLDER_PAGE,
+    )
+}
+
+/// Deliberately plain: no build step, no framework, no design. Its whole job is
+/// to prove that a window can reach the kernel and draw what it says.
+const PLACEHOLDER_PAGE: &str = r#"<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>AGI Mizar</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 13px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif; margin: 0; padding: 24px; }
+  h1 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+  .sub { opacity: .6; margin-bottom: 24px; }
+  table { border-collapse: collapse; width: 100%; }
+  td { padding: 6px 8px; border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent); }
+  td.engine { width: 90px; opacity: .6; }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; }
+  .on { background: #2f9e44; } .off { background: #adb5bd; }
+  .empty { opacity: .5; padding: 16px 0; }
+</style>
+<h1>AGI Mizar</h1>
+<div class="sub" id="sub">loading…</div>
+<table id="engines"></table>
+<div id="sessions"></div>
+<script>
+  const token = new URLSearchParams(location.search).get('token') || '';
+  const headers = { authorization: 'Bearer ' + token };
+  const escape = (text) => String(text ?? '').replace(/[<>&]/g, (c) => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+
+  async function draw() {
+    const response = await fetch('/api/v1/state', { headers });
+    if (!response.ok) {
+      document.getElementById('sub').textContent = 'kernel refused the window: ' + response.status;
+      return;
+    }
+    const state = await response.json();
+    document.getElementById('sub').textContent =
+      state.engines.map((engine) => engine.engine + (engine.connected ? '' : ' (off)')).join(' · ') +
+      ' — ' + state.sessions.length + ' sessions';
+
+    document.getElementById('engines').innerHTML = state.engines.map((engine) => `
+      <tr>
+        <td class="engine"><span class="dot ${engine.connected ? 'on' : 'off'}"></span>${escape(engine.engine)}</td>
+        <td>${escape(engine.detail || '')}</td>
+        <td style="text-align:right;opacity:.6">${engine.sessions}</td>
+      </tr>`).join('');
+
+    const rows = state.sessions.slice(0, 40).map((session) => `
+      <tr>
+        <td class="engine">${escape(session.key.split(':')[0])}</td>
+        <td>${escape(session.title || session.cwd || session.key)}</td>
+      </tr>`).join('');
+    document.getElementById('sessions').innerHTML =
+      rows === '' ? '<div class="empty">No sessions yet.</div>' : '<table>' + rows + '</table>';
+  }
+
+  draw();
+  setInterval(draw, 2000);
+</script>
+"#;
 
 async fn state_handler(State(app): State<AppState>, headers: HeaderMap) -> Response {
     if !authorized(&headers, &app.api_token) {

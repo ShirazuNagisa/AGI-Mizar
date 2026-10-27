@@ -326,7 +326,49 @@ phone ──https──▶ relay ──ws──▶ 这台电脑 ──http──
 
 `NOT_IMPLEMENTED` 是协议自己的信号，意思是"这台主机比你旧"——比一个看起来成功的桩好得多。
 
-## 10. 鉴权
+## 10. 窗口：Tauri 只是壳
+
+```rust
+let booted = runtime.block_on(boot(config))?;   // 引擎、API、手机服务端、隧道
+let url = booted.window_url();                  // http://127.0.0.1:<port>/?token=…
+tauri::WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+```
+
+### 窗口加载的是 URL，不是打包的前端资源
+
+因为前端本来就通过回环 HTTP 跟内核说话，不走 Tauri IPC。加载
+`http://127.0.0.1:<port>/?token=…` 意味着**同一份页面**在浏览器里开发、在窗口里运行——没有第二套
+传输、没有第二个构建产物。M7 的 React 会从同一个路由发出来。
+
+代价是窗口失去 `tauri://` 的 IPC，但那条路我们本来就不用。
+
+### 启动序列只有一份
+
+`agi-boot` 是 daemon 和窗口共用的。两个入口如果各写一遍启动顺序，就会出现"窗口里能复现、终端里
+不能"的 bug，然后花一个下午。
+
+顺序是有讲究的：
+
+1. 先起引擎——内核才有东西可聚合；
+2. 本地 API 绑定之后**才**写 endpoint 文件——插件拨一个没人应答的端口会退避重试，看起来像坏了；
+3. 手机服务端单独绑、绑所有接口（手机要从网络进来）；
+4. 隧道最后拨——它把请求回放到手机服务端，所以那个服务端必须先存在。
+
+### 运行时是故意泄漏的
+
+内核的服务器活在 Tokio 运行时上，而 `tauri::Builder::run` 会阻塞到窗口关闭。如果运行时由 `main`
+的栈拥有，窗口一开它就被丢掉，所有服务器随之消失。`Box::leak` 是对"它和进程同寿"这件事最诚实的
+表达。
+
+### 打包
+
+`cargo build -p agi-app` 只产出可执行文件。`.app` / `.dmg` / `.msi` 需要 Tauri 的 bundler，那在
+`tauri-cli` 里（另一个安装）。`scripts/package.sh` 会先检查它，再编译 hook shim（安装器要往
+`~/.claude/settings.json` 写它的绝对路径，所以它必须和 app 一起进包），然后调 `cargo tauri build`。
+
+macOS 需要 Developer ID + 公证，Windows 需要代码签名证书——脚本末尾列了具体变量。
+
+## 11. 鉴权
 
 四类凭据，各管一件事：
 
@@ -348,7 +390,7 @@ WS 的 token 走查询参数——浏览器无法给 WebSocket 设 header。
 
 ---
 
-## 11. 测试策略
+## 12. 测试策略
 
 | 层 | 怎么测 | 为什么可信 |
 |---|---|---|
@@ -360,13 +402,14 @@ WS 的 token 走查询参数——浏览器无法给 WebSocket 设 header。
 | 安装器 | 临时 settings.json | 幂等、保留别人的 hook、卸载只删自己的、坏 JSON 不覆盖 |
 | Mizar 服务端 | 真 HTTP + 真 WebSocket（无 mock） | 配对码单次、错误码、welcome 无 `id`、未握手、吊销、未知方法 |
 | 中继隧道 | 真 WS 两头 + 真本地监听器 | `welcome` 的 room、GET/POST 重放（含请求体）、`ping`→`pong` |
+| 窗口 | 手动启动 + `curl` 它加载的地址 | 内核起来、页面可取、`/api/v1/state` 返回真实会话 |
 | 内核 | 端到端跑一次 | 起守护进程 → 假插件连入 → `curl` 查 state / messages |
 
 没有用 mock 替代 WebSocket 来测链路：那样测的是 mock。
 
 ---
 
-## 12. 还没做的（以及为什么现在不做）
+## 13. 还没做的（以及为什么现在不做）
 
 | 项 | 等什么 |
 |---|---|
@@ -377,4 +420,5 @@ WS 的 token 走查询参数——浏览器无法给 WebSocket 设 header。
 | 持久化 | 等搜索 / 设置 / 交付文件索引 |
 | Mizar 服务端（配对、中继、推送） | M5；手机协议与黄金帧已经在 `protocol/` 里 |
 | 附件、分支、归档、文件预览 | DSH 侧是 `invoke` 直通；接线时把 `capabilities` 打开 |
-| 前端 | M7；API 已经可以对着真内核开发 |
+| 前端 | M7；现在窗口里是占位页，API 已经可以对着真内核开发 |
+| 安装包 | 需要 `tauri-cli` 与签名证书；脚本已备 |

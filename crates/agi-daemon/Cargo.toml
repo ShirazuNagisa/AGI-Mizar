@@ -12,15 +12,9 @@ name = "agi-daemon"
 path = "src/main.rs"
 
 [dependencies]
+agi-boot = { workspace = true }
 agi-core = { workspace = true }
-agi-engine = { workspace = true }
-agi-engine-claude = { workspace = true }
-agi-engine-codex = { workspace = true }
-agi-engine-dsh = { workspace = true }
-agi-mizar = { workspace = true }
-agi-protocol = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-uuid = { workspace = true }

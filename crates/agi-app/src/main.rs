@@ -1,0 +1,64 @@
+//! The window.
+//!
+//! A Tauri shell around the same kernel the daemon runs. It does three things:
+//! start the kernel, open one window pointed at the kernel's own page, and stay
+//! out of the way.
+//!
+//! ### Why the window loads a URL instead of bundled assets
+//!
+//! Because the front end talks to the kernel over loopback HTTP, not over Tauri's
+//! IPC. Loading `http://127.0.0.1:<port>/?token=…` means the same page runs in a
+//! browser during development and in the window afterwards, with no second
+//! transport and no second build. When the React app lands it will be served from
+//! that same route.
+//!
+//! ### Why the runtime is leaked
+//!
+//! The kernel's servers live on a Tokio runtime. `tauri::Builder::run` blocks for
+//! the life of the window, so a runtime owned by `main`'s stack would be dropped
+//! the moment the window opened — and every server with it. Leaking it is the
+//! honest expression of "this lives as long as the process".
+
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use agi_boot::{boot, BootConfig};
+
+fn main() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("could not start the kernel runtime");
+
+    let booted = runtime
+        .block_on(boot(BootConfig {
+            endpoint_file: None,
+            // Installing hooks edits a file the operator owns; a first launch
+            // asks, it does not decide. The daemon's flag is the way in for now.
+            install_claude_hooks: std::env::args().any(|argument| argument == "--install-claude-hooks"),
+            relay_url: std::env::var("AGI_RELAY_URL").ok(),
+            relay_token: std::env::var("AGI_RELAY_TOKEN").ok(),
+        }))
+        .expect("the kernel failed to start");
+
+    let url = booted.window_url();
+    println!("AGI Mizar — window at {url}");
+    println!("  pairing code {} ({})", booted.pairing_code.display, booted.pairing_uri);
+
+    // Both must outlive the window: the runtime keeps the servers alive, and
+    // `booted` owns the kernel the servers read from.
+    let _runtime = Box::leak(Box::new(runtime));
+    let _kernel = booted;
+
+    tauri::Builder::default()
+        .setup(move |app| {
+            let parsed = url.parse().expect("the kernel URL is not a URL");
+            tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::External(parsed))
+                .title("AGI Mizar")
+                .inner_size(1100.0, 720.0)
+                .min_inner_size(720.0, 480.0)
+                .build()?;
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("the window failed to start");
+}
