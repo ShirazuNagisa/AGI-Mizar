@@ -141,6 +141,9 @@ pub enum ErrorCode {
     NotImplemented,
     Internal,
     ResponseTooLarge,
+    FileUnknown,
+    FileForbidden,
+    FileTooLarge,
 }
 
 impl ErrorCode {
@@ -162,6 +165,9 @@ impl ErrorCode {
             Self::NotImplemented => "NOT_IMPLEMENTED",
             Self::Internal => "INTERNAL",
             Self::ResponseTooLarge => "RESPONSE_TOO_LARGE",
+            Self::FileUnknown => "FILE_UNKNOWN",
+            Self::FileForbidden => "FILE_FORBIDDEN",
+            Self::FileTooLarge => "FILE_TOO_LARGE",
         }
     }
 
@@ -180,6 +186,11 @@ impl ErrorCode {
             "WRITER_HELD" => Self::WriterHeld,
             "MODEL_UNAVAILABLE" => Self::ModelUnavailable,
             "NOT_CONNECTED" => Self::RemoteError,
+            // The preview page branches on these three: forbidden and unknown
+            // get different advice, and too-large suggests a different viewer.
+            "FILE_UNKNOWN" => Self::FileUnknown,
+            "FILE_FORBIDDEN" => Self::FileForbidden,
+            "FILE_TOO_LARGE" => Self::FileTooLarge,
             _ => Self::RemoteError,
         }
     }

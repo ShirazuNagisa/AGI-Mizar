@@ -282,6 +282,40 @@ pub struct FilePreview {
     pub truncated: bool,
 }
 
+/// A file's facts, as the phone's preview page asks for them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileStat {
+    /// The path as the request named it, echoed back.
+    pub path: String,
+    /// The file's own name, without its directory.
+    pub name: String,
+    /// Bytes on disk.
+    pub byte_size: u64,
+    /// Last modification, epoch milliseconds.
+    pub modified_at: i64,
+    /// The media type this host associates with the extension.
+    pub media_type: String,
+    /// Whether the phone has a viewer for this type.
+    pub previewable: bool,
+}
+
+/// One slice of a file, as the phone reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileSlice {
+    /// Where this slice starts.
+    pub offset: u64,
+    /// How many bytes it holds.
+    pub length: u64,
+    /// The whole file's size, so a client can show progress without a `stat`.
+    pub byte_size: u64,
+    /// The bytes of this slice; the wire carries them base64-encoded.
+    pub data: Vec<u8>,
+    /// Whether this slice reaches the end of the file.
+    pub eof: bool,
+}
+
 /// One line of "what the running turn is doing".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActivityEntry {

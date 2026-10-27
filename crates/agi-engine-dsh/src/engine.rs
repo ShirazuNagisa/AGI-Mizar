@@ -1321,6 +1321,26 @@ impl Engine for DshEngine {
         Ok(crate::usage::from_projections(&values))
     }
 
+    async fn fork(&self, session: &SessionKey, at_seq: i64) -> Result<SessionKey, EngineError> {
+        if at_seq < 0 {
+            return Err(EngineError::upstream(
+                "a branch boundary is a log position, not a negative number",
+            ));
+        }
+        let value = self
+            .call(
+                "session/fork",
+                json!({ "request": { "sessionId": session.raw(), "atSeq": at_seq } }),
+            )
+            .await?;
+        let id = value
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| EngineError::upstream("session/fork returned no session id"))?;
+        Ok(SessionKey::new(session.engine, id))
+    }
+
     async fn deliverables(&self, session: &SessionKey) -> Result<Vec<DeliveredFile>, EngineError> {
         // A delivered file is a `present` tool call, which is the one place the
         // model names what it made. Reading it out of the records keeps this in

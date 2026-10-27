@@ -29,6 +29,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use agi_core::Core;
+use agi_engine::MAX_SLICE_BYTES;
 use agi_protocol::domain::{InteractionKind, SessionKey};
 use agi_protocol::engine::EngineId;
 use agi_protocol::usage::UsageContext;
@@ -623,6 +624,139 @@ impl MizarServer {
                             }),
                         )
                     }
+                    Err(error) => ServerFrame::error(
+                        Some(id),
+                        ErrorCode::from_engine(error.code()),
+                        error.to_string(),
+                    ),
+                }
+            }
+
+            // The phone's preview page: what a path is, then the bytes a slice
+            // at a time. The fence lives in the engine, shared by all three
+            // adapters, and the code it refuses with is passed through so the
+            // app can tell "not yours" from "not there".
+            "file.stat" => {
+                let Some(key) = self.session_of(frame) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "file.stat needs a sessionId",
+                    );
+                };
+                let Some(path) = frame.payload.get("path").and_then(Value::as_str) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "file.stat needs a path",
+                    );
+                };
+                let Some(engine) = self.core.engine(key.engine) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::RemoteError,
+                        format!("no engine for {}", key.engine),
+                    );
+                };
+                match engine.file_stat(&key, path).await {
+                    Ok(stat) => ServerFrame::ok(
+                        id,
+                        json!({
+                            "path": stat.path,
+                            "name": stat.name,
+                            "byteSize": stat.byte_size,
+                            "modifiedAt": stat.modified_at,
+                            "mediaType": stat.media_type,
+                            "previewable": stat.previewable,
+                        }),
+                    ),
+                    Err(error) => ServerFrame::error(
+                        Some(id),
+                        ErrorCode::from_engine(error.code()),
+                        error.to_string(),
+                    ),
+                }
+            }
+
+            "file.read" => {
+                let Some(key) = self.session_of(frame) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "file.read needs a sessionId",
+                    );
+                };
+                let Some(path) = frame.payload.get("path").and_then(Value::as_str) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "file.read needs a path",
+                    );
+                };
+                let offset = frame
+                    .payload
+                    .get("offset")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let length = frame
+                    .payload
+                    .get("length")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(MAX_SLICE_BYTES)
+                    .clamp(1, MAX_SLICE_BYTES);
+                let Some(engine) = self.core.engine(key.engine) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::RemoteError,
+                        format!("no engine for {}", key.engine),
+                    );
+                };
+                match engine.file_slice(&key, path, offset, length).await {
+                    Ok(slice) => ServerFrame::ok(
+                        id,
+                        json!({
+                            "offset": slice.offset,
+                            "length": slice.length,
+                            "byteSize": slice.byte_size,
+                            "data": crate::relay::base64(&slice.data),
+                            "eof": slice.eof,
+                        }),
+                    ),
+                    Err(error) => ServerFrame::error(
+                        Some(id),
+                        ErrorCode::from_engine(error.code()),
+                        error.to_string(),
+                    ),
+                }
+            }
+
+            // Branch a conversation at one completed turn boundary. The phone
+            // only offers boundaries it read from the transcript; the host still
+            // refuses anything that is not a turn end.
+            "session.fork" => {
+                let Some(key) = self.session_of(frame) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "session.fork needs a sessionId",
+                    );
+                };
+                let Some(at) = frame.payload.get("atSeq").and_then(Value::as_i64) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "session.fork needs an atSeq",
+                    );
+                };
+                let Some(engine) = self.core.engine(key.engine) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::RemoteError,
+                        format!("no engine for {}", key.engine),
+                    );
+                };
+                match engine.fork(&key, at).await {
+                    Ok(forked) => ServerFrame::ok(id, json!({ "sessionId": forked.to_string() })),
                     Err(error) => ServerFrame::error(
                         Some(id),
                         ErrorCode::from_engine(error.code()),
