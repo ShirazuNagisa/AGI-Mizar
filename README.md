@@ -42,7 +42,7 @@ protocol/            Mizar v1 黄金帧（手机协议，未来服务端用）
 ## 跑起来
 
 ```sh
-cargo test                     # 24 个测试
+cargo test                     # 29 个测试
 cargo run -p agi-daemon        # 内核，无窗口
 ```
 
