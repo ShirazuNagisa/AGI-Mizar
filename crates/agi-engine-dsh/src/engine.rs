@@ -1286,16 +1286,24 @@ impl Engine for DshEngine {
             stats.tool_ms = summary.get("toolMs").and_then(Value::as_i64).unwrap_or(0);
         }
         if let Some(usage) = values.get("tokenUsage") {
-            stats.input_tokens = usage
-                .get("inputTokens")
-                .or_else(|| usage.get("input"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            stats.output_tokens = usage
-                .get("outputTokens")
-                .or_else(|| usage.get("output"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
+            // The bug this replaced was silent for months: the keys this build
+            // read did not exist, and a missing number is indistinguishable from
+            // a zero one. If DSH renames a bucket again, say so once per read
+            // rather than drawing a plausible zero.
+            let known = [
+                "uncachedInputTokens",
+                "cacheReadTokens",
+                "cacheWriteTokens",
+                "outputTokens",
+            ];
+            if usage.is_object() && !known.iter().any(|key| usage.get(key).is_some()) {
+                tracing::warn!(
+                    "dsh: tokenUsage carries none of the keys this build reads — {usage}"
+                );
+            }
+            let (input, output) = projection::token_usage(usage);
+            stats.input_tokens = input;
+            stats.output_tokens = output;
         }
         Ok(stats)
     }

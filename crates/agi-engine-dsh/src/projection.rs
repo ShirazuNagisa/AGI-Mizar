@@ -247,6 +247,21 @@ pub fn project(payload: &Value) -> Option<Projected> {
     }
 }
 
+/// Billed input and output tokens, read from the `tokenUsage` projection.
+///
+/// The projection's wire view is four disjoint buckets — `uncachedInputTokens`,
+/// `cacheReadTokens`, `cacheWriteTokens` and `outputTokens` — and there is no
+/// `inputTokens` key among them: that name belongs to the raw attempt records,
+/// and is mapped into `uncachedInputTokens` before the projection is served.
+/// The input figure an operator expects is the sum of the three, which is why
+/// reading the one that sounds obvious showed a flat zero next to a correct
+/// output count.
+pub(crate) fn token_usage(usage: &Value) -> (u64, u64) {
+    let part = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let input = part("uncachedInputTokens") + part("cacheReadTokens") + part("cacheWriteTokens");
+    (input, part("outputTokens"))
+}
+
 /// The readable part of a `tool/result` payload.
 fn result_text(data: &Value) -> Option<String> {
     if let Some(found) = parts_text(data.get("content")?) {
@@ -443,5 +458,24 @@ mod tests {
         .unwrap();
         assert_eq!(step.kind, RecordKind::Step);
         assert!(step.record().is_none());
+    }
+
+    #[test]
+    fn reads_usage_from_the_shape_dsh_actually_sends() {
+        // Copied from a live `tokenUsage` projection: four keys, no `inputTokens`.
+        let usage = json!({
+            "uncachedInputTokens": 1200,
+            "outputTokens": 18100,
+            "cacheReadTokens": 900000,
+            "cacheWriteTokens": 40,
+        });
+        assert_eq!(token_usage(&usage), (901_240, 18_100));
+    }
+
+    #[test]
+    fn a_partial_usage_projection_still_adds_up() {
+        assert_eq!(token_usage(&json!({"outputTokens": 7})), (0, 7));
+        assert_eq!(token_usage(&json!({"cacheReadTokens": 5})), (5, 0));
+        assert_eq!(token_usage(&json!({})), (0, 0));
     }
 }

@@ -53,7 +53,8 @@ export function SessionDetails(props: {
           <span className="label">Usage</span>
           <span className="value">
             {props.stats.turns} turns · {props.stats.steps} steps ·{' '}
-            {(props.stats.output_tokens / 1000).toFixed(1)}k out
+            {(props.stats.output_tokens / 1000).toFixed(1)}k out ·{' '}
+            {(props.stats.input_tokens / 1000).toFixed(1)}k in
           </span>
           <span className="value">
             {Math.round(props.stats.llm_ms / 1000)}s model · {Math.round(props.stats.tool_ms / 1000)}s tools
