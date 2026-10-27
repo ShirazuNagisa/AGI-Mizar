@@ -11,6 +11,7 @@
 //! a contract that can open a socket is a contract that is hard to test.
 
 pub mod api;
+pub mod catalog;
 pub mod domain;
 pub mod engine;
 pub mod link;

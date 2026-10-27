@@ -1359,6 +1359,21 @@ impl Engine for DshEngine {
         Ok(SessionKey::new(session.engine, id))
     }
 
+    async fn model_catalog(&self) -> Result<agi_protocol::catalog::ModelCatalog, EngineError> {
+        // The same call the shipped web UI makes; the catalog is passed through
+        // rather than curated, because `auto` appears and disappears with the
+        // integration mounted and `custom` is never a selectable row.
+        let value = self.call("session/modelCatalog", json!({})).await?;
+        Ok(crate::catalog::model_catalog_from(&value))
+    }
+
+    async fn permission_catalog(
+        &self,
+    ) -> Result<agi_protocol::catalog::PermissionCatalog, EngineError> {
+        let value = self.call("permissionPresets/catalog", json!({})).await?;
+        Ok(crate::catalog::permission_catalog_from(&value))
+    }
+
     async fn session_cwd(&self, session: &SessionKey) -> Result<String, EngineError> {
         if session.engine != EngineId::Dsh {
             return Err(EngineError::UnknownSession(session.clone()));

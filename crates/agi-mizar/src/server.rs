@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use agi_core::Core;
 use agi_engine::MAX_SLICE_BYTES;
-use agi_protocol::domain::{InteractionKind, SessionKey};
+use agi_protocol::domain::{Balance, InteractionKind, SessionKey, Wallet};
 use agi_protocol::engine::EngineId;
 use agi_protocol::usage::UsageContext;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -487,6 +487,128 @@ impl MizarServer {
                     }
                 }
                 ServerFrame::ok(id, json!({ "items": items, "complete": complete }))
+            }
+
+            // What the model picker draws. The phone's catalog is per host, and
+            // this host may front three engines, so the groups are merged; the
+            // default route comes from the first engine that names one.
+            "model.catalog" => {
+                let mut catalog = agi_protocol::catalog::ModelCatalog::default();
+                for engine_id in [EngineId::Dsh, EngineId::Claude, EngineId::Codex] {
+                    let Some(engine) = self.core.engine(engine_id) else {
+                        continue;
+                    };
+                    match engine.model_catalog().await {
+                        Ok(next) => {
+                            if catalog.default.is_none() {
+                                catalog.default = next.default;
+                            }
+                            catalog.providers.extend(next.providers);
+                            catalog.failures.extend(next.failures);
+                        }
+                        // An engine with no catalog concept is not a failure to
+                        // report; one that broke is worth a line.
+                        Err(error) if error.code() != "UNSUPPORTED" => {
+                            tracing::warn!(
+                                "mizar: model.catalog from {} failed — {error}",
+                                engine_id.as_str()
+                            );
+                        }
+                        Err(_) => {}
+                    }
+                }
+                ServerFrame::ok(id, serde_json::to_value(catalog).unwrap_or(Value::Null))
+            }
+
+            // What the operator's account is worth. The phone sends the client
+            // metadata the provider wants and decodes one of four statuses; the
+            // credential itself never crosses this wire, in either direction.
+            "account.balance" => {
+                let client = frame.payload.get("client");
+                let version = client
+                    .and_then(|entry| entry.get("version"))
+                    .and_then(Value::as_str);
+                let locale = client
+                    .and_then(|entry| entry.get("locale"))
+                    .and_then(Value::as_str);
+                let offset = client
+                    .and_then(|entry| entry.get("timezoneOffsetSeconds"))
+                    .and_then(Value::as_i64);
+                match (version, locale, offset) {
+                    (Some(version), Some(locale), Some(offset))
+                        if version.len() <= 100
+                            && locale.len() <= 100
+                            && offset.abs() <= 86_400 => {}
+                    _ => {
+                        return ServerFrame::error(
+                            Some(id),
+                            ErrorCode::MalformedFrame,
+                            "account.balance: invalid client metadata",
+                        );
+                    }
+                }
+
+                let Some(engine) = self.core.engine(EngineId::Dsh) else {
+                    return ServerFrame::ok(id, json!({ "status": "unsupported" }));
+                };
+                match engine.balance().await {
+                    Ok(Balance::Ready {
+                        wallets,
+                        bonus,
+                        top_up_url,
+                    }) => {
+                        // Only the official provider's own page is offered: a
+                        // configurable platform is not necessarily that platform.
+                        if top_up_url.as_deref() != Some(OFFICIAL_TOP_UP) {
+                            return ServerFrame::ok(id, json!({ "status": "unsupported" }));
+                        }
+                        let (Some(paid), Some(bonus)) =
+                            (wallet_rows(&wallets, true), wallet_rows(&bonus, false))
+                        else {
+                            return ServerFrame::ok(id, json!({ "status": "unavailable" }));
+                        };
+                        ServerFrame::ok(
+                            id,
+                            json!({
+                                "status": "ready",
+                                "wallets": paid,
+                                "bonusWallets": bonus,
+                                "topUpURL": OFFICIAL_TOP_UP,
+                            }),
+                        )
+                    }
+                    Ok(Balance::SignedOut) => {
+                        ServerFrame::ok(id, json!({ "status": "signed-out" }))
+                    }
+                    Ok(Balance::Unavailable) => {
+                        ServerFrame::ok(id, json!({ "status": "unavailable" }))
+                    }
+                    Ok(Balance::Unsupported) | Err(_) => {
+                        ServerFrame::ok(id, json!({ "status": "unsupported" }))
+                    }
+                }
+            }
+
+            // What the permission picker draws. Presets are an engine's own, and
+            // the switch goes to the session's engine, so the first engine that
+            // answers wins rather than merging two vocabularies.
+            "permissions.catalog" => {
+                for engine_id in [EngineId::Dsh, EngineId::Claude, EngineId::Codex] {
+                    let Some(engine) = self.core.engine(engine_id) else {
+                        continue;
+                    };
+                    if let Ok(catalog) = engine.permission_catalog().await {
+                        return ServerFrame::ok(
+                            id,
+                            serde_json::to_value(catalog).unwrap_or(Value::Null),
+                        );
+                    }
+                }
+                ServerFrame::error(
+                    Some(id),
+                    ErrorCode::RemoteError,
+                    "no engine could list its permission presets",
+                )
             }
 
             // Start a session. The phone names a directory, not a product, so the
@@ -1052,6 +1174,44 @@ impl MizarServer {
     }
 }
 
+/// The provider's own top-up page, and the only one this host will name.
+const OFFICIAL_TOP_UP: &str = "https://platform.deepseek.com/top_up";
+
+/// The wallets in the shape the app decodes, or `None` when the provider sent
+/// something the app must not draw.
+///
+/// The rules are the plugin's: only the two currencies the build knows, no
+/// duplicates, at least one paid wallet, and amounts short enough and numeric
+/// enough to be money rather than prose.
+fn wallet_rows(wallets: &[Wallet], required: bool) -> Option<Vec<Value>> {
+    if required && wallets.is_empty() {
+        return None;
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    let mut rows = Vec::new();
+    for wallet in wallets {
+        if !matches!(wallet.currency.as_str(), "CNY" | "USD") {
+            return None;
+        }
+        if seen.contains(&wallet.currency.as_str()) {
+            return None;
+        }
+        let amount = wallet.amount.trim();
+        if amount.is_empty()
+            || amount.len() > 256
+            || amount
+                .parse::<f64>()
+                .map(|value| !value.is_finite())
+                .unwrap_or(true)
+        {
+            return None;
+        }
+        seen.push(wallet.currency.as_str());
+        rows.push(json!({ "currency": wallet.currency, "balance": amount }));
+    }
+    Some(rows)
+}
+
 /// `GET /mizar/v1/hello` — unauthenticated, reveals identity only.
 async fn hello(
     State(server): State<Arc<MizarServer>>,
@@ -1381,6 +1541,32 @@ impl agi_core::PairingSource for MizarServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wallet(currency: &str, amount: &str) -> Wallet {
+        Wallet {
+            currency: currency.to_string(),
+            amount: amount.to_string(),
+        }
+    }
+
+    #[test]
+    fn wallets_are_drawn_only_when_they_are_money() {
+        let paid = vec![wallet("CNY", "9.86578102")];
+        let rows = wallet_rows(&paid, true).unwrap();
+        assert_eq!(rows[0]["balance"], "9.86578102");
+
+        // A currency the build does not know is not drawn as a number.
+        assert!(wallet_rows(&[wallet("EUR", "1.00")], true).is_none());
+        // Two rows for one currency is ambiguous, not additive.
+        assert!(wallet_rows(&[wallet("CNY", "1"), wallet("CNY", "2")], true).is_none());
+        // Prose is not a balance.
+        assert!(wallet_rows(&[wallet("CNY", "about ten")], true).is_none());
+        assert!(wallet_rows(&[wallet("CNY", "NaN")], true).is_none());
+        assert!(wallet_rows(&[wallet("CNY", "")], true).is_none());
+        // A paid wallet is required; bonus wallets are optional.
+        assert!(wallet_rows(&[], true).is_none());
+        assert_eq!(wallet_rows(&[], false), Some(Vec::new()));
+    }
 
     #[test]
     fn os_names_are_display_names() {

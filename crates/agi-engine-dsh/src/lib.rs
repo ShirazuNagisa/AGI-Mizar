@@ -13,6 +13,7 @@
 //! The transport is deliberately absent. The HTTP server owns the socket and
 //! hands [`engine::DshEngine::serve`] two channels of text frames.
 
+pub mod catalog;
 pub mod engine;
 pub mod projection;
 pub mod usage;

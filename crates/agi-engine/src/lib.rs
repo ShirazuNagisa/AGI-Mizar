@@ -14,6 +14,9 @@
 //! update mechanisms (a WebSocket firehose, a JSON-RPC notification stream, a
 //! file being appended to).
 
+use agi_protocol::catalog::{
+    ModelCatalog, ModelOption, PermissionCatalog, PermissionOption, ProviderGroup, ReasoningEffort,
+};
 use agi_protocol::domain::{
     ActivityEntry, Balance, DeliveredFile, FilePreview, FileSlice, FileStat, Interaction,
     ModelInfo, PermissionPreset, Record, Session, SessionKey, SessionStats, Workspace,
@@ -259,6 +262,74 @@ pub trait Engine: Send + Sync {
     /// Fork a session at a completed turn boundary.
     async fn fork(&self, _session: &SessionKey, _at_seq: i64) -> Result<SessionKey, EngineError> {
         Err(self.unsupported("fork"))
+    }
+
+    /// The model catalog a phone's picker draws.
+    ///
+    /// An engine that only knows its models by name still gives the app
+    /// something to render; one that has a real catalog overrides this.
+    async fn model_catalog(&self) -> Result<ModelCatalog, EngineError> {
+        let models = self.models().await?;
+        let mut providers: Vec<ProviderGroup> = Vec::new();
+        for model in models {
+            let provider = model
+                .provider
+                .clone()
+                .unwrap_or_else(|| self.id().as_str().to_string());
+            let group = match providers.iter_mut().find(|group| group.id == provider) {
+                Some(group) => group,
+                None => {
+                    providers.push(ProviderGroup {
+                        id: provider.clone(),
+                        name: provider.clone(),
+                        models: Vec::new(),
+                    });
+                    providers.last_mut().expect("just pushed")
+                }
+            };
+            group.models.push(ModelOption {
+                id: model.id,
+                name: model.label,
+                description: None,
+                efforts: model
+                    .reasoning
+                    .into_iter()
+                    .map(|effort| ReasoningEffort {
+                        name: effort.clone(),
+                        id: effort,
+                        description: None,
+                    })
+                    .collect(),
+                default_effort: None,
+            });
+        }
+        Ok(ModelCatalog {
+            default: None,
+            providers,
+            failures: Vec::new(),
+        })
+    }
+
+    /// The permission catalog a phone's picker draws.
+    async fn permission_catalog(&self) -> Result<PermissionCatalog, EngineError> {
+        let presets = self.permissions().await?;
+        let options: Vec<PermissionOption> = presets
+            .into_iter()
+            .map(|preset| PermissionOption {
+                value: preset.id,
+                name: preset.label,
+                description: preset.description,
+            })
+            .collect();
+        let default_preset = options
+            .first()
+            .map(|option| option.value.clone())
+            .unwrap_or_default();
+        Ok(PermissionCatalog {
+            defaults: options.clone(),
+            options,
+            default_preset,
+        })
     }
 
     /// The working directory a session's file reads are fenced to.
