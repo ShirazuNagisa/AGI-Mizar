@@ -18,9 +18,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
 tokio = { workspace = true }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio-tungstenite = { workspace = true }

@@ -20,7 +20,7 @@ use agi_engine::Engine;
 use agi_engine_claude::ClaudeEngine;
 use agi_engine_codex::{AppServerConfig, CodexEngine};
 use agi_engine_dsh::DshEngine;
-use agi_mizar::{DeviceStore, MizarServer};
+use agi_mizar::{DeviceStore, MizarServer, RelayClient};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -138,6 +138,23 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     let _ = mizar_handle;
+
+    // The tunnel, when one is configured. Off by default for a daemon started to
+    // look at something: dialling a public relay without being asked is a
+    // surprise, and the LAN path works without it.
+    match std::env::var("AGI_RELAY_URL") {
+        Ok(url) if !url.trim().is_empty() => {
+            let token = std::env::var("AGI_RELAY_TOKEN")
+                .unwrap_or_else(|_| uuid::Uuid::new_v4().simple().to_string());
+            let relay = RelayClient::new(url, token, mizar.port());
+            let base = relay.base().to_string();
+            mizar.attach_relay(Arc::clone(&relay));
+            tokio::spawn(async move { relay.run().await });
+            println!("relay  {base} (tunnel dialling)");
+        }
+        _ => println!("relay  not configured — set AGI_RELAY_URL to dial one"),
+    }
+
     let code = mizar.issue_code();
 
     println!("AGI Mizar kernel {}", env!("CARGO_PKG_VERSION"));

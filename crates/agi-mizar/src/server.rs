@@ -43,6 +43,7 @@ use crate::frames::{
     PROTOCOL_VERSION, WS_PATH,
 };
 use crate::pairing::{self, PairingCode};
+use crate::relay::RelayClient;
 use crate::store::DeviceStore;
 
 /// How many pairing attempts a minute are allowed.
@@ -62,6 +63,8 @@ pub struct MizarServer {
     code: Mutex<Option<ActiveCode>>,
     attempts: Mutex<VecDeque<Instant>>,
     port: AtomicU16,
+    /// The tunnel, when one is configured.
+    relay: Mutex<Option<Arc<RelayClient>>>,
 }
 
 impl MizarServer {
@@ -74,6 +77,7 @@ impl MizarServer {
             code: Mutex::new(None),
             attempts: Mutex::new(VecDeque::new()),
             port: AtomicU16::new(0),
+            relay: Mutex::new(None),
         })
     }
 
@@ -83,6 +87,25 @@ impl MizarServer {
 
     fn attempts(&self) -> MutexGuard<'_, VecDeque<Instant>> {
         self.attempts.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Attach a tunnel, so `host.info` can tell a phone where to find it from
+    /// another network.
+    pub fn attach_relay(&self, relay: Arc<RelayClient>) {
+        *self.relay.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(relay);
+    }
+
+    /// The tunnel facts a phone reads, when a tunnel is configured.
+    fn relay_facts(&self) -> Value {
+        let guard = self.relay.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(relay) = guard.as_ref() else {
+            return Value::Null;
+        };
+        json!({
+            "url": relay.base(),
+            "room": relay.current_room(),
+            "baseURL": relay.phone_base_url(),
+        })
     }
 
     /// The port the listener took.
@@ -170,6 +193,9 @@ impl MizarServer {
                         "protocolVersion": PROTOCOL_VERSION,
                         "addresses": addresses,
                         "desktop": { "os": os_name(), "client": "AGI Mizar" },
+                        // `null` when no tunnel is configured, which the phone
+                        // reads as "there is no relay route".
+                        "relay": self.relay_facts(),
                     }),
                 )
             }

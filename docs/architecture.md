@@ -283,6 +283,25 @@ hook 每次工具调用都会跑，而且是被 Claude Code 调起来的——�
 
 工具调用与结果不翻译——手机的摘要视图本来就不画它们。
 
+### 中继隧道：手机出了家门也能连
+
+家用路由器不接受入站连接，所以电脑**拨出去**，中继把手机的请求顺着这条 socket 送回来：
+
+```
+phone ──https──▶ relay ──ws──▶ 这台电脑 ──http──▶ 127.0.0.1:19392
+                   ▲                                    │
+                   └────────────── res ─────────────────┘
+```
+
+隧道只搬四种活：一个 HTTP 请求、开一个 WebSocket、WebSocket 上的消息、关掉它。外加中继发来的
+`ping`（半开的 socket 要被发现，而不是被相信）。
+
+**为什么要真的重放一次 HTTP，而不是直接调 handler**：否则隧道和局域网两条路会走不同的代码，
+以后每个 bug 都要修两遍。一次回环 HTTP 请求是几微秒，换来只有一条路径。
+
+房间号由**中继**决定，电脑不自己发明。`host.info` 的 `relay: {url, room, baseURL}` 就是手机
+出门后要用的地址；没配隧道时它是 `null`，手机读作"没有中继路线"。
+
 ### 这一版实现了什么
 
 | 已实现 | 说明 |
@@ -294,10 +313,12 @@ hook 每次工具调用都会跑，而且是被 Claude Code 调起来的——�
 | `interactions.pending` / `approval.answer` | 审批走内核的分发（它已经知道是哪个引擎问的） |
 | `session.model.set` / `session.permission.set` | DSH 收 `provider/model`，另两个收裸模型名 |
 | 事件 | `approval.request` / `approval.resolved` / `interactions.changed` |
+| 中继隧道 | `welcome` / `req`→`res` / `ws-open` / `ws-msg` / `ws-close` / `ping`→`pong`；房间由中继分配 |
 
 | 未实现（回 `NOT_IMPLEMENTED`） | 等什么 |
 |---|---|
-| `relay.set`、中继隧道、`push.register` | 中继客户端与 APNs 转发 |
+| `relay.set` | 在两个公共中继之间搬家（隧道本身已经能用） |
+| `push.register`、`/push/v1/notify` | 通知策略：标题本地化、Live Activity、按设备排除 |
 | `upload.*`、附件 prompt | 分片暂存与 content part 构造 |
 | `file.stat` / `file.read` | 工作区围栏与预览缓存 |
 | `workspace.list`、`session.activity`、`session.stats`、`session.create/rename/archive` | 各自的投影与注册表读 |
@@ -338,6 +359,7 @@ WS 的 token 走查询参数——浏览器无法给 WebSocket 设 header。
 | 链路（Claude） | 临时 transcript 目录 + 直接调 hook 入口 | 列表、历史、轮次边界、`isMeta`/sidechain/包装、审批允许与拒绝、无人在场不阻塞 |
 | 安装器 | 临时 settings.json | 幂等、保留别人的 hook、卸载只删自己的、坏 JSON 不覆盖 |
 | Mizar 服务端 | 真 HTTP + 真 WebSocket（无 mock） | 配对码单次、错误码、welcome 无 `id`、未握手、吊销、未知方法 |
+| 中继隧道 | 真 WS 两头 + 真本地监听器 | `welcome` 的 room、GET/POST 重放（含请求体）、`ping`→`pong` |
 | 内核 | 端到端跑一次 | 起守护进程 → 假插件连入 → `curl` 查 state / messages |
 
 没有用 mock 替代 WebSocket 来测链路：那样测的是 mock。
@@ -348,7 +370,7 @@ WS 的 token 走查询参数——浏览器无法给 WebSocket 设 header。
 
 | 项 | 等什么 |
 |---|---|
-| 中继隧道、推送、上传、文件预览 | M5b；见 §9 的未实现表 |
+| 推送、上传、文件预览 | 见 §9 的未实现表 |
 | 提问进共享模型 | 现在 `Interaction` 只带标题与详情，`questions` 恒为空 |
 | Claude 的提问工具（`AskUserQuestion`） | 目前只有审批走 hook；提问要借"拒绝的理由"回传答案，属独立一项 |
 

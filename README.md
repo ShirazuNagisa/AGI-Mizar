@@ -23,7 +23,7 @@ tokens, and the conversation methods. The React front end and the Tauri shell co
 | M2 | Codex 引擎（app-server JSON-RPC、审批、历史投影） | ✅ |
 | M3 | Claude Code 引擎（transcript 解析、hooks、`claude -p`） | ✅ |
 | M4 | `dsh-mizar` 0.9.0 联调 | 🔶 插件侧已完成，等真机联调 |
-| M5 | Mizar 服务端：**局域网配对 + 核心方法** ✅；中继 / 推送 / 上传 / 文件预览 ⬜ |
+| M5 | Mizar 服务端：**局域网配对 + 核心方法 + 中继隧道** ✅；推送 / 上传 / 文件预览 ⬜ |
 | M6 | Tauri 壳、打包签名 | ⬜ |
 | M7 | 前端 | ⬜ |
 
@@ -47,7 +47,7 @@ protocol/            Mizar v1 黄金帧（手机协议，未来服务端用）
 ## 跑起来
 
 ```sh
-cargo test                     # 96 个测试
+cargo test                     # 100 个测试
 cargo run -p agi-daemon        # 内核，无窗口
 ```
 
