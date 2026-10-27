@@ -103,6 +103,10 @@ pub enum Command {
     },
     /// The host's own workspace grouping.
     Workspaces { engine: EngineId },
+    /// What the provider account is worth.
+    Balance { engine: EngineId },
+    /// Read a file a session delivered.
+    ReadFile { session: SessionKey, path: String },
 
     /// The pairing code to show a phone, and a QR for its URI.
     Pairing {

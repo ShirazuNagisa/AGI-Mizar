@@ -346,6 +346,24 @@ impl Core {
                     Err(error) => failure(error),
                 }
             }
+            Command::Balance { engine: id } => {
+                let Some(engine) = self.engine(id) else {
+                    return CommandResponse::error("UNKNOWN_ENGINE", "no such engine");
+                };
+                match engine.balance().await {
+                    Ok(balance) => CommandResponse::ok(balance),
+                    Err(error) => failure(error),
+                }
+            }
+            Command::ReadFile { session, path } => {
+                let Some(engine) = self.engine(session.engine) else {
+                    return CommandResponse::error("UNKNOWN_ENGINE", "no such engine");
+                };
+                match engine.read_file(&session, &path).await {
+                    Ok(preview) => CommandResponse::ok(preview),
+                    Err(error) => failure(error),
+                }
+            }
             Command::Pairing { refresh } => {
                 let source = self
                     .pairing

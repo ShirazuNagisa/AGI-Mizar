@@ -238,6 +238,50 @@ pub enum InteractionKind {
     Question,
 }
 
+/// One currency's balance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Wallet {
+    /// `CNY` or `USD`.
+    pub currency: String,
+    /// A decimal string, exactly as the provider wrote it.
+    pub amount: String,
+}
+
+/// What the provider account is worth right now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum Balance {
+    /// The provider answered.
+    Ready {
+        wallets: Vec<Wallet>,
+        #[serde(default)]
+        bonus: Vec<Wallet>,
+        #[serde(default)]
+        top_up_url: Option<String>,
+    },
+    /// Credentials exist but the account is not signed in.
+    SignedOut,
+    /// The provider is reachable but would not answer.
+    Unavailable,
+    /// This host has no account provider at all.
+    Unsupported,
+}
+
+/// A file read out of a session's working directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FilePreview {
+    /// The path as the model named it.
+    pub path: String,
+    /// The file's own name.
+    pub name: String,
+    /// Bytes on disk.
+    pub size: u64,
+    /// UTF-8 text, when the file is text and within the cap.
+    pub text: Option<String>,
+    /// Whether `text` is a prefix of the file.
+    pub truncated: bool,
+}
+
 /// One line of "what the running turn is doing".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActivityEntry {

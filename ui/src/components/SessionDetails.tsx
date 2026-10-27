@@ -1,5 +1,6 @@
 import type {
   ActivityEntry,
+  Balance,
   DeliveredFile,
   ModelInfo,
   PermissionPreset,
@@ -24,6 +25,8 @@ export function SessionDetails(props: {
   deliverables: DeliveredFile[]
   models: ModelInfo[]
   permissions: PermissionPreset[]
+  balance: Balance | null
+  onOpenFile: (file: DeliveredFile) => void
   onModel: (id: string) => void
   onPermission: (id: string) => void
   onRename: () => void
@@ -133,11 +136,40 @@ export function SessionDetails(props: {
         <div className="field">
           <span className="label">Delivered</span>
           {props.deliverables.map((file) => (
-            <span className="value" key={file.path} title={file.path}>
-              {file.name}
-              {file.description !== null ? ` — ${file.description}` : ''}
-            </span>
+            <button
+              className="delivered"
+              key={file.path}
+              title={file.path}
+              onClick={() => props.onOpenFile(file)}
+            >
+              <span>{file.name}</span>
+              {file.description !== null ? <span className="hint">{file.description}</span> : null}
+            </button>
           ))}
+        </div>
+      ) : null}
+
+      {props.balance !== null && props.balance.status !== 'unsupported' ? (
+        <div className="field">
+          <span className="label">Balance</span>
+          {props.balance.status === 'ready' ? (
+            <>
+              {props.balance.wallets.map((wallet) => (
+                <span className="value" key={wallet.currency}>
+                  {wallet.amount} {wallet.currency}
+                </span>
+              ))}
+              {props.balance.bonus.map((wallet) => (
+                <span className="hint" key={`bonus-${wallet.currency}`}>
+                  + {wallet.amount} {wallet.currency} bonus
+                </span>
+              ))}
+            </>
+          ) : (
+            <span className="value">
+              {props.balance.status === 'signed_out' ? 'signed out' : 'not available'}
+            </span>
+          )}
         </div>
       ) : null}
 

@@ -25,9 +25,9 @@ use std::time::Duration;
 
 use agi_engine::{Answer, Engine, EngineError, EngineEvent};
 use agi_protocol::domain::{
-    ActivityEntry, ActivityKind, ContextPressure, DeliveredFile, Interaction, InteractionKind,
-    ModelInfo, PermissionPreset, Question, Record, RecordKind, Session, SessionKey, SessionStats,
-    Workspace,
+    ActivityEntry, ActivityKind, Balance, ContextPressure, DeliveredFile, Interaction,
+    InteractionKind, ModelInfo, PermissionPreset, Question, Record, RecordKind, Session,
+    SessionKey, SessionStats, Wallet, Workspace,
 };
 use agi_protocol::engine::{Capabilities, EngineId};
 use agi_protocol::link::{
@@ -830,6 +830,25 @@ impl DshEngine {
     }
 }
 
+/// Read a list of `{currency, balance}` rows.
+fn read_wallets(value: Option<&Value>) -> Vec<Wallet> {
+    value
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    let currency = row.get("currency").and_then(Value::as_str)?;
+                    let amount = row.get("balance").and_then(Value::as_str)?;
+                    Some(Wallet {
+                        currency: currency.to_string(),
+                        amount: amount.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The first non-empty line, cut to something a feed can show.
 fn first_line(text: Option<&str>) -> String {
     let line = text
@@ -1465,6 +1484,45 @@ impl Engine for DshEngine {
         }
         self.emit(EngineEvent::SessionRemoved(session.clone()));
         Ok(())
+    }
+
+    async fn balance(&self) -> Result<Balance, EngineError> {
+        // The provider's own account endpoints, never the API-key REST balance
+        // endpoint: the credential in this profile is the operator's session, and
+        // a second credential path would be a second thing to leak.
+        let state = match self.call("account/getState", json!({})).await {
+            Ok(value) => value,
+            // No account provider in this composition is a normal state, not a
+            // failure: the panel simply has nothing to draw.
+            Err(_) => return Ok(Balance::Unsupported),
+        };
+        match state.get("status").and_then(Value::as_str) {
+            Some("signed-out") => return Ok(Balance::SignedOut),
+            Some("credential-stored") => {}
+            _ => return Ok(Balance::Unavailable),
+        }
+
+        let value = self
+            .call(
+                "account/getBalance",
+                json!({
+                    "client": {
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "locale": "en",
+                        "timezoneOffsetSeconds": 0,
+                    }
+                }),
+            )
+            .await?;
+        if value.get("status").and_then(Value::as_str) != Some("ready") {
+            return Ok(Balance::Unavailable);
+        }
+
+        Ok(Balance::Ready {
+            wallets: read_wallets(value.get("value")),
+            bonus: read_wallets(value.get("bonusWallets")),
+            top_up_url: Some("https://platform.deepseek.com/top_up".to_string()),
+        })
     }
 
     async fn workspaces(&self) -> Result<Vec<Workspace>, EngineError> {

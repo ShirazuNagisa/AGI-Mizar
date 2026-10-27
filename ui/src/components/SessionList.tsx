@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import type { Interaction, Session } from '../api'
+import type { Interaction, Session, Workspace } from '../api'
 
 /**
  * The list, grouped by the directory the session works in.
@@ -16,6 +16,7 @@ export function SessionList(props: {
   sessions: Session[]
   selected: string | null
   approvals: Interaction[]
+  workspaces: Workspace[]
   onSelect: (key: string) => void
 }) {
   const [query, setQuery] = useState('')
@@ -35,9 +36,12 @@ export function SessionList(props: {
         .some((value) => value.toLowerCase().includes(needle))
     })
 
+    // A workspace is the host's own grouping and beats a directory guess; a
+    // session the host has not filed falls back to its directory, which is the
+    // only thing all three engines report.
     const byDirectory = new Map<string, Session[]>()
     for (const session of visible) {
-      const key = session.cwd ?? 'No folder'
+      const key = workspaceLabel(session, props.workspaces) ?? session.cwd ?? 'No folder'
       const bucket = byDirectory.get(key)
       if (bucket === undefined) byDirectory.set(key, [session])
       else bucket.push(session)
@@ -52,7 +56,7 @@ export function SessionList(props: {
         newest: Math.max(...sessions.map((session) => session.updated_at)),
       }))
       .sort((a, b) => b.newest - a.newest)
-  }, [props.sessions, query])
+  }, [props.sessions, props.workspaces, query])
 
   return (
     <section className="panel">
@@ -128,6 +132,14 @@ export function SessionList(props: {
 function engineLabel(key: string): string {
   const engine = key.split(':')[0]
   return engine === 'dsh' ? 'DSH' : engine === 'claude' ? 'Claude' : 'Codex'
+}
+
+/** The workspace a session belongs to, as the host named it. */
+function workspaceLabel(session: Session, workspaces: Workspace[]): string | null {
+  const raw = session.key.slice(session.key.indexOf(':') + 1)
+  const workspace = workspaces.find((candidate) => candidate.session_ids.includes(raw))
+  if (workspace === undefined) return null
+  return workspace.name ?? workspace.path ?? null
 }
 
 /** The last two path segments, which is what tells two folders apart. */

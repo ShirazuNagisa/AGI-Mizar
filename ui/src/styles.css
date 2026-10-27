@@ -715,3 +715,62 @@ button {
 .feed-row[data-kind='output'] .feed-text {
   color: var(--text-2);
 }
+
+/* ---------- file preview ---------- */
+
+.file-card {
+  width: min(760px, 100%);
+  max-height: min(80vh, 720px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: 0 24px 64px -24px rgba(0, 0, 0, 0.5);
+  padding: 14px 16px 16px;
+}
+
+.file-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.file-head .name {
+  font-weight: 600;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
+.file-text {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: var(--r-sm);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  overflow: auto;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.delivered {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  padding: 3px 0;
+  cursor: pointer;
+  color: inherit;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 11.5px;
+}
+
+.delivered:hover {
+  color: var(--accent);
+}

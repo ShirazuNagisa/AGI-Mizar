@@ -148,6 +148,32 @@ export interface PermissionPreset {
   description: string | null
 }
 
+export interface Wallet {
+  currency: string
+  amount: string
+}
+
+export type Balance =
+  | { status: 'ready'; wallets: Wallet[]; bonus: Wallet[]; top_up_url: string | null }
+  | { status: 'signed_out' }
+  | { status: 'unavailable' }
+  | { status: 'unsupported' }
+
+export interface Workspace {
+  id: string
+  path: string
+  name: string | null
+  session_ids: string[]
+}
+
+export interface FilePreview {
+  path: string
+  name: string
+  size: number
+  text: string | null
+  truncated: boolean
+}
+
 export interface PairingView {
   code: string
   uri: string
@@ -173,6 +199,8 @@ export type Command =
   | { op: 'rename'; session: string; title: string }
   | { op: 'archive'; session: string; stop_activity?: boolean }
   | { op: 'workspaces'; engine: EngineId }
+  | { op: 'balance'; engine: EngineId }
+  | { op: 'read_file'; session: string; path: string }
   | { op: 'pairing'; refresh: boolean }
   | { op: 'ping' }
 

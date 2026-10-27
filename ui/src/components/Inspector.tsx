@@ -1,5 +1,6 @@
 import type {
   ActivityEntry,
+  Balance,
   DeliveredFile,
   EngineStatus,
   Interaction,
@@ -30,6 +31,8 @@ export function Inspector(props: {
   deliverables: DeliveredFile[]
   models: ModelInfo[]
   permissions: PermissionPreset[]
+  balance: Balance | null
+  onOpenFile: (file: DeliveredFile) => void
   onAnswer: (id: string, outcome?: string, answers?: unknown[]) => void
   onModel: (id: string) => void
   onPermission: (id: string) => void
@@ -79,6 +82,8 @@ export function Inspector(props: {
             deliverables={props.deliverables}
             models={props.models}
             permissions={props.permissions}
+            balance={props.balance}
+            onOpenFile={props.onOpenFile}
             onModel={props.onModel}
             onPermission={props.onPermission}
             onRename={props.onRename}

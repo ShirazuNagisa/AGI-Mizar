@@ -15,8 +15,8 @@
 //! file being appended to).
 
 use agi_protocol::domain::{
-    ActivityEntry, DeliveredFile, Interaction, ModelInfo, PermissionPreset, Record, Session,
-    SessionKey, SessionStats, Workspace,
+    ActivityEntry, Balance, DeliveredFile, FilePreview, Interaction, ModelInfo, PermissionPreset,
+    Record, Session, SessionKey, SessionStats, Workspace,
 };
 use agi_protocol::engine::{Capabilities, EngineId};
 use async_trait::async_trait;
@@ -204,11 +204,189 @@ pub trait Engine: Send + Sync {
         Err(self.unsupported("workspaces"))
     }
 
+    /// What the provider account is worth.
+    async fn balance(&self) -> Result<Balance, EngineError> {
+        Err(self.unsupported("balance"))
+    }
+
+    /// Read a file a session delivered.
+    ///
+    /// Implemented here rather than per adapter, because "a file inside the
+    /// session's directory" is the same question for all three products: they
+    /// all report a working directory, and none of them needs its own answer.
+    /// The fence is the point — a path outside the directory, or one that
+    /// resolves outside it through a symlink, is refused, not served.
+    async fn read_file(
+        &self,
+        session: &SessionKey,
+        path: &str,
+    ) -> Result<FilePreview, EngineError> {
+        let cwd = self
+            .sessions()
+            .await?
+            .into_iter()
+            .find(|candidate| candidate.key == *session)
+            .and_then(|candidate| candidate.cwd)
+            .ok_or_else(|| EngineError::UnknownSession(session.clone()))?;
+        read_within(std::path::Path::new(&cwd), path)
+    }
+
     /// The failure for a capability this adapter does not have.
     fn unsupported(&self, feature: &'static str) -> EngineError {
         EngineError::Unsupported {
             engine: self.id(),
             feature,
         }
+    }
+}
+
+/// The refusal for a path the fence does not allow.
+fn forbidden(path: &str) -> EngineError {
+    EngineError::Upstream {
+        code: "FILE_FORBIDDEN".to_string(),
+        message: format!("{path} is outside the session's directory"),
+        details: None,
+    }
+}
+
+/// Resolve `.` and `..` without touching the filesystem.
+///
+/// `canonicalize` cannot answer "is this inside" for a path that does not exist,
+/// and the answer should not depend on whether the file is there: a fence that
+/// only holds for existing files is not a fence.
+fn lexical_normalize(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+
+    let mut out = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// How much of a file a preview may carry.
+pub const PREVIEW_LIMIT: u64 = 256 * 1024;
+
+/// Read a file, refusing anything outside `cwd`.
+///
+/// `canonicalize` on both sides is what makes the fence real: a symlink inside
+/// the directory that points outside it resolves to a path that no longer
+/// starts with the directory, and is refused. Comparing the strings as written
+/// would let `../` and symlinks through.
+pub fn read_within(cwd: &std::path::Path, path: &str) -> Result<FilePreview, EngineError> {
+    use std::io::Read;
+
+    // The root is canonicalised first and the candidate is built *from it*, so a
+    // lexical comparison is meaningful: on macOS `/var` is a symlink to
+    // `/private/var`, and joining the raw cwd would compare two spellings of the
+    // same directory and call every file outside.
+    let root = cwd
+        .canonicalize()
+        .map_err(|error| EngineError::upstream(format!("{}: {error}", cwd.display())))?;
+    let candidate = if std::path::Path::new(path).is_absolute() {
+        std::path::PathBuf::from(path)
+    } else {
+        root.join(path)
+    };
+
+    // Two checks, in this order. The lexical one answers "does this path even
+    // point inside" for a file that may not exist, so a `../` is refused as a
+    // fence violation rather than as a missing file. The canonical one is what
+    // catches a symlink inside the directory that resolves outside it.
+    if !lexical_normalize(&candidate).starts_with(&root) {
+        return Err(forbidden(path));
+    }
+    let resolved = candidate
+        .canonicalize()
+        .map_err(|error| EngineError::upstream(format!("{path}: {error}")))?;
+    if !resolved.starts_with(&root) {
+        return Err(forbidden(path));
+    }
+    let metadata = std::fs::metadata(&resolved)
+        .map_err(|error| EngineError::upstream(format!("{path}: {error}")))?;
+    if !metadata.is_file() {
+        return Err(EngineError::Upstream {
+            code: "FILE_FORBIDDEN".to_string(),
+            message: format!("{path} is not a regular file"),
+            details: None,
+        });
+    }
+
+    let mut buffer = Vec::new();
+    std::fs::File::open(&resolved)
+        .and_then(|file| file.take(PREVIEW_LIMIT + 1).read_to_end(&mut buffer))
+        .map_err(|error| EngineError::upstream(format!("{path}: {error}")))?;
+    let truncated = buffer.len() as u64 > PREVIEW_LIMIT;
+    buffer.truncate(PREVIEW_LIMIT as usize);
+
+    Ok(FilePreview {
+        path: path.to_string(),
+        name: resolved
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string()),
+        size: metadata.len(),
+        // Binary is not an error: it is a file a window cannot draw as text.
+        text: String::from_utf8(buffer).ok(),
+        truncated,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_a_file_inside_the_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+        let preview = read_within(dir.path(), "a.txt").unwrap();
+        assert_eq!(preview.text.as_deref(), Some("hello"));
+        assert_eq!(preview.name, "a.txt");
+        assert!(!preview.truncated);
+    }
+
+    #[test]
+    fn refuses_a_path_that_climbs_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = read_within(dir.path(), "../outside.txt").unwrap_err();
+        assert_eq!(error.code(), "FILE_FORBIDDEN");
+    }
+
+    #[test]
+    fn refuses_an_absolute_path_outside() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = read_within(dir.path(), "/etc/hosts").unwrap_err();
+        assert_eq!(error.code(), "FILE_FORBIDDEN");
+    }
+
+    #[test]
+    fn a_binary_file_has_no_text_but_still_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("blob.bin"), [0xff, 0xfe, 0x00, 0x01]).unwrap();
+        let preview = read_within(dir.path(), "blob.bin").unwrap();
+        assert!(preview.text.is_none());
+        assert_eq!(preview.size, 4);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_that_points_out_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "nope").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.txt"),
+            dir.path().join("link.txt"),
+        )
+        .unwrap();
+        let error = read_within(dir.path(), "link.txt").unwrap_err();
+        assert_eq!(error.code(), "FILE_FORBIDDEN");
     }
 }

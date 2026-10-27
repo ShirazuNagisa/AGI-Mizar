@@ -3,7 +3,9 @@ import {
   Kernel,
   type ActivityEntry,
   type ApiEvent,
+  type Balance,
   type DeliveredFile,
+  type FilePreview,
   type EngineId,
   type Interaction,
   type ModelInfo,
@@ -12,11 +14,13 @@ import {
   type SessionStats,
   type StateSnapshot,
   type TurnRecord,
+  type Workspace,
 } from './api'
 import { SessionList } from './components/SessionList'
 import { Conversation } from './components/Conversation'
 import { Inspector } from './components/Inspector'
 import { Pairing } from './components/Pairing'
+import { FileViewer } from './components/FileViewer'
 
 const kernel = new Kernel()
 
@@ -36,6 +40,9 @@ export function App() {
   const [deliverables, setDeliverables] = useState<DeliveredFile[]>([])
   const [models, setModels] = useState<ModelInfo[]>([])
   const [permissions, setPermissions] = useState<PermissionPreset[]>([])
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([])
+  const [balance, setBalance] = useState<Balance | null>(null)
+  const [preview, setPreview] = useState<DeliveredFile | null>(null)
   const selectedRef = useRef<string | null>(null)
 
   selectedRef.current = selected
@@ -123,6 +130,15 @@ export function App() {
     }
   }, [selected])
 
+  // The host's own grouping, once: it changes when a workspace is created, not
+  // when a turn runs.
+  useEffect(() => {
+    void kernel
+      .send<Workspace[]>({ op: 'workspaces', engine: 'dsh' })
+      .then(setWorkspaces)
+      .catch(() => setWorkspaces([]))
+  }, [])
+
   const running = active_is_running(snapshot, selected)
 
   useEffect(() => {
@@ -148,6 +164,9 @@ export function App() {
     void kernel.send<PermissionPreset[]>({ op: 'permissions', engine }).then((value) => {
       if (!cancelled) setPermissions(value)
     }).catch(() => setPermissions([]))
+    void kernel.send<Balance>({ op: 'balance', engine }).then((value) => {
+      if (!cancelled) setBalance(value)
+    }).catch(() => setBalance(null))
     return () => {
       cancelled = true
     }
@@ -259,6 +278,7 @@ export function App() {
           selected={selected}
           onSelect={setSelected}
           approvals={waiting}
+          workspaces={workspaces}
         />
 
         <section className="panel">
@@ -286,6 +306,8 @@ export function App() {
               deliverables={deliverables}
               models={models}
               permissions={permissions}
+              balance={balance}
+              onOpenFile={setPreview}
               onModel={(id) => {
                 if (active === null) return
                 act(() => kernel.send({ op: 'set_model', session: active.key, model: id }))
@@ -319,6 +341,17 @@ export function App() {
           </aside>
         ) : null}
       </div>
+
+      {preview !== null && active !== null ? (
+        <FileViewer
+          name={preview.name}
+          path={preview.path}
+          onClose={() => setPreview(null)}
+          load={(path) =>
+            kernel.send<FilePreview>({ op: 'read_file', session: active.key, path })
+          }
+        />
+      ) : null}
 
       {pairing ? (
         <Pairing
