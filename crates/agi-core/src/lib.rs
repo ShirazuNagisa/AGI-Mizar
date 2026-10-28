@@ -162,6 +162,16 @@ impl Core {
         self.account.user()
     }
 
+    /// The session and device id the tunnel presents, when signed in.
+    pub fn relay_account(&self) -> Option<(String, String)> {
+        self.account.session()
+    }
+
+    /// Follow sign-ins and sign-outs.
+    pub fn subscribe_account(&self) -> tokio::sync::broadcast::Receiver<account::AccountEvent> {
+        self.account.subscribe()
+    }
+
     /// Refresh the account in the background, at launch.
     pub fn refresh_account_in_background(self: &Arc<Self>) {
         let core = Arc::clone(self);

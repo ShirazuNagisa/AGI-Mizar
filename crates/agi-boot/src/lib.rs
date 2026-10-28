@@ -171,6 +171,9 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
         agi_mizar::store::default_store_path(),
         agi_mizar::store::host_name(),
     )?;
+    // The tunnel mints phone tokens from the same roster the phone server
+    // authenticates against.
+    let roster_for_relay = Arc::clone(&roster);
     let mizar = MizarServer::new(Arc::clone(&core), roster, dsh_home);
     match mizar.bind(agi_mizar::frames::DEFAULT_PORT).await {
         Ok(_handle) => {}
@@ -190,8 +193,28 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
     {
         let token = config.relay_token.unwrap_or_else(random_token);
         let relay = RelayClient::new(url, token, mizar.port());
+        relay.attach_store(Arc::clone(&roster_for_relay));
+        let core_for_relay = Arc::clone(&core);
+        relay.set_account_source(Arc::new(move || core_for_relay.relay_account()));
         core.attach_relay_status(Arc::clone(&mizar) as Arc<dyn agi_core::RelayStatusSource>);
         mizar.attach_relay(Arc::clone(&relay));
+
+        // The relay routes by session, so a sign-in has to redial with the new
+        // headers; a sign-out revokes the tokens this account was handed and
+        // drops the presence the phones were finding it by.
+        let mut changes = core.subscribe_account();
+        let relay_for_changes = Arc::clone(&relay);
+        let roster_for_changes = Arc::clone(&roster_for_relay);
+        tokio::spawn(async move {
+            while let Ok(event) = changes.recv().await {
+                if !event.signed_in {
+                    if let Some(user) = event.user_id.as_deref() {
+                        agi_mizar::relay::revoke_account_tokens(&roster_for_changes, user);
+                    }
+                }
+                relay_for_changes.recycle();
+            }
+        });
         tokio::spawn(async move { relay.run().await });
     }
 

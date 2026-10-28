@@ -34,8 +34,13 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::tungstenite::Message;
+
+use crate::store::DeviceStore;
+
+/// Where the account headers come from: the session token and this device's id.
+type AccountSource = Arc<dyn Fn() -> Option<(String, String)> + Send + Sync>;
 
 /// The path a computer dials to establish its tunnel.
 pub const TUNNEL_PATH: &str = "/tunnel";
@@ -70,6 +75,12 @@ pub struct RelayClient {
     stopped: AtomicBool,
     /// Open phone WebSockets, by relay stream id.
     streams: Mutex<HashMap<String, mpsc::Sender<StreamCommand>>>,
+    /// The account session this desktop presents, when signed in.
+    account: Mutex<Option<AccountSource>>,
+    /// The roster tokens are minted from, when the relay brokers a phone.
+    store: Mutex<Option<Arc<DeviceStore>>>,
+    /// Tells the read loop to hang up so the next dial carries fresher headers.
+    kick: broadcast::Sender<()>,
 }
 
 /// A command for one proxied WebSocket.
@@ -89,6 +100,9 @@ impl RelayClient {
             connected: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             streams: Mutex::new(HashMap::new()),
+            account: Mutex::new(None),
+            store: Mutex::new(None),
+            kick: broadcast::channel(4).0,
         })
     }
 
@@ -124,6 +138,27 @@ impl RelayClient {
     /// A client for the same tunnel on a different relay.
     pub fn rebased(&self, base: impl Into<String>) -> Arc<Self> {
         Self::new(base, self.token.clone(), self.local_port)
+    }
+
+    /// Where the account session comes from, when this desktop is signed in.
+    pub fn set_account_source(&self, source: AccountSource) {
+        *self
+            .account
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(source);
+    }
+
+    /// Give the tunnel the roster it mints phone tokens from.
+    pub fn attach_store(&self, store: Arc<DeviceStore>) {
+        *self
+            .store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(store);
+    }
+
+    /// Hang up so the next dial presents the current account headers.
+    pub fn recycle(&self) {
+        let _ = self.kick.send(());
     }
 
     /// The room the relay assigned, once it has.
@@ -192,6 +227,27 @@ impl RelayClient {
                 .map_err(|_| anyhow::anyhow!("the tunnel token is not a header value"))?,
         );
 
+        if let Some((session, device)) = self
+            .account
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .and_then(|source| source())
+        {
+            request.headers_mut().insert(
+                "x-mizar-session",
+                session
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("the account session is not a header value"))?,
+            );
+            request.headers_mut().insert(
+                "x-mizar-client-id",
+                device
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("the device id is not a header value"))?,
+            );
+        }
+
         let (socket, _) = tokio_tungstenite::connect_async(request).await?;
         tracing::info!("relay: tunnel established with {}", self.base);
 
@@ -209,7 +265,13 @@ impl RelayClient {
             }
         });
 
-        while let Some(message) = stream.next().await {
+        let mut kick = self.kick.subscribe();
+        'socket: loop {
+            let message = tokio::select! {
+                _ = kick.recv() => break 'socket,
+                message = stream.next() => message,
+            };
+            let Some(message) = message else { break };
             let Ok(message) = message else { break };
             let Message::Text(text) = message else {
                 continue;
@@ -250,6 +312,7 @@ impl RelayClient {
                 Some("ws-open") => self.open_stream(frame, out.clone()),
                 Some("ws-msg") => self.forward_stream_message(&frame),
                 Some("ws-close") => self.close_stream(&frame),
+                Some("provision") => self.provision_phone(frame, out.clone()),
                 Some("error") => {
                     let message = frame
                         .get("message")
@@ -274,6 +337,47 @@ impl RelayClient {
         LocalTarget {
             port: self.local_port,
         }
+    }
+
+    /// Mint a token for one phone, or say why it could not be done.
+    fn provision_phone(&self, frame: Value, out: mpsc::Sender<Value>) {
+        let id = frame.get("id").cloned().unwrap_or(Value::Null);
+        let account = frame
+            .get("accountId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let phone = frame
+            .get("phoneDeviceId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let name = frame
+            .get("phoneName")
+            .and_then(Value::as_str)
+            .unwrap_or("Phone")
+            .to_string();
+        let store = self
+            .store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        tokio::spawn(async move {
+            let token = match store {
+                Some(store) if !account.is_empty() && !phone.is_empty() => {
+                    provision_for_phone(&store, &account, &phone, &name).ok()
+                }
+                _ => None,
+            };
+            let frame = match token {
+                Some(token) => json!({ "t": "provision-result", "id": id, "token": token }),
+                None => json!({
+                    "t": "error", "id": id,
+                    "message": "this computer cannot mint a token right now"
+                }),
+            };
+            let _ = out.send(frame).await;
+        });
     }
 
     /// Start proxying one phone WebSocket.
@@ -603,6 +707,45 @@ pub(crate) fn unbase64(text: &str) -> Option<Vec<u8>> {
     agi_protocol::b64::decode(text)
 }
 
+/// The marker a provisioned token carries, so logout can find it again.
+fn account_marker(account: &str, phone: &str) -> String {
+    format!("account:{account}:{phone}")
+}
+
+/// Mint one phone's token, replacing the one it had before.
+///
+/// Reusing the roster's revoke-then-issue keeps the number of live tokens at one
+/// per phone however many times the phone reconnects.
+fn provision_for_phone(
+    store: &DeviceStore,
+    account: &str,
+    phone: &str,
+    name: &str,
+) -> std::io::Result<String> {
+    let marker = account_marker(account, phone);
+    for device in store.devices() {
+        if device.is_live() && device.model.as_deref() == Some(marker.as_str()) {
+            let _ = store.revoke(&device.id);
+        }
+    }
+    store.issue(name, Some(marker)).map(|issued| issued.token)
+}
+
+/// Revoke every token this account was provisioned, without touching the tunnel.
+pub fn revoke_account_tokens(store: &DeviceStore, account: &str) {
+    let prefix = format!("account:{account}:");
+    for device in store.devices() {
+        if device.is_live()
+            && device
+                .model
+                .as_deref()
+                .is_some_and(|model| model.starts_with(&prefix))
+        {
+            let _ = store.revoke(&device.id);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -672,5 +815,43 @@ mod tests {
         assert!(dechunk(b"4\r\nWiki").is_none());
         assert!(dechunk(b"5\r\nWiki\r\n0\r\n\r\n").is_none());
         assert!(dechunk(b"zz\r\n").is_none());
+    }
+
+    #[test]
+    fn a_provisioned_token_replaces_the_phone_that_had_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DeviceStore::open(dir.path().join("devices.json"), "host").unwrap();
+        // A pairing-issued device is not this code's business.
+        let paired = store.issue("iPhone (paired)", None).unwrap();
+
+        let first = provision_for_phone(&store, "u1", "phone-a", "iPhone").unwrap();
+        assert!(store.lookup(&first).is_some());
+        let second = provision_for_phone(&store, "u1", "phone-a", "iPhone").unwrap();
+        assert_ne!(first, second);
+        assert!(store.lookup(&first).is_none(), "the old token is revoked");
+        assert!(store.lookup(&second).is_some());
+        assert!(store.lookup(&paired.token).is_some());
+
+        // Another phone of the same account keeps its own token.
+        let other = provision_for_phone(&store, "u1", "phone-b", "iPad").unwrap();
+        assert!(store.lookup(&other).is_some());
+        assert!(store.lookup(&second).is_some());
+
+        // Signing out revokes both, and nothing else.
+        revoke_account_tokens(&store, "u1");
+        assert!(store.lookup(&second).is_none());
+        assert!(store.lookup(&other).is_none());
+        assert!(store.lookup(&paired.token).is_some());
+    }
+
+    #[test]
+    fn another_accounts_tokens_are_not_revoked_by_a_sign_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DeviceStore::open(dir.path().join("devices.json"), "host").unwrap();
+        let mine = provision_for_phone(&store, "u1", "p", "iPhone").unwrap();
+        let theirs = provision_for_phone(&store, "u2", "q", "iPhone").unwrap();
+        revoke_account_tokens(&store, "u1");
+        assert!(store.lookup(&mine).is_none());
+        assert!(store.lookup(&theirs).is_some());
     }
 }

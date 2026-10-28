@@ -64,12 +64,22 @@ struct AuthAnswer {
     user: AccountUser,
 }
 
+/// Something the rest of the kernel may need to react to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountEvent {
+    /// `true` after a sign-in, `false` after a sign-out or a refused session.
+    pub signed_in: bool,
+    /// The account the event is about; `None` when nothing was signed in.
+    pub user_id: Option<String>,
+}
+
 /// The account this window is signed in to.
 pub struct AccountService {
     http: reqwest::Client,
     base: String,
     path: Mutex<Option<PathBuf>>,
     state: Mutex<State>,
+    events: tokio::sync::broadcast::Sender<AccountEvent>,
 }
 
 struct State {
@@ -88,6 +98,7 @@ impl AccountService {
                 .unwrap_or_else(|_| reqwest::Client::new()),
             base: base.into().trim_end_matches('/').to_string(),
             path: Mutex::new(None),
+            events: tokio::sync::broadcast::channel(16).0,
             state: Mutex::new(State {
                 token: None,
                 user: None,
@@ -118,6 +129,27 @@ impl AccountService {
             .path
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(path);
+    }
+
+    /// The session and this machine's device id, for the tunnel to present.
+    ///
+    /// This is the one credential the relay client needs; it is deliberately not
+    /// reachable through the command API.
+    pub fn session(&self) -> Option<(String, String)> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Some((state.token.clone()?, state.device.id.clone()))
+    }
+
+    /// Follow sign-ins and sign-outs.
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<AccountEvent> {
+        self.events.subscribe()
+    }
+
+    fn announce(&self, signed_in: bool, user_id: Option<String>) {
+        let _ = self.events.send(AccountEvent { signed_in, user_id });
     }
 
     /// Whether a session token is held.
@@ -174,6 +206,7 @@ impl AccountService {
             state.user = Some(answer.user.clone());
         }
         self.save();
+        self.announce(true, Some(answer.user.id.clone()));
         Ok(answer.user)
     }
 
@@ -198,7 +231,9 @@ impl AccountService {
             .await
             .map_err(|error| AccountError::new("UNREACHABLE", format!("the relay: {error}")))?;
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            let previous = self.user().map(|user| user.id);
             self.forget();
+            self.announce(false, previous);
             return Ok(None);
         }
         let answer = self.read(response).await?;
@@ -214,6 +249,7 @@ impl AccountService {
 
     /// Sign out: tell the relay, then forget the token whatever it said.
     pub async fn logout(&self) -> Result<(), AccountError> {
+        let previous = self.user().map(|user| user.id);
         if let Some(token) = self.token() {
             let _ = self
                 .http
@@ -223,6 +259,7 @@ impl AccountService {
                 .await;
         }
         self.forget();
+        self.announce(false, previous);
         Ok(())
     }
 
