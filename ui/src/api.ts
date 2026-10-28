@@ -146,6 +146,12 @@ export interface AccountDevice {
   current: boolean
 }
 
+export interface AccountDesktop {
+  deviceId: string
+  name: string
+  online: boolean
+}
+
 export interface AccountUser {
   id: string
   username: string
@@ -261,6 +267,7 @@ export type Command =
   | { op: 'account' }
   | { op: 'account_login'; identifier: string; password: string }
   | { op: 'account_logout' }
+  | { op: 'account_desktops' }
   | { op: 'ping' }
 
 export interface ApiError {

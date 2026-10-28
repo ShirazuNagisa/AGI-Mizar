@@ -494,6 +494,10 @@ impl Core {
                 Ok(user) => CommandResponse::ok(json!({ "user": user })),
                 Err(error) => CommandResponse::error(error.code, error.message),
             },
+            Command::AccountDesktops => match self.account.desktops().await {
+                Ok(desktops) => CommandResponse::ok(json!({ "desktops": desktops })),
+                Err(error) => CommandResponse::error(error.code, error.message),
+            },
             Command::AccountLogout => match self.account.logout().await {
                 Ok(()) => CommandResponse::done(),
                 Err(error) => CommandResponse::error(error.code, error.message),

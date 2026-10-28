@@ -187,6 +187,8 @@ pub enum Command {
     },
     /// Forget the account on this machine.
     AccountLogout,
+    /// The account's computers, with whether each is reachable now.
+    AccountDesktops,
 
     /// Liveness probe, used by the shell before it shows a window.
     Ping,

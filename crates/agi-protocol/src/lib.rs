@@ -19,7 +19,7 @@ pub mod engine;
 pub mod link;
 pub mod usage;
 
-pub use account::{AccountDevice, AccountUser};
+pub use account::{AccountDesktop, AccountDevice, AccountUser};
 pub use domain::{
     AttachmentKind, Interaction, InteractionKind, PromptAttachment, Record, RecordKind, Session,
     SessionKey, ToolInfo,

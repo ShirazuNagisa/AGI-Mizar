@@ -46,6 +46,16 @@ impl AccountUser {
     }
 }
 
+/// One computer, as discovery reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountDesktop {
+    pub device_id: String,
+    #[serde(default)]
+    pub name: String,
+    pub online: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

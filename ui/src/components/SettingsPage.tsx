@@ -10,6 +10,7 @@ import { cn } from '../lib/utils'
 interface SettingsPageProps {
   version: string
   account: AccountUser | null
+  onlineDesktops: Set<string>
   serverConnected: boolean
   theme: ThemePreference
   onThemeChange: (theme: ThemePreference) => void
@@ -27,6 +28,7 @@ interface SettingsPageProps {
 export function SettingsPage({
   version,
   account,
+  onlineDesktops,
   serverConnected,
   theme,
   onThemeChange,
@@ -41,12 +43,14 @@ export function SettingsPage({
             <Group title="AGI Mizar 桌面端">
               <DeviceList
                 devices={account?.devices.filter((device) => device.platform !== 'ios') ?? []}
+                online={onlineDesktops}
                 empty={account === null ? '登录后可查看同一账户下的桌面端' : '这个账户下还没有桌面端'}
               />
             </Group>
             <Group title="Mizar 手机端">
               <DeviceList
                 devices={account?.devices.filter((device) => device.platform === 'ios') ?? []}
+                online={new Set()}
                 empty={account === null ? '登录后可查看同一账户下的手机' : '这个账户下还没有手机'}
               />
             </Group>
@@ -128,9 +132,11 @@ function Empty({ children }: { children: React.ReactNode }) {
 /** The devices under the account, split by the group they are drawn in. */
 function DeviceList({
   devices,
+  online,
   empty,
 }: {
   devices: import('../api').AccountDevice[]
+  online: Set<string>
   empty: string
 }) {
   if (devices.length === 0) return <Empty>{empty}</Empty>
@@ -140,6 +146,13 @@ function DeviceList({
         <div key={device.id} className="flex items-center gap-3">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5 text-[13px] text-fg">
+              <span
+                className={
+                  online.has(device.id)
+                    ? 'size-2 shrink-0 rounded-full bg-accent'
+                    : 'size-2 shrink-0 rounded-full bg-muted/40'
+                }
+              />
               <span className="truncate">{device.name}</span>
               {device.current ? (
                 <span className="rounded bg-surface-2 px-1 text-[10px] text-muted">本机</span>

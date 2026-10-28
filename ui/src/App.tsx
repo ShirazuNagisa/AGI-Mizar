@@ -32,6 +32,7 @@ export function App() {
   const [accountError, setAccountError] = useState<string | null>(null)
   const [banner, setBanner] = useState<string | null>(null)
   const [serverConnected, setServerConnected] = useState(false)
+  const [onlineDesktops, setOnlineDesktops] = useState<Set<string>>(new Set())
 
   // The window's appearance is a class; following the system means listening for
   // macOS changing its mind while this window stays open.
@@ -55,6 +56,28 @@ export function App() {
   useEffect(() => {
     void refreshAccount()
   }, [refreshAccount])
+
+  // Which computers of the account are reachable right now. Read when the
+  // settings page is opened, and every half minute while it is on screen.
+  useEffect(() => {
+    if (page.kind !== 'settings' || account === null) {
+      setOnlineDesktops(new Set())
+      return
+    }
+    const read = () => {
+      void kernel
+        .send<{ desktops: { deviceId: string; online: boolean }[] }>({ op: 'account_desktops' })
+        .then((answer) =>
+          setOnlineDesktops(
+            new Set(answer.desktops.filter((desk) => desk.online).map((desk) => desk.deviceId)),
+          ),
+        )
+        .catch(() => setOnlineDesktops(new Set()))
+    }
+    read()
+    const timer = window.setInterval(read, 30_000)
+    return () => window.clearInterval(timer)
+  }, [page.kind, account])
 
   // The tunnel comes and goes without the window asking; reading it on a slow
   // timer is enough for a status light.
@@ -260,6 +283,7 @@ export function App() {
           <SettingsPage
             version={snapshot?.version ?? ''}
             account={account}
+            onlineDesktops={onlineDesktops}
             serverConnected={serverConnected}
             theme={theme}
             onThemeChange={chooseTheme}

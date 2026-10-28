@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use agi_protocol::account::{AccountDevice, AccountUser};
+use agi_protocol::account::{AccountDesktop, AccountDevice, AccountUser};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -245,6 +245,31 @@ impl AccountService {
             state.user = Some(answer.user.clone());
         }
         Ok(Some(answer.user))
+    }
+
+    /// The account's computers, with their current reachability.
+    pub async fn desktops(&self) -> Result<Vec<AccountDesktop>, AccountError> {
+        let Some(token) = self.token() else {
+            return Ok(Vec::new());
+        };
+        #[derive(Deserialize)]
+        struct Answer {
+            desktops: Vec<AccountDesktop>,
+        }
+        let response = self
+            .http
+            .get(format!("{}/account/v1/desktops", self.base))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|error| AccountError::new("UNREACHABLE", format!("the relay: {error}")))?;
+        let text = response
+            .text()
+            .await
+            .map_err(|error| AccountError::new("UNREACHABLE", format!("the relay: {error}")))?;
+        let answer: Answer = serde_json::from_str(&text)
+            .map_err(|_| AccountError::new("BAD_ANSWER", "the relay's answer was not readable"))?;
+        Ok(answer.desktops)
     }
 
     /// Sign out: tell the relay, then forget the token whatever it said.
