@@ -23,6 +23,51 @@
 
 use agi_boot::{boot, BootConfig};
 
+/// The Dock's mark, drawn from the same two images the bundle carries.
+///
+/// macOS reads one icon from the bundle's `Info.plist`, so a dark appearance would
+/// otherwise get the light tile. The window already knows which appearance it is
+/// in — that choice is the kernel's preference, not AppKit's — so the icon is
+/// repainted from it, on the main thread, whenever it changes.
+#[cfg(target_os = "macos")]
+mod dock_icon {
+    use objc2::{AnyThread, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
+
+    static LIGHT: &[u8] = include_bytes!("../icons/icon-light.png");
+    static DARK: &[u8] = include_bytes!("../icons/icon-dark.png");
+
+    /// Whether the system is in its dark appearance.
+    fn system_is_dark(mtm: MainThreadMarker) -> bool {
+        let appearance = NSApplication::sharedApplication(mtm).effectiveAppearance();
+        appearance.name().to_string().contains("Dark")
+    }
+
+    /// Repaint the Dock icon for `theme` (`system`, `light` or `dark`).
+    ///
+    /// Must run on the main thread; callers that are not already there go through
+    /// `AppHandle::run_on_main_thread`.
+    pub fn follow(theme: &str) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let dark = match theme {
+            "dark" => true,
+            "light" => false,
+            _ => system_is_dark(mtm),
+        };
+        let bytes = if dark { DARK } else { LIGHT };
+        unsafe {
+            let data = NSData::dataWithBytes_length(bytes.as_ptr().cast(), bytes.len());
+            let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
+                return;
+            };
+            NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image));
+        }
+    }
+}
+
 fn main() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -49,7 +94,10 @@ fn main() {
     );
 
     // Both must outlive the window: the runtime keeps the servers alive, and
-    // `booted` owns the kernel the servers read from.
+    // `booted` owns the kernel the servers read from. The Dock icon reads the
+    // theme out of the kernel, so it keeps its own handle.
+    #[cfg(target_os = "macos")]
+    let core = std::sync::Arc::clone(&booted.core);
     let _runtime = Box::leak(Box::new(runtime));
     let _kernel = booted;
 
@@ -86,6 +134,23 @@ fn main() {
             }
 
             builder.build()?;
+
+            // macOS draws the bundle's one icon; the window's theme (which can
+            // differ from the system's) picks which of the two this is.
+            #[cfg(target_os = "macos")]
+            {
+                dock_icon::follow(&core.theme());
+                let handle = app.handle().clone();
+                let core = std::sync::Arc::clone(&core);
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        let theme = core.theme();
+                        let handle = handle.clone();
+                        let _ = handle.run_on_main_thread(move || dock_icon::follow(&theme));
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
+                });
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
