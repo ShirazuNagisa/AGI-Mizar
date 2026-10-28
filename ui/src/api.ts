@@ -257,6 +257,7 @@ export type Command =
   | { op: 'pairing'; refresh: boolean }
   | { op: 'usage_overview' }
   | { op: 'set_theme'; theme: 'system' | 'light' | 'dark' }
+  | { op: 'relay_status' }
   | { op: 'account' }
   | { op: 'account_login'; identifier: string; password: string }
   | { op: 'account_logout' }

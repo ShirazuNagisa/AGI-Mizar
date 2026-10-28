@@ -176,6 +176,8 @@ pub enum Command {
     /// Remember the window's appearance across launches.
     SetTheme { theme: String },
 
+    /// Whether this window's tunnel to the relay is up.
+    RelayStatus,
     /// The account this window is signed in to, and the devices under it.
     Account,
     /// Sign in to the relay's account service.

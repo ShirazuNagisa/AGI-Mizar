@@ -97,6 +97,8 @@ pub struct Core {
     preferences_path: RwLock<Option<PathBuf>>,
     /// The relay account this window is signed in to.
     account: account::AccountService,
+    /// The tunnel's own state, when this build dials a relay.
+    relay_status: RwLock<Option<Arc<dyn RelayStatusSource>>>,
 }
 
 impl Core {
@@ -112,7 +114,16 @@ impl Core {
             preferences: RwLock::new(Preferences::default()),
             preferences_path: RwLock::new(None),
             account: account::AccountService::new(account_base()),
+            relay_status: RwLock::new(None),
         })
+    }
+
+    /// Attach the tunnel's state, so the window can show whether it is up.
+    pub fn attach_relay_status(&self, source: Arc<dyn RelayStatusSource>) {
+        *self
+            .relay_status
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(source);
     }
 
     /// Attach the phone server, so the window can show a pairing code.
@@ -435,6 +446,19 @@ impl Core {
     pub async fn dispatch(&self, command: Command) -> CommandResponse {
         match command {
             Command::State => CommandResponse::ok(self.snapshot()),
+            Command::RelayStatus => {
+                let status = self
+                    .relay_status
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .as_ref()
+                    .map(|source| source.relay_status())
+                    .unwrap_or_default();
+                CommandResponse::ok(json!({
+                    "connected": status.connected,
+                    "room": status.room,
+                }))
+            }
             Command::Account => {
                 // A reading from the relay is better than a cached one, but a
                 // launch with no network must still draw the last known account.
@@ -688,6 +712,19 @@ impl Core {
 pub trait PairingSource: Send + Sync {
     /// The code to show, refreshed when asked.
     fn pairing_view(&self, refresh: bool) -> agi_protocol::api::PairingView;
+}
+
+/// What the window needs to know about the tunnel.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RelayStatus {
+    pub connected: bool,
+    /// The room the relay assigned, once it has.
+    pub room: Option<String>,
+}
+
+/// A tunnel that can say whether it is up.
+pub trait RelayStatusSource: Send + Sync {
+    fn relay_status(&self) -> RelayStatus;
 }
 
 /// Where the account service lives: the official relay unless a launch says

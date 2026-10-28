@@ -80,6 +80,23 @@ pub struct MizarServer {
     uploads: std::sync::Arc<crate::uploads::UploadStore>,
 }
 
+impl agi_core::RelayStatusSource for MizarServer {
+    fn relay_status(&self) -> agi_core::RelayStatus {
+        let relay = self
+            .relay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        match relay {
+            Some(relay) => agi_core::RelayStatus {
+                connected: relay.is_connected(),
+                room: relay.current_room(),
+            },
+            None => agi_core::RelayStatus::default(),
+        }
+    }
+}
+
 impl MizarServer {
     /// Build the server over a kernel and a device roster.
     pub fn new(core: Arc<Core>, store: Arc<DeviceStore>, home: impl Into<String>) -> Arc<Self> {

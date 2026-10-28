@@ -190,6 +190,7 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
     {
         let token = config.relay_token.unwrap_or_else(random_token);
         let relay = RelayClient::new(url, token, mizar.port());
+        core.attach_relay_status(Arc::clone(&mizar) as Arc<dyn agi_core::RelayStatusSource>);
         mizar.attach_relay(Arc::clone(&relay));
         tokio::spawn(async move { relay.run().await });
     }

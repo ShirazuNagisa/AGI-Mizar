@@ -6,6 +6,7 @@ import { Spinner } from '../icons'
 
 interface LoginPageProps {
   account: AccountUser | null
+  serverConnected: boolean
   busy: boolean
   error: string | null
   onLogin: (identifier: string, password: string) => Promise<void>
@@ -20,7 +21,14 @@ interface LoginPageProps {
  * falls back to the signed-out shape rather than pretending it is still signed
  * in.
  */
-export function LoginPage({ account, busy, error, onLogin, onLogout }: LoginPageProps) {
+export function LoginPage({
+  account,
+  serverConnected,
+  busy,
+  error,
+  onLogin,
+  onLogout,
+}: LoginPageProps) {
   const [identifier, setIdentifier] = useState('')
   const [password, setPassword] = useState('')
 
@@ -73,6 +81,10 @@ export function LoginPage({ account, busy, error, onLogin, onLogout }: LoginPage
               {error === null ? null : (
                 <p className="mt-3 text-[12px] leading-5 text-red-400">{error}</p>
               )}
+
+              <p className="mt-3 text-[12px] text-muted">
+                服务器连接：{serverConnected ? '已连接' : '未连接'}
+              </p>
 
               <Button
                 className="mt-5"

@@ -31,6 +31,7 @@ export function App() {
   const [accountBusy, setAccountBusy] = useState(false)
   const [accountError, setAccountError] = useState<string | null>(null)
   const [banner, setBanner] = useState<string | null>(null)
+  const [serverConnected, setServerConnected] = useState(false)
 
   // The window's appearance is a class; following the system means listening for
   // macOS changing its mind while this window stays open.
@@ -54,6 +55,20 @@ export function App() {
   useEffect(() => {
     void refreshAccount()
   }, [refreshAccount])
+
+  // The tunnel comes and goes without the window asking; reading it on a slow
+  // timer is enough for a status light.
+  useEffect(() => {
+    const read = () => {
+      void kernel
+        .send<{ connected: boolean }>({ op: 'relay_status' })
+        .then((answer) => setServerConnected(answer.connected))
+        .catch(() => setServerConnected(false))
+    }
+    read()
+    const timer = window.setInterval(read, 5_000)
+    return () => window.clearInterval(timer)
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -208,7 +223,7 @@ export function App() {
       <Sidebar
         engines={snapshot?.engines ?? []}
         page={page}
-        serverConnected={false}
+        serverConnected={serverConnected}
         loggedIn={account !== null}
         onNavigate={setPage}
       />
@@ -234,6 +249,7 @@ export function App() {
         {page.kind === 'login' ? (
           <LoginPage
             account={account}
+            serverConnected={serverConnected}
             busy={accountBusy}
             error={accountError}
             onLogin={login}
@@ -244,7 +260,7 @@ export function App() {
           <SettingsPage
             version={snapshot?.version ?? ''}
             account={account}
-            serverConnected={false}
+            serverConnected={serverConnected}
             theme={theme}
             onThemeChange={chooseTheme}
             kernel={kernel}
