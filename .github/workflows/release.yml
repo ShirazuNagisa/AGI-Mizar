@@ -38,7 +38,7 @@ jobs:
       # The hook shim ships beside the app: the installer writes its absolute
       # path into ~/.claude/settings.json, so it has to exist in the bundle.
       - name: Build the hook shim
-        run: cargo build --release -p agi-mizar-hook
+        run: cargo build --release -p agi-hook-shim
 
       - uses: tauri-apps/tauri-action@v0
         env:

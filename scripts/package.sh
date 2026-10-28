@@ -33,7 +33,7 @@ fi
 
 # The hook shim ships beside the app: the installer writes an absolute path to it
 # into ~/.claude/settings.json, so it has to exist where the bundle puts it.
-cargo build --release -p agi-mizar-hook
+cargo build --release -p agi-hook-shim
 
 TARGET_ARGS=()
 if [[ "${1:-}" == "--universal" ]]; then
