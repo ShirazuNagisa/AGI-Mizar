@@ -106,6 +106,13 @@ fn plist(executable: &std::path::Path) -> String {
     )
 }
 
+/// The three characters a path can contain that XML cares about.
+fn xml_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,11 +133,4 @@ mod tests {
         assert!(plist.contains("/tmp/a&amp;b/&lt;x&gt;"));
         assert!(!plist.contains("a&b"));
     }
-}
-
-/// The three characters a path can contain that XML cares about.
-fn xml_escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }
