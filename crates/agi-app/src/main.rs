@@ -114,13 +114,30 @@ fn main() {
         // window is: it has one screen for each agent and nothing to open. macOS
         // still needs an application menu for About and Quit.
         .menu(|handle| {
-            use tauri::menu::{MenuBuilder, SubmenuBuilder};
+            use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+            // Closing is hiding here, so it gets a real menu item: the platform's
+            // own ⌘W has nothing to close once the window's close button is
+            // intercepted, and a shortcut that silently does nothing is worse
+            // than no shortcut.
+            let close = MenuItemBuilder::with_id("close", "Close Window")
+                .accelerator("CmdOrCtrl+W")
+                .build(handle)?;
             let app = SubmenuBuilder::new(handle, "AGI Mizar")
                 .about(None)
+                .separator()
+                .item(&close)
                 .separator()
                 .quit()
                 .build()?;
             MenuBuilder::new(handle).items(&[&app]).build()
+        })
+        .on_menu_event(|app, event| {
+            use tauri::Manager;
+            if event.id().as_ref() == "close" {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
         })
         .setup(move |app| {
             let parsed = url.parse().expect("the kernel URL is not a URL");
