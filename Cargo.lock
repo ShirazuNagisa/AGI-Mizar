@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agi-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agi-boot",
  "agi-core",
@@ -28,7 +28,7 @@ dependencies = [
 
 [[package]]
 name = "agi-boot"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agi-core",
  "agi-engine",
@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "agi-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agi-engine",
  "agi-engine-claude",
@@ -69,7 +69,7 @@ dependencies = [
 
 [[package]]
 name = "agi-daemon"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agi-boot",
  "agi-core",
@@ -81,7 +81,7 @@ dependencies = [
 
 [[package]]
 name = "agi-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agi-protocol",
  "async-trait",
@@ -95,7 +95,7 @@ dependencies = [
 
 [[package]]
 name = "agi-engine-claude"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agi-engine",
  "agi-protocol",
@@ -112,7 +112,7 @@ dependencies = [
 
 [[package]]
 name = "agi-engine-codex"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agi-engine",
  "agi-protocol",
@@ -127,7 +127,7 @@ dependencies = [
 
 [[package]]
 name = "agi-engine-dsh"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agi-engine",
  "agi-protocol",
@@ -143,14 +143,14 @@ dependencies = [
 
 [[package]]
 name = "agi-hook-shim"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "agi-mizar"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agi-core",
  "agi-engine",
@@ -175,7 +175,7 @@ dependencies = [
 
 [[package]]
 name = "agi-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
