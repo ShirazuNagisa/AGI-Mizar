@@ -37,13 +37,25 @@ pub fn watch(app: AppHandle) {
 
 /// Ask GitHub whether there is a newer build, and offer it.
 pub async fn check(app: AppHandle) {
-    let Ok(updater) = app.updater() else {
-        return;
+    let updater = match app.updater() {
+        Ok(updater) => updater,
+        Err(error) => {
+            eprintln!("AGI update: the updater is not available — {error}");
+            return;
+        }
     };
     // No update is the ordinary answer, and a failed check is not worth a
     // dialog: the network will be there at the next interval.
-    let Ok(Some(update)) = updater.check().await else {
-        return;
+    let update = match updater.check().await {
+        Ok(Some(update)) => update,
+        Ok(None) => {
+            eprintln!("AGI update: this is the newest version");
+            return;
+        }
+        Err(error) => {
+            eprintln!("AGI update: the check failed — {error}");
+            return;
+        }
     };
     let version = update.version.clone();
     let notes = update.body.clone().unwrap_or_default();
