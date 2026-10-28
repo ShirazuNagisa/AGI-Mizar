@@ -67,7 +67,38 @@ fi
 
 cargo tauri build "${TARGET_ARGS[@]}"
 
-cat <<'NEXT'
+# The bundler notarizes the .app, but the disk image around it is ours to
+# submit. A DMG that is signed and not notarized is still rejected by
+# Gatekeeper — "Unnotarized Developer ID" — so this step is not optional for a
+# build somebody else will install.
+BUNDLE_DIR="target/release/bundle"
+if [[ "${#TARGET_ARGS[@]}" -gt 0 ]]; then
+  BUNDLE_DIR="target/${TARGET_ARGS[1]}/release/bundle"
+fi
+DMG="$(find "$BUNDLE_DIR/dmg" -maxdepth 1 -name '*.dmg' -print -quit 2>/dev/null || true)"
+if [[ -n "$DMG" ]]; then
+  if ! xcrun stapler validate "$DMG" >/dev/null 2>&1; then
+    if [[ -n "${APPLE_ID:-}" && -n "${APPLE_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]]; then
+      echo "notarizing $DMG"
+      xcrun notarytool submit "$DMG" \
+        --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" \
+        --wait
+      xcrun stapler staple "$DMG"
+    else
+      echo "warning: $DMG is not notarized (set APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID)" >&2
+    fi
+  fi
+  xcrun stapler validate "$DMG" >/dev/null 2>&1 && echo "dmg: notarized and stapled"
+fi
+
+if [[ -n "${APPLE_SIGNING_IDENTITY:-}" && -n "${APPLE_ID:-}" ]]; then
+  cat <<DONE
+
+Built, signed and notarized. Gatekeeper on another Mac will open it.
+
+DONE
+else
+  cat <<'NEXT'
 
 Built. What the bundle still needs before anybody can install it:
 
@@ -85,3 +116,4 @@ Built. What the bundle still needs before anybody can install it:
     The first launch should offer to install the Claude Code hooks rather than
     doing it silently — ~/.claude/settings.json belongs to the operator.
 NEXT
+fi
