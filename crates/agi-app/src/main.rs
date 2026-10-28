@@ -74,7 +74,38 @@ mod dock_icon {
     }
 }
 
+/// What `--start-at-login` or `--no-start-at-login` asked for.
+#[cfg(target_os = "macos")]
+fn start_at_login_flag() -> Option<bool> {
+    let mut wanted = None;
+    for argument in std::env::args() {
+        match argument.as_str() {
+            "--start-at-login" => wanted = Some(true),
+            "--no-start-at-login" => wanted = Some(false),
+            _ => {}
+        }
+    }
+    wanted
+}
+
 fn main() {
+    // Start at login is also a thing an operator scripts: an MDM image, a
+    // headless setup, a test. The tray checkbox and these flags are the same
+    // call, so there is only one answer to what "enabled" means.
+    #[cfg(target_os = "macos")]
+    if let Some(enabled) = start_at_login_flag() {
+        match login_item::set_enabled(enabled) {
+            Ok(()) => {
+                println!("start at login: {}", if enabled { "on" } else { "off" });
+                return;
+            }
+            Err(error) => {
+                eprintln!("AGI Mizar: start at login was not changed — {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
