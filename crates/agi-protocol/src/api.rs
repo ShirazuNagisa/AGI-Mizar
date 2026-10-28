@@ -176,6 +176,16 @@ pub enum Command {
     /// Remember the window's appearance across launches.
     SetTheme { theme: String },
 
+    /// The account this window is signed in to, and the devices under it.
+    Account,
+    /// Sign in to the relay's account service.
+    AccountLogin {
+        identifier: String,
+        password: String,
+    },
+    /// Forget the account on this machine.
+    AccountLogout,
+
     /// Liveness probe, used by the shell before it shows a window.
     Ping,
 }

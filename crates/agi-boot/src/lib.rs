@@ -135,9 +135,11 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
     // browser: the window's origin changes with the port on every launch.
     if let Some(home) = endpoint_file.parent() {
         core.load_preferences(home.join("preferences.json"));
+        core.load_account(home.join("account.json"));
         dsh.set_usage_cache_path(home.join("usage-dsh.json"));
     }
     core.start().await;
+    core.refresh_account_in_background();
 
     let dsh_home = std::env::var("DSH_HOME")
         .unwrap_or_else(|_| format!("{}/.dsh", std::env::var("HOME").unwrap_or_default()));

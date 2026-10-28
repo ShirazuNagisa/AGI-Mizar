@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Kernel, type ApiEvent, type EngineId, type StateSnapshot, type UsageOverview } from './api'
+import {
+  Kernel,
+  type AccountUser,
+  type ApiEvent,
+  type EngineId,
+  type StateSnapshot,
+  type UsageOverview,
+} from './api'
 import { AGENTS, type Page } from './navigation'
 import { applyTheme, onSystemThemeChange, storeTheme, storedTheme, type ThemePreference } from './theme'
 import { Sidebar } from './components/Sidebar'
@@ -13,9 +20,6 @@ const kernel = new Kernel()
 /** How often the dashboard rereads the logs while it is open. */
 const USAGE_INTERVAL_MS = 60_000
 
-/** Whether this window thinks it is signed in. Placeholder until accounts exist. */
-const ACCOUNT_KEY = 'agi-mizar.account'
-
 export function App() {
   const [snapshot, setSnapshot] = useState<StateSnapshot | null>(null)
   const [page, setPage] = useState<Page>({ kind: 'home' })
@@ -23,7 +27,9 @@ export function App() {
   const [usageLoading, setUsageLoading] = useState(true)
   const [usageError, setUsageError] = useState<string | null>(null)
   const [theme, setTheme] = useState<ThemePreference>(() => storedTheme())
-  const [loggedIn, setLoggedIn] = useState(() => localStorage.getItem(ACCOUNT_KEY) === '1')
+  const [account, setAccount] = useState<AccountUser | null>(null)
+  const [accountBusy, setAccountBusy] = useState(false)
+  const [accountError, setAccountError] = useState<string | null>(null)
   const [banner, setBanner] = useState<string | null>(null)
 
   // The window's appearance is a class; following the system means listening for
@@ -34,6 +40,20 @@ export function App() {
     if (theme !== 'system') return
     return onSystemThemeChange(() => applyTheme(theme))
   }, [theme])
+
+  const refreshAccount = useCallback(async () => {
+    try {
+      const answer = await kernel.send<{ user: AccountUser | null } | null>({ op: 'account' })
+      setAccount(answer?.user ?? null)
+      setAccountError(null)
+    } catch (error) {
+      setAccountError(error instanceof Error ? error.message : '账户读取失败')
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshAccount()
+  }, [refreshAccount])
 
   useEffect(() => {
     let cancelled = false
@@ -151,11 +171,37 @@ export function App() {
     void kernel.send({ op: 'set_theme', theme: next }).catch(() => {})
   }
 
-  const setAccount = (next: boolean) => {
-    setLoggedIn(next)
-    if (next) localStorage.setItem(ACCOUNT_KEY, '1')
-    else localStorage.removeItem(ACCOUNT_KEY)
-  }
+  const login = useCallback(
+    async (identifier: string, password: string) => {
+      setAccountBusy(true)
+      setAccountError(null)
+      try {
+        const answer = await kernel.send<{ user: AccountUser }>({
+          op: 'account_login',
+          identifier,
+          password,
+        })
+        setAccount(answer.user)
+      } catch (error) {
+        setAccountError(error instanceof Error ? error.message : '登录失败')
+      } finally {
+        setAccountBusy(false)
+      }
+    },
+    [],
+  )
+
+  const logout = useCallback(async () => {
+    setAccountBusy(true)
+    try {
+      await kernel.send({ op: 'account_logout' })
+      setAccount(null)
+    } catch (error) {
+      setAccountError(error instanceof Error ? error.message : '退出失败')
+    } finally {
+      setAccountBusy(false)
+    }
+  }, [])
 
   return (
     <div className="flex h-full w-full overflow-hidden bg-bg text-fg">
@@ -163,7 +209,7 @@ export function App() {
         engines={snapshot?.engines ?? []}
         page={page}
         serverConnected={false}
-        loggedIn={loggedIn}
+        loggedIn={account !== null}
         onNavigate={setPage}
       />
 
@@ -187,16 +233,17 @@ export function App() {
         ) : null}
         {page.kind === 'login' ? (
           <LoginPage
-            loggedIn={loggedIn}
-            serverConnected={false}
-            onLogin={() => setAccount(true)}
-            onLogout={() => setAccount(false)}
+            account={account}
+            busy={accountBusy}
+            error={accountError}
+            onLogin={login}
+            onLogout={logout}
           />
         ) : null}
         {page.kind === 'settings' ? (
           <SettingsPage
             version={snapshot?.version ?? ''}
-            loggedIn={loggedIn}
+            account={account}
             serverConnected={false}
             theme={theme}
             onThemeChange={chooseTheme}

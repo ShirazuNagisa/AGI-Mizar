@@ -134,6 +134,27 @@ export interface UsageOverview {
   days: UsageDay[]
 }
 
+export interface AccountDevice {
+  id: string
+  name: string
+  model: string
+  /** `ios`, `macos`, … as the device reported it. */
+  platform: string
+  loginAt: number
+  lastSeenAt: number
+  /** Whether this is the device that asked. */
+  current: boolean
+}
+
+export interface AccountUser {
+  id: string
+  username: string
+  email: string | null
+  plan: 'free' | 'paid'
+  paidUntil: number | null
+  devices: AccountDevice[]
+}
+
 export interface StateSnapshot {
   version: string
   engines: EngineStatus[]
@@ -236,6 +257,9 @@ export type Command =
   | { op: 'pairing'; refresh: boolean }
   | { op: 'usage_overview' }
   | { op: 'set_theme'; theme: 'system' | 'light' | 'dark' }
+  | { op: 'account' }
+  | { op: 'account_login'; identifier: string; password: string }
+  | { op: 'account_logout' }
   | { op: 'ping' }
 
 export interface ApiError {

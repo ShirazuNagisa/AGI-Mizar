@@ -20,6 +20,7 @@
 //! be a second truth. The one exception is the window's own preferences — a
 //! theme name — which belongs to this app rather than to any engine.
 
+pub mod account;
 pub mod endpoint;
 pub mod server;
 
@@ -34,6 +35,7 @@ use agi_protocol::api::{
 use agi_protocol::domain::{Interaction, Record, Session, SessionKey};
 use agi_protocol::engine::EngineId;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
 /// How many events a slow subscriber may fall behind before it is told it missed
@@ -93,6 +95,8 @@ pub struct Core {
     preferences: RwLock<Preferences>,
     /// Where preferences are written, once a launch tells us.
     preferences_path: RwLock<Option<PathBuf>>,
+    /// The relay account this window is signed in to.
+    account: account::AccountService,
 }
 
 impl Core {
@@ -107,6 +111,7 @@ impl Core {
             pairing: RwLock::new(None),
             preferences: RwLock::new(Preferences::default()),
             preferences_path: RwLock::new(None),
+            account: account::AccountService::new(account_base()),
         })
     }
 
@@ -134,6 +139,26 @@ impl Core {
             .preferences_path
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(path);
+    }
+
+    /// Read the account file and point the service at it.
+    pub fn load_account(&self, path: PathBuf) {
+        self.account.load(path);
+    }
+
+    /// The account this window is signed in to, when it is.
+    pub fn account_user(&self) -> Option<agi_protocol::account::AccountUser> {
+        self.account.user()
+    }
+
+    /// Refresh the account in the background, at launch.
+    pub fn refresh_account_in_background(self: &Arc<Self>) {
+        let core = Arc::clone(self);
+        tokio::spawn(async move {
+            if let Err(error) = core.account.refresh().await {
+                tracing::debug!("account: could not refresh at launch — {error:?}");
+            }
+        });
     }
 
     /// The appearance the window should start with.
@@ -410,6 +435,35 @@ impl Core {
     pub async fn dispatch(&self, command: Command) -> CommandResponse {
         match command {
             Command::State => CommandResponse::ok(self.snapshot()),
+            Command::Account => {
+                // A reading from the relay is better than a cached one, but a
+                // launch with no network must still draw the last known account.
+                match self.account.refresh().await {
+                    Ok(Some(user)) => CommandResponse::ok(json!({ "user": user })),
+                    Ok(None) => CommandResponse::ok(json!({ "user": Value::Null })),
+                    Err(error) if self.account.signed_in() => {
+                        let cached = self.account.user();
+                        if cached.is_some() {
+                            tracing::debug!("account: serving the last reading — {error:?}");
+                            CommandResponse::ok(json!({ "user": cached }))
+                        } else {
+                            CommandResponse::error(error.code, error.message)
+                        }
+                    }
+                    Err(error) => CommandResponse::error(error.code, error.message),
+                }
+            }
+            Command::AccountLogin {
+                identifier,
+                password,
+            } => match self.account.login(&identifier, &password).await {
+                Ok(user) => CommandResponse::ok(json!({ "user": user })),
+                Err(error) => CommandResponse::error(error.code, error.message),
+            },
+            Command::AccountLogout => match self.account.logout().await {
+                Ok(()) => CommandResponse::done(),
+                Err(error) => CommandResponse::error(error.code, error.message),
+            },
             Command::SetTheme { theme } => {
                 if !valid_theme(&theme) {
                     return CommandResponse::error("MALFORMED_FRAME", "unknown theme");
@@ -634,6 +688,15 @@ impl Core {
 pub trait PairingSource: Send + Sync {
     /// The code to show, refreshed when asked.
     fn pairing_view(&self, refresh: bool) -> agi_protocol::api::PairingView;
+}
+
+/// Where the account service lives: the official relay unless a launch says
+/// otherwise.
+fn account_base() -> String {
+    std::env::var("AGI_ACCOUNT_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| account::OFFICIAL_ACCOUNT_URL.to_string())
 }
 
 /// Turn an engine failure into the API's error shape.

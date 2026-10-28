@@ -10,6 +10,7 @@
 //! Nothing here performs I/O. That is deliberate: this crate is the contract, and
 //! a contract that can open a socket is a contract that is hard to test.
 
+pub mod account;
 pub mod api;
 pub mod b64;
 pub mod catalog;
@@ -18,6 +19,7 @@ pub mod engine;
 pub mod link;
 pub mod usage;
 
+pub use account::{AccountDevice, AccountUser};
 pub use domain::{
     AttachmentKind, Interaction, InteractionKind, PromptAttachment, Record, RecordKind, Session,
     SessionKey, ToolInfo,

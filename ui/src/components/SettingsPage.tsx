@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { Kernel, PairingView } from '../api'
+import type { AccountUser, Kernel, PairingView } from '../api'
 import type { ThemePreference } from '../theme'
 import { ChevronIcon } from '../icons'
 import { Button } from './ui/button'
@@ -9,7 +9,7 @@ import { cn } from '../lib/utils'
 
 interface SettingsPageProps {
   version: string
-  loggedIn: boolean
+  account: AccountUser | null
   serverConnected: boolean
   theme: ThemePreference
   onThemeChange: (theme: ThemePreference) => void
@@ -26,7 +26,7 @@ interface SettingsPageProps {
  */
 export function SettingsPage({
   version,
-  loggedIn,
+  account,
   serverConnected,
   theme,
   onThemeChange,
@@ -39,18 +39,16 @@ export function SettingsPage({
         <div className="mx-auto w-full max-w-[720px] px-8 py-6">
           <Section title="设备">
             <Group title="AGI Mizar 桌面端">
-              {loggedIn ? (
-                <Empty>这台电脑</Empty>
-              ) : (
-                <Empty>登录后可查看同一账户下的桌面端</Empty>
-              )}
+              <DeviceList
+                devices={account?.devices.filter((device) => device.platform !== 'ios') ?? []}
+                empty={account === null ? '登录后可查看同一账户下的桌面端' : '这个账户下还没有桌面端'}
+              />
             </Group>
             <Group title="Mizar 手机端">
-              {loggedIn ? (
-                <Empty>这个账户下还没有手机</Empty>
-              ) : (
-                <Empty>登录后可查看同一账户下的手机</Empty>
-              )}
+              <DeviceList
+                devices={account?.devices.filter((device) => device.platform === 'ios') ?? []}
+                empty={account === null ? '登录后可查看同一账户下的手机' : '这个账户下还没有手机'}
+              />
             </Group>
           </Section>
 
@@ -66,7 +64,7 @@ export function SettingsPage({
                 {serverConnected ? '已连接' : '未连接'}
               </span>
               <span className="text-[12px] text-muted">
-                {loggedIn ? '中继由账户决定' : '登录后自动连接'}
+                {account === null ? '登录后自动连接' : '中继由账户决定'}
               </span>
             </div>
           </Section>
@@ -125,6 +123,45 @@ function Group({ title, children }: { title: string; children: React.ReactNode }
 
 function Empty({ children }: { children: React.ReactNode }) {
   return <p className="text-[13px] text-muted">{children}</p>
+}
+
+/** The devices under the account, split by the group they are drawn in. */
+function DeviceList({
+  devices,
+  empty,
+}: {
+  devices: import('../api').AccountDevice[]
+  empty: string
+}) {
+  if (devices.length === 0) return <Empty>{empty}</Empty>
+  return (
+    <div className="flex flex-col gap-2">
+      {devices.map((device) => (
+        <div key={device.id} className="flex items-center gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5 text-[13px] text-fg">
+              <span className="truncate">{device.name}</span>
+              {device.current ? (
+                <span className="rounded bg-surface-2 px-1 text-[10px] text-muted">本机</span>
+              ) : null}
+            </div>
+            <div className="truncate text-[11px] text-muted">
+              {device.model} · 最近 {relative(device.lastSeenAt)}
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function relative(at: number): string {
+  const minutes = Math.round((Date.now() - at) / 60_000)
+  if (minutes < 1) return '刚刚'
+  if (minutes < 60) return `${minutes} 分钟前`
+  const hours = Math.round(minutes / 60)
+  if (hours < 24) return `${hours} 小时前`
+  return new Date(at).toLocaleDateString('zh-CN')
 }
 
 function AboutRow({ label, value }: { label: string; value: string }) {
