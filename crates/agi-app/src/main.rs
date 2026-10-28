@@ -21,6 +21,11 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(target_os = "macos")]
+mod login_item;
+#[cfg(target_os = "macos")]
+mod tray;
+
 use agi_boot::{boot, BootConfig};
 
 /// The Dock's mark, drawn from the same two images the bundle carries.
@@ -133,7 +138,12 @@ fn main() {
                     .traffic_light_position(tauri::LogicalPosition::new(18.0, 20.0));
             }
 
-            builder.build()?;
+            let window = builder.build()?;
+
+            // The window is the product; the status item is what keeps it
+            // reachable after it is closed.
+            #[cfg(target_os = "macos")]
+            tray::install(app.handle(), &window)?;
 
             // macOS draws the bundle's one icon; the window's theme (which can
             // differ from the system's) picks which of the two this is.

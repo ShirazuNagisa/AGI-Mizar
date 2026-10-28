@@ -17,10 +17,11 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 agi-boot = { workspace = true }
 agi-core = { workspace = true }
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tokio = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6" }
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSAppearance", "NSImage"] }
 objc2-foundation = { version = "0.3", features = ["NSData", "NSString"] }
+libc = "0.2"

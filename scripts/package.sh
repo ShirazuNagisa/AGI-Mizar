@@ -43,6 +43,21 @@ if [[ "${1:-}" == "--universal" ]]; then
   TARGET_ARGS=(--target universal-apple-darwin)
 fi
 
+# Signing and notarization, when the machine can do them.
+#
+# Tauri's bundler signs and notarizes on its own when these are set. Checking
+# here turns "the DMG looked fine" into a sentence about what it actually is.
+if [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
+  if ! security find-identity -v -p codesigning | grep -qF "$APPLE_SIGNING_IDENTITY"; then
+    echo "warning: APPLE_SIGNING_IDENTITY is not in this keychain; the bundle will be ad-hoc signed" >&2
+  fi
+  if [[ -z "${APPLE_ID:-}" || -z "${APPLE_PASSWORD:-}" || -z "${APPLE_TEAM_ID:-}" ]]; then
+    echo "warning: Apple ID credentials are incomplete; the bundle will be signed but not notarized" >&2
+  fi
+else
+  echo "note: no APPLE_SIGNING_IDENTITY; the bundle is ad-hoc signed and runs only on this Mac" >&2
+fi
+
 cargo tauri build "${TARGET_ARGS[@]}"
 
 cat <<'NEXT'
