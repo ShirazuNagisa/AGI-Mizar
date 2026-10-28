@@ -17,6 +17,25 @@ use tauri_plugin_updater::UpdaterExt;
 /// How often a long-running window looks again.
 const INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
 
+/// Record one line about the updater, somewhere a person can read it after the
+/// window is gone. The app is usually launched by Finder, so stderr goes nowhere.
+fn note(line: &str) {
+    eprintln!("AGI update: {line}");
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let directory = std::path::Path::new(&home).join("Library/Logs/AGI Mizar");
+    let _ = std::fs::create_dir_all(&directory);
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(directory.join("update.log"))
+    {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
 /// The tray's "Check for Updates…", which has to hand an async job to a sync
 /// menu event.
 pub fn spawn_check(app: AppHandle) {
@@ -40,7 +59,7 @@ pub async fn check(app: AppHandle) {
     let updater = match app.updater() {
         Ok(updater) => updater,
         Err(error) => {
-            eprintln!("AGI update: the updater is not available — {error}");
+            note(&format!("the updater is not available — {error}"));
             return;
         }
     };
@@ -49,15 +68,16 @@ pub async fn check(app: AppHandle) {
     let update = match updater.check().await {
         Ok(Some(update)) => update,
         Ok(None) => {
-            eprintln!("AGI update: this is the newest version");
+            note("this is the newest version");
             return;
         }
         Err(error) => {
-            eprintln!("AGI update: the check failed — {error}");
+            note(&format!("the check failed — {error}"));
             return;
         }
     };
     let version = update.version.clone();
+    note(&format!("{version} is available"));
     let notes = update.body.clone().unwrap_or_default();
     let message = if notes.trim().is_empty() {
         format!("AGI Mizar {version} is available. Install it now?")
@@ -73,6 +93,7 @@ pub async fn check(app: AppHandle) {
             "Later".to_string(),
         ))
         .show(move |install| {
+            note(&format!("the prompt answered {install}"));
             if install {
                 tauri::async_runtime::spawn(install_latest(handle.clone()));
             }
@@ -93,7 +114,7 @@ async fn install_latest(app: AppHandle) {
     match installed {
         Ok(()) => app.restart(),
         Err(error) => {
-            eprintln!("AGI Mizar: the update was not installed — {error}");
+            note(&format!("the update was not installed — {error}"));
         }
     }
 }
