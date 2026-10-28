@@ -58,6 +58,13 @@ else
   echo "note: no APPLE_SIGNING_IDENTITY; the bundle is ad-hoc signed and runs only on this Mac" >&2
 fi
 
+# The updater's signature is what makes a downloaded bundle trusted; without the
+# key the CLI refuses to produce `latest.json`'s artifacts, which is the correct
+# failure for a release but not for a local build.
+if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" && -z "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]]; then
+  echo "note: no TAURI_SIGNING_PRIVATE_KEY; updater artifacts will not be produced" >&2
+fi
+
 cargo tauri build "${TARGET_ARGS[@]}"
 
 cat <<'NEXT'

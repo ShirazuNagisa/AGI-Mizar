@@ -25,6 +25,7 @@
 mod login_item;
 #[cfg(target_os = "macos")]
 mod tray;
+mod updates;
 
 use agi_boot::{boot, BootConfig};
 
@@ -107,6 +108,8 @@ fn main() {
     let _kernel = booted;
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         // A menu bar of File/Edit/View is the default, and it is not what this
         // window is: it has one screen for each agent and nothing to open. macOS
         // still needs an application menu for About and Quit.
@@ -144,6 +147,7 @@ fn main() {
             // reachable after it is closed.
             #[cfg(target_os = "macos")]
             tray::install(app.handle(), &window)?;
+            updates::watch(app.handle().clone());
 
             // macOS draws the bundle's one icon; the window's theme (which can
             // differ from the system's) picks which of the two this is.

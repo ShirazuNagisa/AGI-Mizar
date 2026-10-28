@@ -25,9 +25,10 @@ pub fn install(app: &AppHandle, window: &WebviewWindow) -> tauri::Result<()> {
         login_item::is_enabled(),
         None::<&str>,
     )?;
+    let update = MenuItemBuilder::with_id("update", "Check for Updates…").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit AGI Mizar").build(app)?;
     let menu = MenuBuilder::new(app)
-        .items(&[&show, &at_login, &quit])
+        .items(&[&show, &at_login, &update, &quit])
         .build()?;
 
     let icon = app
@@ -48,6 +49,7 @@ pub fn install(app: &AppHandle, window: &WebviewWindow) -> tauri::Result<()> {
             let at_login = at_login.clone();
             move |app, event| match event.id.as_ref() {
                 "show" => show_window(app),
+                "update" => crate::updates::spawn_check(app.clone()),
                 "quit" => app.exit(0),
                 "login" => {
                     let enabled = !at_login.is_checked().unwrap_or(false);
