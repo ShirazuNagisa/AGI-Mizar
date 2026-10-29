@@ -127,11 +127,23 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
 
     // Claude Code is always hosted: with no `claude` executable there are still
     // transcripts to read, and a list is useful without the ability to prompt.
-    let claude = ClaudeEngine::from_environment();
-    match which(&std::env::var("AGI_CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string())) {
-        Some(path) => tracing::info!("claude at {}", path.display()),
-        None => tracing::info!("claude not found — transcripts readable, prompts are not"),
-    }
+    let claude_binary = std::env::var("AGI_CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string());
+    let claude = match which(&claude_binary) {
+        Some(path) => {
+            tracing::info!("claude at {}", path.display());
+            // The discovered path, not the bare name: a Finder-launched app's
+            // PATH is launchd's, and "claude" would not resolve there even
+            // though the file exists.
+            agi_engine_claude::ClaudeEngine::new(
+                agi_engine_claude::paths::projects_dir(),
+                path.to_string_lossy().to_string(),
+            )
+        }
+        None => {
+            tracing::info!("claude not found — transcripts readable, prompts are not");
+            ClaudeEngine::from_environment()
+        }
+    };
     engines.push(claude.clone());
 
     let core = Core::new(engines);
