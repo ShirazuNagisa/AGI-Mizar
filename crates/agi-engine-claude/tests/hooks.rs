@@ -370,3 +370,59 @@ async fn activity_describes_the_latest_turns_tools() {
         .iter()
         .any(|entry| entry.kind == agi_protocol::domain::ActivityKind::Command));
 }
+
+#[tokio::test]
+async fn stats_count_turns_steps_and_tokens() {
+    let dir = tempfile::tempdir().unwrap();
+    write_transcript(
+        dir.path(),
+        "-tmp-work",
+        "dddd1111-2222-3333-4444-555566667777",
+        false,
+    );
+    let engine = engine_over(dir.path());
+    let key = SessionKey::new(EngineId::Claude, "dddd1111-2222-3333-4444-555566667777");
+
+    let stats = engine.stats(&key).await.unwrap();
+    assert_eq!(stats.turns, 1);
+    assert!(stats.steps >= 2, "two assistant lines, tool call and reply");
+    // No usage in the fixture, so no tokens are invented either.
+    assert_eq!(stats.input_tokens, 0);
+}
+
+#[tokio::test]
+async fn deliverables_name_the_files_the_model_wrote() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("-tmp-work");
+    std::fs::create_dir_all(&project).unwrap();
+    let session = "eeee1111-2222-3333-4444-555566667777";
+    let mut text = String::new();
+    text.push_str(&line(json!({
+        "type": "user",
+        "timestamp": "2026-10-27T05:00:00Z",
+        "sessionId": session,
+        "cwd": "/tmp/work",
+        "message": { "role": "user", "content": [{ "type": "text", "text": "write the file" }] }
+    })));
+    text.push_str(&line(json!({
+        "type": "assistant",
+        "timestamp": "2026-10-27T05:00:02Z",
+        "message": {
+            "role": "assistant",
+            "model": "claude-opus-4",
+            "content": [{
+                "type": "tool_use",
+                "id": "toolu_2",
+                "name": "Write",
+                "input": { "file_path": "/tmp/work/out.txt", "content": "hi" }
+            }]
+        }
+    })));
+    std::fs::write(project.join(format!("{session}.jsonl")), text).unwrap();
+
+    let engine = engine_over(dir.path());
+    let key = SessionKey::new(EngineId::Claude, session);
+    let files = engine.deliverables(&key).await.unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].path, "out.txt");
+}

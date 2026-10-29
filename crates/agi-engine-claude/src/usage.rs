@@ -522,3 +522,82 @@ mod tests {
         assert!(days(Path::new("/nonexistent/agi-mizar-claude")).is_empty());
     }
 }
+
+/// What one transcript says about its own session: turns, steps and tokens.
+///
+/// Claude Code writes the provider's usage on every assistant line but no
+/// durations, so time in the model and in tools is not something this side can
+/// report — a zero here means "not written down", not "instant".
+pub fn session_facts(text: &str) -> (u32, u32, u64, u64) {
+    use std::collections::HashSet;
+
+    let mut turns = 0u32;
+    let mut steps = 0u32;
+    let mut input = 0u64;
+    let mut output = 0u64;
+    let mut seen = HashSet::new();
+    for line in text.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        match value.get("type").and_then(serde_json::Value::as_str) {
+            Some("user") => {
+                let message = value.get("message");
+                if is_tool_result(message) {
+                    continue;
+                }
+                if says_something(message) {
+                    turns += 1;
+                }
+            }
+            Some("assistant") => {
+                let message = value.get("message");
+                // A retried request repeats the same message id; counting it
+                // twice would bill the operator for work done once.
+                let id = message
+                    .and_then(|message| message.get("id"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if !id.is_empty() && !seen.insert(id) {
+                    continue;
+                }
+                steps += 1;
+                let (line_in, line_out) = usage_of(message);
+                input += line_in;
+                output += line_out;
+            }
+            _ => {}
+        }
+    }
+    (turns, steps, input, output)
+}
+
+#[cfg(test)]
+mod session_fact_tests {
+    use super::*;
+
+    #[test]
+    fn counts_a_retried_message_once() {
+        let text = concat!(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"id":"m1","role":"assistant","content":[],"usage":{"input_tokens":10,"output_tokens":4}}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"id":"m1","role":"assistant","content":[],"usage":{"input_tokens":10,"output_tokens":4}}}"#,
+            "\n"
+        );
+        assert_eq!(session_facts(text), (1, 1, 10, 4));
+    }
+
+    #[test]
+    fn a_tool_result_is_not_a_turn() {
+        let text = concat!(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"go"}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"ok"}]}}"#,
+            "\n"
+        );
+        assert_eq!(session_facts(text).0, 1);
+    }
+}

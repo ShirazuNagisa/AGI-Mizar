@@ -856,6 +856,96 @@ impl Engine for ClaudeEngine {
             .ok_or_else(|| EngineError::upstream("the transcript does not name a cwd"))
     }
 
+    /// What this session has cost so far.
+    ///
+    /// The tokens and the counts come from the transcript; Claude Code records
+    /// no durations, so the two time fields stay zero rather than being invented
+    /// from wall-clock gaps that would blame the model for a slow tool.
+    async fn stats(
+        &self,
+        session: &SessionKey,
+    ) -> Result<agi_protocol::domain::SessionStats, EngineError> {
+        if session.engine != EngineId::Claude {
+            return Err(EngineError::UnknownSession(session.clone()));
+        }
+        let file = self
+            .transcript_of(session.raw())
+            .ok_or_else(|| EngineError::UnknownSession(session.clone()))?;
+        let text = std::fs::read_to_string(&file.path).map_err(|error| {
+            EngineError::upstream(format!("could not read the transcript: {error}"))
+        })?;
+        let (turns, steps, input, output) = crate::usage::session_facts(&text);
+        Ok(agi_protocol::domain::SessionStats {
+            turns,
+            steps,
+            llm_ms: 0,
+            tool_ms: 0,
+            input_tokens: input,
+            output_tokens: output,
+        })
+    }
+
+    /// Files the model wrote or edited, folded from its tool calls.
+    ///
+    /// Claude names the file in the tool's own arguments (`file_path`, and
+    /// `notebook_path` for notebooks); the path is made relative to the session
+    /// directory, which is what the file endpoints accept.
+    async fn deliverables(
+        &self,
+        session: &SessionKey,
+    ) -> Result<Vec<agi_protocol::domain::DeliveredFile>, EngineError> {
+        let records = self.records(session, 500, None).await?;
+        let cwd = self.session_cwd(session).await.ok();
+        let mut files: Vec<agi_protocol::domain::DeliveredFile> = Vec::new();
+        for record in records {
+            if record.kind != RecordKind::ToolCall {
+                continue;
+            }
+            let Some(tool) = record.tool.as_ref() else {
+                continue;
+            };
+            if !matches!(
+                tool.name.as_str(),
+                "Write" | "Edit" | "MultiEdit" | "NotebookEdit"
+            ) {
+                continue;
+            }
+            let Some(arguments) = tool.arguments.as_deref() else {
+                continue;
+            };
+            let Ok(parsed) = serde_json::from_str::<serde_json::Value>(arguments) else {
+                continue;
+            };
+            let Some(path) = parsed
+                .get("file_path")
+                .or_else(|| parsed.get("notebook_path"))
+                .and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            let mut relative = path.to_string();
+            if let Some(cwd) = &cwd {
+                if let Ok(rest) = std::path::Path::new(path).strip_prefix(cwd) {
+                    relative = rest.to_string_lossy().to_string();
+                }
+            }
+            if files.iter().any(|file| file.path == relative) {
+                continue;
+            }
+            let name = std::path::Path::new(&relative)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&relative)
+                .to_string();
+            files.push(agi_protocol::domain::DeliveredFile {
+                path: relative,
+                name,
+                description: None,
+            });
+        }
+        Ok(files)
+    }
+
     /// Every day of activity in every transcript.
     ///
     /// A directory read rather than a call: Claude Code writes the usage the
