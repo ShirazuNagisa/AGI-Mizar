@@ -339,3 +339,21 @@ async fn reports_the_files_a_turn_changed() {
     assert_eq!(files[0].path, "src/a.rs");
     assert_eq!(files[0].name, "a.rs");
 }
+
+#[tokio::test]
+async fn groups_threads_by_the_directory_they_work_in() {
+    let h = start();
+    wait_connected(&h.engine).await;
+
+    let workspaces = h.engine.workspaces().await.unwrap();
+    let work = workspaces
+        .iter()
+        .find(|workspace| workspace.path == "/tmp/work")
+        .expect("th_1 works in /tmp/work");
+    assert_eq!(work.name.as_deref(), Some("work"));
+    assert_eq!(
+        work.session_ids.as_deref(),
+        Some(&["codex:th_1".to_string()][..]),
+        "only the thread that names a cwd is filed"
+    );
+}

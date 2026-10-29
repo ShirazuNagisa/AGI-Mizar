@@ -26,7 +26,7 @@ use std::time::Duration;
 use agi_engine::{Answer, Engine, EngineError, EngineEvent};
 use agi_protocol::domain::{
     ActivityEntry, ActivityKind, DeliveredFile, Interaction, InteractionKind, ModelInfo,
-    PermissionPreset, Record, RecordKind, Session, SessionKey,
+    PermissionPreset, Record, RecordKind, Session, SessionKey, Workspace,
 };
 use agi_protocol::engine::{Capabilities, EngineId};
 use async_trait::async_trait;
@@ -680,6 +680,39 @@ impl Engine for CodexEngine {
     /// page at a time, so a year of usage cannot be asked for over RPC. The
     /// rollouts under `~/.codex/sessions` are the durable record of what was
     /// billed, and they are read from disk instead.
+    /// Groups this host's threads by the directory they work in.
+    ///
+    /// Codex has no workspace registry, but a thread always knows its cwd and
+    /// that is the grouping the operator already organises by. The path is the
+    /// id: it is stable across launches, unlike anything this side could mint.
+    async fn workspaces(&self) -> Result<Vec<Workspace>, EngineError> {
+        let sessions = self.sessions().await?;
+        let mut groups: Vec<Workspace> = Vec::new();
+        for session in sessions {
+            let Some(cwd) = session.cwd.clone().filter(|cwd| !cwd.is_empty()) else {
+                continue;
+            };
+            let name = std::path::Path::new(&cwd)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+                .map(str::to_string);
+            match groups.iter_mut().find(|group| group.path == cwd) {
+                Some(group) => group
+                    .session_ids
+                    .get_or_insert_with(Vec::new)
+                    .push(session.key.to_string()),
+                None => groups.push(Workspace {
+                    id: cwd.clone(),
+                    path: cwd,
+                    name,
+                    session_ids: Some(vec![session.key.to_string()]),
+                }),
+            }
+        }
+        Ok(groups)
+    }
+
     /// Files the model changed, from the patch updates Codex volunteers.
     ///
     /// Paths are made relative to the thread's working directory before they are
