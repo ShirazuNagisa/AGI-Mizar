@@ -114,10 +114,13 @@ fn main() {
     let booted = runtime
         .block_on(boot(BootConfig {
             endpoint_file: None,
-            // Installing hooks edits a file the operator owns; a first launch
-            // asks, it does not decide. The daemon's flag is the way in for now.
-            install_claude_hooks: std::env::args()
-                .any(|argument| argument == "--install-claude-hooks"),
+            // The hooks are how an approval reaches this window at all: without
+            // them Claude Code runs tools unobserved. The installer is additive,
+            // backed up and reversible, so the app installs them by default and
+            // an operator who wants to manage the file themselves passes
+            // `--no-install-claude-hooks`.
+            install_claude_hooks: !std::env::args()
+                .any(|argument| argument == "--no-install-claude-hooks"),
             relay_url: std::env::var("AGI_RELAY_URL").ok(),
             relay_token: std::env::var("AGI_RELAY_TOKEN").ok(),
         }))

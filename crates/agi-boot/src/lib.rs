@@ -277,7 +277,13 @@ fn shim_path() -> Option<PathBuf> {
         "agi-mizar-hook"
     };
     let candidate = directory.join(name);
-    candidate.is_file().then_some(candidate)
+    if candidate.is_file() {
+        return Some(candidate);
+    }
+    // A packaged build signs and notarizes resources with the bundle, so that is
+    // where the shim lives when it is not beside the executable.
+    let resource = directory.join("..").join("Resources").join(name);
+    resource.is_file().then_some(resource)
 }
 
 /// 32 bytes of randomness, hex encoded.

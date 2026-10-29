@@ -84,10 +84,26 @@ pub fn install(settings: &Path, shim: &Path) -> io::Result<InstallOutcome> {
             ));
         };
 
-        let already = entries.iter().any(contains_marker);
-        if already {
-            present += 1;
-            continue;
+        let desired = command(event);
+        if let Some(existing) = entries.iter_mut().find(|entry| contains_marker(entry)) {
+            let hooks = existing
+                .get_mut("hooks")
+                .and_then(Value::as_array_mut)
+                .filter(|hooks| !hooks.is_empty());
+            if let Some(hooks) = hooks {
+                let current = hooks[0].get("command").and_then(Value::as_str);
+                if current == Some(desired.as_str()) {
+                    present += 1;
+                } else {
+                    // The marker is ours, but it points at a shim from another
+                    // build (a debug tree, an older bundle). Rewriting the
+                    // command is what keeps the operator's approvals reaching
+                    // the app they are looking at.
+                    hooks[0]["command"] = json!(desired);
+                    added += 1;
+                }
+                continue;
+            }
         }
 
         let mut entry = Map::new();
@@ -257,6 +273,25 @@ mod tests {
         assert_eq!(second.added, 0);
         assert_eq!(second.present, 8);
         assert!(second.backup.is_none(), "no change means no backup");
+    }
+
+    #[test]
+    fn a_moved_shim_rewrites_the_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+
+        install(&settings, &shim()).unwrap();
+        let moved = PathBuf::from("/Users/example/target/debug/agi-mizar-hook");
+        let second = install(&settings, &moved).unwrap();
+        assert_eq!(second.added, HOOK_EVENTS.len());
+        assert_eq!(second.present, 0);
+
+        let root: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert!(root["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("target/debug/agi-mizar-hook"));
     }
 
     #[test]
