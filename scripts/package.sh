@@ -31,9 +31,18 @@ MISSING
   exit 1
 fi
 
-# The hook shim ships beside the app: the installer writes an absolute path to it
-# into ~/.claude/settings.json, so it has to exist where the bundle puts it.
+# The hook shim ships inside the app: the installer writes an absolute path to
+# it into ~/.claude/settings.json, so it has to exist where the bundle puts it.
+# It goes in as a Tauri resource — resources are signed and notarized with the
+# bundle, which a file copied in afterwards would not be.
 cargo build --release -p agi-hook-shim
+SHIM="target/release/agi-mizar-hook"
+if [[ "${1:-}" == "--universal" ]]; then
+  SHIM="target/universal-apple-darwin/release/agi-mizar-hook"
+fi
+mkdir -p crates/agi-app/resources
+cp "$SHIM" crates/agi-app/resources/agi-mizar-hook
+chmod +x crates/agi-app/resources/agi-mizar-hook
 
 TARGET_ARGS=()
 if [[ "${1:-}" == "--universal" ]]; then
@@ -65,7 +74,8 @@ if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" && -z "${TAURI_SIGNING_PRIVATE_KEY_PAT
   echo "note: no TAURI_SIGNING_PRIVATE_KEY; updater artifacts will not be produced" >&2
 fi
 
-cargo tauri build "${TARGET_ARGS[@]}"
+cargo tauri build "${TARGET_ARGS[@]}" \
+  --config '{"bundle":{"resources":{"resources/agi-mizar-hook":"agi-mizar-hook"}}}'
 
 # The bundler notarizes the .app, but the disk image around it is ours to
 # submit. A DMG that is signed and not notarized is still rejected by

@@ -282,7 +282,7 @@ fn shim_path() -> Option<PathBuf> {
     }
     // A packaged build signs and notarizes resources with the bundle, so that is
     // where the shim lives when it is not beside the executable.
-    let resource = directory.join("..").join("Resources").join(name);
+    let resource = directory.parent()?.join("Resources").join(name);
     resource.is_file().then_some(resource)
 }
 
