@@ -60,6 +60,11 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     return
   }
 
+  if (message.id === 'srv-2' && message.method === undefined) {
+    remember({ question_answered: message.result })
+    return
+  }
+
   switch (message.method) {
     case 'initialize':
       send({
@@ -142,6 +147,18 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         threadId: message.params.threadId,
         turn: { id: 't_new', status: 'inProgress' },
       })
+      note('item/fileChange/patchUpdated', {
+        threadId: message.params.threadId,
+        turnId: 't_new',
+        itemId: 'i3',
+        changes: [
+          {
+            path: '/Users/example/project/src/a.rs',
+            kind: 'update',
+            diff: '@@ -1 +1 @@',
+          },
+        ],
+      })
       // The approval a real Codex asks for before running a shell command.
       send({
         id: 'srv-1',
@@ -150,6 +167,24 @@ createInterface({ input: process.stdin }).on('line', (line) => {
           threadId: message.params.threadId,
           itemId: 'c9',
           reason: 'wants to run rm -rf build',
+        },
+      })
+      send({
+        id: 'srv-2',
+        method: 'item/tool/requestUserInput',
+        params: {
+          threadId: message.params.threadId,
+          turnId: 't_new',
+          itemId: 'i2',
+          isBlocking: true,
+          questions: [
+            {
+              id: 'q1',
+              header: 'Pick one',
+              question: 'Which build should run?',
+              options: [{ label: 'Alpha' }, { label: 'Beta' }],
+            },
+          ],
         },
       })
       return

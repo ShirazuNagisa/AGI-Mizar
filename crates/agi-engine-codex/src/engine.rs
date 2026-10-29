@@ -25,8 +25,8 @@ use std::time::Duration;
 
 use agi_engine::{Answer, Engine, EngineError, EngineEvent};
 use agi_protocol::domain::{
-    ActivityEntry, ActivityKind, Interaction, InteractionKind, ModelInfo, PermissionPreset, Record,
-    RecordKind, Session, SessionKey,
+    ActivityEntry, ActivityKind, DeliveredFile, Interaction, InteractionKind, ModelInfo,
+    PermissionPreset, Record, RecordKind, Session, SessionKey,
 };
 use agi_protocol::engine::{Capabilities, EngineId};
 use async_trait::async_trait;
@@ -60,6 +60,8 @@ struct PendingApproval {
     method: String,
     /// The request's `permissions`, echoed back when a permissions ask is granted.
     permissions: Value,
+    /// For a question batch, the ids to answer, in the order asked.
+    questions: Option<Vec<String>>,
 }
 
 struct State {
@@ -90,6 +92,8 @@ pub struct CodexEngine {
     next_local: AtomicU64,
     /// Parsed rollouts, per file, so a fold reads only what changed.
     usage_cache: Mutex<agi_engine::usage::ScanCache>,
+    /// Files the running turns changed, by thread, newest last.
+    deliverables: Mutex<HashMap<String, Vec<DeliveredFile>>>,
 }
 
 impl CodexEngine {
@@ -103,6 +107,7 @@ impl CodexEngine {
             approvals: Mutex::new(HashMap::new()),
             next_local: AtomicU64::new(1),
             usage_cache: Mutex::new(agi_engine::usage::ScanCache::new()),
+            deliverables: Mutex::new(HashMap::new()),
         })
     }
 
@@ -258,6 +263,43 @@ impl CodexEngine {
                     self.touch(id);
                 }
             }
+            "item/fileChange/patchUpdated" => {
+                if let Some(id) = thread_id {
+                    let changes = params
+                        .get("changes")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut known = self
+                        .deliverables
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let files = known.entry(id.to_string()).or_default();
+                    for change in changes {
+                        let Some(path) = change.get("path").and_then(Value::as_str) else {
+                            continue;
+                        };
+                        let name = std::path::Path::new(path)
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or(path)
+                            .to_string();
+                        let description = change
+                            .get("kind")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                        if let Some(existing) = files.iter_mut().find(|file| file.path == path) {
+                            existing.description = description;
+                            continue;
+                        }
+                        files.push(DeliveredFile {
+                            path: path.to_string(),
+                            name,
+                            description,
+                        });
+                    }
+                }
+            }
             "thread/name/updated"
             | "thread/status/changed"
             | "thread/started"
@@ -312,9 +354,94 @@ impl CodexEngine {
         };
         self.emit(EngineEvent::SessionUpdated(session));
     }
+    /// A tool that wants the operator's words, not a yes or no.
+    ///
+    /// Codex waits on the JSON-RPC id until the answers come back, so the
+    /// questions are kept in the same pending map as approvals: both are a
+    /// request the operator has to settle.
+    fn on_question_request(self: &Arc<Self>, id: Value, params: Value) {
+        let Some(thread_id) = params.get("threadId").and_then(Value::as_str) else {
+            let server = Arc::clone(&self.server);
+            tokio::spawn(async move {
+                let _ = server
+                    .respond_error(id, -32602, "requestUserInput without a threadId")
+                    .await;
+            });
+            return;
+        };
+
+        let mut ids = Vec::new();
+        let mut questions = Vec::new();
+        for raw in params
+            .get("questions")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+        {
+            let Some(question_id) = raw.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            ids.push(question_id.to_string());
+            questions.push(agi_protocol::domain::Question {
+                id: question_id.to_string(),
+                text: raw
+                    .get("question")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                header: raw
+                    .get("header")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                detail: None,
+                options: raw
+                    .get("options")
+                    .and_then(Value::as_array)
+                    .map(|options| {
+                        options
+                            .iter()
+                            .filter_map(|option| {
+                                option
+                                    .get("label")
+                                    .or_else(|| option.get("value"))
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                multi_select: false,
+            });
+        }
+
+        let local = format!("cx-{}", self.next_local.fetch_add(1, Ordering::Relaxed));
+        let interaction = Interaction {
+            id: local.clone(),
+            session: Some(SessionKey::new(EngineId::Codex, thread_id)),
+            kind: InteractionKind::Question,
+            title: "question".to_string(),
+            detail: None,
+            requested_at: now_ms(),
+            questions,
+        };
+        self.approvals().insert(
+            local,
+            PendingApproval {
+                json_id: id,
+                method: "item/tool/requestUserInput".to_string(),
+                permissions: Value::Null,
+                questions: Some(ids),
+            },
+        );
+        self.emit(EngineEvent::InteractionRequested(interaction));
+    }
 
     /// An approval, or something this adapter does not answer.
     fn on_server_request(self: &Arc<Self>, id: Value, method: String, params: Value) {
+        if method == "item/tool/requestUserInput" {
+            self.on_question_request(id, params);
+            return;
+        }
         let is_approval = method.contains("requestApproval")
             || method == "execCommandApproval"
             || method == "applyPatchApproval";
@@ -379,6 +506,7 @@ impl CodexEngine {
                 json_id: id,
                 method,
                 permissions: params.get("permissions").cloned().unwrap_or(Value::Null),
+                questions: None,
             },
         );
         self.emit(EngineEvent::InteractionRequested(interaction));
@@ -552,6 +680,39 @@ impl Engine for CodexEngine {
     /// page at a time, so a year of usage cannot be asked for over RPC. The
     /// rollouts under `~/.codex/sessions` are the durable record of what was
     /// billed, and they are read from disk instead.
+    /// Files the model changed, from the patch updates Codex volunteers.
+    ///
+    /// Paths are made relative to the thread's working directory before they are
+    /// handed out: the phone opens them through the session's file endpoints,
+    /// which are fenced to that directory.
+    async fn deliverables(&self, session: &SessionKey) -> Result<Vec<DeliveredFile>, EngineError> {
+        if session.engine != EngineId::Codex {
+            return Err(EngineError::UnknownSession(session.clone()));
+        }
+        let files = self
+            .deliverables
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(session.raw())
+            .cloned()
+            .unwrap_or_default();
+        if files.is_empty() {
+            return Ok(Vec::new());
+        }
+        let cwd = self.session_cwd(session).await.ok();
+        Ok(files
+            .into_iter()
+            .map(|mut file| {
+                if let Some(cwd) = &cwd {
+                    if let Ok(relative) = std::path::Path::new(&file.path).strip_prefix(cwd) {
+                        file.path = relative.to_string_lossy().to_string();
+                    }
+                }
+                file
+            })
+            .collect())
+    }
+
     /// What this thread has cost: turns, steps, time in the model and in tools,
     /// and the token total its rollout ends with.
     ///
@@ -923,6 +1084,39 @@ impl Engine for CodexEngine {
         let Some(pending) = self.approvals().remove(id) else {
             return Err(EngineError::upstream(format!("no pending approval {id}")));
         };
+
+        if let Some(ids) = &pending.questions {
+            // `answers` is one entry per question, shaped `{id, answers: [...]}`.
+            // A client that sends them in order without ids is still understood.
+            let given = answer.answers.unwrap_or_default();
+            let mut mapped = serde_json::Map::new();
+            for (index, question_id) in ids.iter().enumerate() {
+                let entry = given
+                    .iter()
+                    .find(|entry| {
+                        entry
+                            .get("id")
+                            .or_else(|| entry.get("questionId"))
+                            .and_then(Value::as_str)
+                            == Some(question_id.as_str())
+                    })
+                    .or_else(|| given.get(index));
+                let values = entry
+                    .and_then(|entry| entry.get("answers"))
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .or_else(|| entry.and_then(Value::as_str).map(|text| vec![json!(text)]))
+                    .unwrap_or_default();
+                mapped.insert(question_id.clone(), json!({ "answers": values }));
+            }
+            let result = json!({ "answers": mapped });
+            self.server
+                .respond(pending.json_id, result)
+                .await
+                .map_err(engine_error)?;
+            self.emit(EngineEvent::InteractionResolved { id: id.to_string() });
+            return Ok(());
+        }
 
         let allowed = answer.outcome.as_deref() == Some("allowed-once");
         let result = match pending.method.as_str() {

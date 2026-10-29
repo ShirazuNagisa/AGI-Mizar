@@ -18,6 +18,7 @@ use agi_engine::{Answer, Engine, EngineEvent};
 use agi_engine_codex::{AppServerConfig, CodexEngine};
 use agi_protocol::domain::{ActivityKind, RecordKind, SessionKey};
 use agi_protocol::engine::EngineId;
+use serde_json::json;
 
 /// One engine wired to the stand-in, plus the file it records decisions in.
 struct Harness {
@@ -272,4 +273,69 @@ async fn reports_the_turns_and_steps_of_a_thread() {
     let stats = h.engine.stats(&key()).await.unwrap();
     assert_eq!(stats.turns, 1);
     assert!(stats.steps >= 2, "the turn has a command and a reply");
+}
+
+#[tokio::test]
+async fn carries_a_question_and_its_answer_back() {
+    let h = start();
+    wait_connected(&h.engine).await;
+
+    let mut events = h.engine.subscribe();
+    h.engine.prompt(&key(), "pick a build").await.unwrap();
+
+    let mut question = None;
+    for _ in 0..30 {
+        match tokio::time::timeout(Duration::from_secs(2), events.recv()).await {
+            Ok(Ok(EngineEvent::InteractionRequested(interaction)))
+                if matches!(
+                    interaction.kind,
+                    agi_protocol::domain::InteractionKind::Question
+                ) =>
+            {
+                question = Some(interaction);
+                break;
+            }
+            Ok(Ok(_)) => continue,
+            _ => break,
+        }
+    }
+    let question = question.expect("Codex asked a question and nothing was announced");
+    assert_eq!(question.questions[0].id, "q1");
+    assert_eq!(question.questions[0].options, vec!["Alpha", "Beta"]);
+
+    h.engine
+        .answer(
+            &question.id,
+            Answer {
+                outcome: None,
+                answers: Some(vec![json!({ "id": "q1", "answers": ["Alpha"] })]),
+            },
+        )
+        .await
+        .unwrap();
+
+    let record = wait_for_record(&h.record, r#""question_answered""#);
+    assert!(record.contains(r#""q1""#));
+    assert!(record.contains(r#""Alpha""#));
+}
+
+#[tokio::test]
+async fn reports_the_files_a_turn_changed() {
+    let h = start();
+    wait_connected(&h.engine).await;
+
+    h.engine.prompt(&key(), "edit the file").await.unwrap();
+    // The patch update is a notification, not a reply; give it a moment to land.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut files = Vec::new();
+    while Instant::now() < deadline {
+        files = h.engine.deliverables(&key()).await.unwrap();
+        if !files.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].path, "src/a.rs");
+    assert_eq!(files[0].name, "a.rs");
 }
