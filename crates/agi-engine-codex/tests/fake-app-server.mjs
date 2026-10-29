@@ -121,6 +121,13 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       send({ id: message.id, result: {} })
       return
     case 'thread/archive':
+      if (message.params.threadId === 'th_empty') {
+        send({
+          id: message.id,
+          error: { code: -32600, message: 'no rollout found for thread id th_empty' },
+        })
+        return
+      }
       remember({ archived: message.params })
       send({ id: message.id, result: {} })
       return

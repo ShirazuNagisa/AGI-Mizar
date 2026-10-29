@@ -979,11 +979,22 @@ impl Engine for CodexEngine {
         if session.engine != EngineId::Codex {
             return Err(EngineError::UnknownSession(session.clone()));
         }
-        self.server
+        match self
+            .server
             .call("thread/archive", json!({ "threadId": session.raw() }))
             .await
-            .map_err(engine_error)?;
-        Ok(())
+        {
+            Ok(_) => Ok(()),
+            // A thread that has not run yet has no rollout to archive; Codex
+            // refuses, but from the operator's side there is nothing left to
+            // hide, so the intent is already satisfied.
+            Err(crate::rpc::RpcError::Upstream { message, .. })
+                if message.contains("no rollout found") =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(engine_error(error)),
+        }
     }
 
     /// The directory a thread was started in, from the thread itself.

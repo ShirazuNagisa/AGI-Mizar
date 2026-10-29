@@ -357,3 +357,12 @@ async fn groups_threads_by_the_directory_they_work_in() {
         "only the thread that names a cwd is filed"
     );
 }
+
+#[tokio::test]
+async fn archiving_a_thread_that_never_ran_is_still_done() {
+    let h = start();
+    wait_connected(&h.engine).await;
+
+    let empty = SessionKey::new(EngineId::Codex, "th_empty");
+    h.engine.archive(&empty, false).await.unwrap();
+}
