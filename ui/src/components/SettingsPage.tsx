@@ -96,7 +96,6 @@ export function SettingsPage({
             <div className="divide-y divide-border rounded-xl border border-border">
               <AboutRow label="版本" value={version === '' ? '—' : version} />
               <AboutRow label="构建" value="开发预览版" />
-              <AboutRow label="版权" value="© 2026 AGI Mizar" />
             </div>
           </Section>
 

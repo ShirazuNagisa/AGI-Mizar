@@ -33,8 +33,8 @@ export function Sidebar({ engines, page, serverConnected, loggedIn, onNavigate }
         className="mx-2 flex h-9 items-center gap-2 rounded-lg px-2 text-left hover:bg-surface-2"
         aria-label="回到主页"
       >
-        <img src={mizar} alt="" className="size-5" />
-        <span className="text-[14px] font-semibold tracking-tight text-fg">AGI Mizar</span>
+        <img src={mizar} alt="" className="size-6" />
+        <span className="text-[15px] font-semibold tracking-tight text-fg">AGI Mizar</span>
       </button>
 
       <nav className="mt-3 flex flex-col gap-0.5 px-2">

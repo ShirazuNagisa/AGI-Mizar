@@ -31,14 +31,17 @@ pub fn install(app: &AppHandle, window: &WebviewWindow) -> tauri::Result<()> {
         .items(&[&show, &at_login, &update, &quit])
         .build()?;
 
-    let icon = app
-        .default_window_icon()
-        .cloned()
-        .ok_or_else(|| tauri::Error::AssetNotFound("no window icon".into()))?;
+    // The mark's white cut-out, not the coloured bundle icon: a status item is
+    // drawn in the menu bar's own light, and a coloured square next to the
+    // system's glyphs is the one place this app looks like a guest.
+    let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-white.png"))?;
 
     let builder = TrayIconBuilder::with_id("main").icon(icon);
+    // Template would recolour the image to match the menu bar (black on light,
+    // white on dark). This icon is already the white cut-out the design calls
+    // for, so it stays as drawn.
     #[cfg(target_os = "macos")]
-    let builder = builder.icon_as_template(true);
+    let builder = builder.icon_as_template(false);
     builder
         .tooltip("AGI Mizar")
         .menu(&menu)
