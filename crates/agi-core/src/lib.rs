@@ -495,7 +495,9 @@ impl Core {
                 Err(error) => CommandResponse::error(error.code, error.message),
             },
             Command::AccountGithubStart => match self.account.github_start().await {
-                Ok(url) => CommandResponse::ok(json!({ "authorizeUrl": url })),
+                Ok((url, state)) => {
+                    CommandResponse::ok(json!({ "authorizeUrl": url, "state": state }))
+                }
                 Err(error) => CommandResponse::error(error.code, error.message),
             },
             Command::AccountGithubExchange { handoff } => {
@@ -505,11 +507,23 @@ impl Core {
                 }
             }
             Command::AccountAppleStart => match self.account.apple_start().await {
-                Ok(url) => CommandResponse::ok(json!({ "authorizeUrl": url })),
+                Ok((url, state)) => {
+                    CommandResponse::ok(json!({ "authorizeUrl": url, "state": state }))
+                }
                 Err(error) => CommandResponse::error(error.code, error.message),
             },
             Command::AccountAppleExchange { handoff } => {
                 match self.account.apple_exchange(&handoff).await {
+                    Ok(user) => CommandResponse::ok(json!({ "user": user })),
+                    Err(error) => CommandResponse::error(error.code, error.message),
+                }
+            }
+            Command::AccountAppleAwait { state } => match self.account.apple_await(&state).await {
+                Ok(user) => CommandResponse::ok(json!({ "user": user })),
+                Err(error) => CommandResponse::error(error.code, error.message),
+            },
+            Command::AccountGithubAwait { state } => {
+                match self.account.github_await(&state).await {
                     Ok(user) => CommandResponse::ok(json!({ "user": user })),
                     Err(error) => CommandResponse::error(error.code, error.message),
                 }

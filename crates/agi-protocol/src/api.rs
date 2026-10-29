@@ -197,6 +197,10 @@ pub enum Command {
     AccountAppleStart,
     /// Spend the handoff code Apple's done page showed.
     AccountAppleExchange { handoff: String },
+    /// Wait for the Apple browser round-trip and sign in when it lands.
+    AccountAppleAwait { state: String },
+    /// Wait for the GitHub browser round-trip and sign in when it lands.
+    AccountGithubAwait { state: String },
     /// Open an https URL in the system browser.
     OpenExternal { url: String },
 

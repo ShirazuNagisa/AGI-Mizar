@@ -163,7 +163,19 @@ fn main() {
                 .separator()
                 .quit()
                 .build()?;
-            MenuBuilder::new(handle).items(&[&app]).build()
+            // The window is a web view, so ⌘C/⌘V are the Edit menu's items,
+            // not the platform's: without this submenu paste into the login
+            // code field does nothing at all.
+            let edit = SubmenuBuilder::new(handle, "Edit")
+                .undo()
+                .redo()
+                .separator()
+                .cut()
+                .copy()
+                .paste()
+                .select_all()
+                .build()?;
+            MenuBuilder::new(handle).items(&[&app, &edit]).build()
         })
         .on_menu_event(|app, event| {
             use tauri::Manager;

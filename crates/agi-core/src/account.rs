@@ -214,7 +214,7 @@ impl AccountService {
     ///
     /// The relay owns the OAuth app and its secret; this side only asks for the
     /// authorize URL and, later, spends the handoff code the callback page shows.
-    pub async fn github_start(&self) -> Result<String, AccountError> {
+    pub async fn github_start(&self) -> Result<(String, String), AccountError> {
         let device = self.device();
         let response = self
             .http
@@ -239,11 +239,12 @@ impl AccountService {
         struct Answer {
             #[serde(rename = "authorizeUrl")]
             authorize_url: String,
+            state: String,
         }
         response
             .json::<Answer>()
             .await
-            .map(|answer| answer.authorize_url)
+            .map(|answer| (answer.authorize_url, answer.state))
             .map_err(|_| AccountError::new("BAD_ANSWER", "the relay's answer was not readable"))
     }
 
@@ -279,7 +280,7 @@ impl AccountService {
     }
 
     /// Where the browser should go to sign in with Apple.
-    pub async fn apple_start(&self) -> Result<String, AccountError> {
+    pub async fn apple_start(&self) -> Result<(String, String), AccountError> {
         let device = self.device();
         let response = self
             .http
@@ -304,12 +305,67 @@ impl AccountService {
         struct Answer {
             #[serde(rename = "authorizeUrl")]
             authorize_url: String,
+            state: String,
         }
         response
             .json::<Answer>()
             .await
-            .map(|answer| answer.authorize_url)
+            .map(|answer| (answer.authorize_url, answer.state))
             .map_err(|_| AccountError::new("BAD_ANSWER", "the relay's answer was not readable"))
+    }
+
+    /// Wait for the browser round-trip and sign in as soon as it lands.
+    ///
+    /// The browser cannot call back into a window it did not open, so the
+    /// desktop asks the relay every two seconds instead; the state it got from
+    /// the start call is the only key, and the code is single-use.
+    async fn await_login(&self, provider: &str, state: &str) -> Result<String, AccountError> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        loop {
+            let response = self
+                .http
+                .post(format!("{}/account/v1/{provider}/poll", self.base))
+                .header(
+                    "x-mizar-client-id",
+                    self.device()["id"].as_str().unwrap_or_default(),
+                )
+                .json(&json!({ "state": state }))
+                .send()
+                .await
+                .map_err(|error| AccountError::new("UNREACHABLE", format!("the relay: {error}")))?;
+            #[derive(Deserialize)]
+            struct Answer {
+                pending: bool,
+                code: Option<String>,
+            }
+            let answer: Answer = response.json().await.map_err(|_| {
+                AccountError::new("BAD_ANSWER", "the relay's answer was not readable")
+            })?;
+            if !answer.pending {
+                return answer.code.ok_or_else(|| {
+                    AccountError::new("NO_CODE", "the relay finished without a code")
+                });
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(AccountError::new(
+                    "TIMEOUT",
+                    "the browser sign-in did not finish in five minutes",
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    }
+
+    /// Wait for the Apple browser round-trip, then sign in.
+    pub async fn apple_await(&self, state: &str) -> Result<AccountUser, AccountError> {
+        let code = self.await_login("apple", state).await?;
+        self.apple_exchange(&code).await
+    }
+
+    /// Wait for the GitHub browser round-trip, then sign in.
+    pub async fn github_await(&self, state: &str) -> Result<AccountUser, AccountError> {
+        let code = self.await_login("github", state).await?;
+        self.github_exchange(&code).await
     }
 
     /// Spend the handoff code the Apple callback page showed.

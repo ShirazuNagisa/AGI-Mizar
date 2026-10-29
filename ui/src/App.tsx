@@ -233,8 +233,17 @@ export function App() {
     setAccountBusy(true)
     setAccountError(null)
     try {
-      const answer = await kernel.send<{ authorizeUrl: string }>({ op: 'account_github_start' })
+      const answer = await kernel.send<{ authorizeUrl: string; state: string }>({
+        op: 'account_github_start',
+      })
       await kernel.send({ op: 'open_external', url: answer.authorizeUrl })
+      // The browser cannot call into this window, so the kernel waits on the
+      // relay for the round-trip to finish and signs in by itself.
+      const done = await kernel.send<{ user: AccountUser }>({
+        op: 'account_github_await',
+        state: answer.state,
+      })
+      setAccount(done.user)
     } catch (error) {
       setAccountError(error instanceof Error ? error.message : '无法打开 GitHub')
     } finally {
@@ -262,8 +271,15 @@ export function App() {
     setAccountBusy(true)
     setAccountError(null)
     try {
-      const answer = await kernel.send<{ authorizeUrl: string }>({ op: 'account_apple_start' })
+      const answer = await kernel.send<{ authorizeUrl: string; state: string }>({
+        op: 'account_apple_start',
+      })
       await kernel.send({ op: 'open_external', url: answer.authorizeUrl })
+      const done = await kernel.send<{ user: AccountUser }>({
+        op: 'account_apple_await',
+        state: answer.state,
+      })
+      setAccount(done.user)
     } catch (error) {
       setAccountError(error instanceof Error ? error.message : '无法打开 Apple 登录')
     } finally {

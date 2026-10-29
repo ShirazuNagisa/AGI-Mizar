@@ -271,6 +271,8 @@ export type Command =
   | { op: 'account_github_start' }
   | { op: 'account_github_exchange'; handoff: string }
   | { op: 'account_apple_start' }
+  | { op: 'account_apple_await'; state: string }
+  | { op: 'account_github_await'; state: string }
   | { op: 'account_apple_exchange'; handoff: string }
   | { op: 'open_external'; url: string }
   | { op: 'ping' }
