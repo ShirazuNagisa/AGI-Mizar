@@ -106,7 +106,11 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
     // absent binary would otherwise mean a supervisor retrying a missing file
     // forever and a permanently red status on a machine that has no Codex.
     let codex_binary = std::env::var("AGI_CODEX_BIN").unwrap_or_else(|_| "codex".to_string());
-    match which(&codex_binary) {
+    // The ChatGPT app ships the same app-server binary; when nobody installed a
+    // `codex` on PATH, that copy is the one the GUI itself uses.
+    let codex_path = which(&codex_binary)
+        .or_else(|| which("/Applications/ChatGPT.app/Contents/Resources/codex"));
+    match codex_path {
         Some(path) => {
             let codex = CodexEngine::new(AppServerConfig {
                 binary: path.to_string_lossy().to_string(),
@@ -280,7 +284,17 @@ pub fn which(binary: &str) -> Option<PathBuf> {
         return candidate.exists().then_some(candidate);
     }
     let path = std::env::var_os("PATH")?;
-    for directory in std::env::split_paths(&path) {
+    // A Finder-launched app inherits launchd's PATH, which is not the shell's:
+    // a CLI installed into the user's own prefix would otherwise be invisible.
+    let mut directories: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        directories.push(home.join(".local/bin"));
+        directories.push(home.join(".local/node_modules/.bin"));
+        directories.push(home.join(".npm-global/bin"));
+        directories.push(home.join("bin"));
+    }
+    for directory in directories {
         let full = directory.join(binary);
         if full.is_file() {
             return Some(full);

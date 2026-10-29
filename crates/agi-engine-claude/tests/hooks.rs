@@ -332,3 +332,41 @@ fn pre_tool_use(tool: &str) -> Value {
         "permission_mode": "default"
     })
 }
+
+#[tokio::test]
+async fn offers_the_cli_permission_modes() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine_over(dir.path());
+    let modes = engine.permissions().await.unwrap();
+    assert_eq!(modes.len(), 6);
+    assert!(modes.iter().any(|mode| mode.id == "acceptEdits"));
+}
+
+#[tokio::test]
+async fn a_created_session_knows_its_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine_over(dir.path());
+
+    let key = engine.create(Some("/tmp/work")).await.unwrap();
+    assert_eq!(key.engine, EngineId::Claude);
+    assert_eq!(engine.session_cwd(&key).await.unwrap(), "/tmp/work");
+}
+
+#[tokio::test]
+async fn activity_describes_the_latest_turns_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    write_transcript(
+        dir.path(),
+        "-tmp-work",
+        "cccc1111-2222-3333-4444-555566667777",
+        false,
+    );
+    let engine = engine_over(dir.path());
+    let key = SessionKey::new(EngineId::Claude, "cccc1111-2222-3333-4444-555566667777");
+
+    let entries = engine.activity(&key, 20).await.unwrap();
+    assert!(!entries.is_empty());
+    assert!(entries
+        .iter()
+        .any(|entry| entry.kind == agi_protocol::domain::ActivityKind::Command));
+}

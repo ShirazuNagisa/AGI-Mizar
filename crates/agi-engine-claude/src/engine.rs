@@ -30,7 +30,10 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 use agi_engine::{Answer, Engine, EngineError, EngineEvent};
-use agi_protocol::domain::{Interaction, InteractionKind, Record, Session, SessionKey};
+use agi_protocol::domain::{
+    ActivityEntry, ActivityKind, Interaction, InteractionKind, PermissionPreset, Record,
+    RecordKind, Session, SessionKey,
+};
 use agi_protocol::engine::{Capabilities, EngineId};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -743,6 +746,116 @@ impl Engine for ClaudeEngine {
         Ok(records.split_off(start))
     }
 
+    /// What the current/latest turn did, folded from the records.
+    async fn activity(
+        &self,
+        session: &SessionKey,
+        limit: usize,
+    ) -> Result<Vec<ActivityEntry>, EngineError> {
+        let records = self.records(session, 200, None).await?;
+        let Some(latest) = records.iter().filter_map(|record| record.turn).max() else {
+            return Ok(Vec::new());
+        };
+        let mut entries: Vec<ActivityEntry> = records
+            .iter()
+            .filter(|record| record.turn == Some(latest))
+            .filter_map(|record| {
+                let tool = record.tool.as_ref()?;
+                let kind = match record.kind {
+                    RecordKind::ToolCall => {
+                        if matches!(tool.name.as_str(), "Bash" | "bash" | "Shell" | "shell") {
+                            ActivityKind::Command
+                        } else {
+                            ActivityKind::Tool
+                        }
+                    }
+                    RecordKind::ToolResult => ActivityKind::Output,
+                    _ => return None,
+                };
+                let text = match kind {
+                    ActivityKind::Output => first_line_of(tool.output.as_deref()),
+                    _ => first_line_of(tool.arguments.as_deref()),
+                };
+                Some(ActivityEntry {
+                    id: format!("{}-{}", record.seq, kind_slug(kind)),
+                    seq: record.seq,
+                    at: record.time,
+                    kind,
+                    title: tool.name.clone(),
+                    text,
+                    turn: Some(latest),
+                })
+            })
+            .collect();
+        if entries.len() > limit {
+            entries = entries.split_off(entries.len() - limit);
+        }
+        Ok(entries)
+    }
+
+    /// The modes the CLI accepts for `--permission-mode`.
+    ///
+    /// A fixed list, because the modes are the tool's own vocabulary rather than
+    /// something the host reports: there is no endpoint to ask.
+    async fn permissions(&self) -> Result<Vec<PermissionPreset>, EngineError> {
+        const MODES: &[(&str, &str, &str)] = &[
+            ("default", "Default", "Ask before edits and commands"),
+            ("acceptEdits", "Accept edits", "Edit files without asking"),
+            ("plan", "Plan", "Read-only; propose a plan first"),
+            ("auto", "Auto", "Let the CLI choose what to approve"),
+            ("dontAsk", "Don't ask", "Skip prompts that would block"),
+            (
+                "bypassPermissions",
+                "Bypass permissions",
+                "Run every tool without asking",
+            ),
+        ];
+        Ok(MODES
+            .iter()
+            .map(|(id, label, description)| PermissionPreset {
+                id: (*id).to_string(),
+                label: (*label).to_string(),
+                description: Some((*description).to_string()),
+            })
+            .collect())
+    }
+
+    /// A session that exists before its first turn does.
+    ///
+    /// Claude Code names a session with `--session-id` when the transcript does
+    /// not exist yet, so all this side has to mint is the id and the directory;
+    /// the first prompt writes the transcript the list then reads.
+    async fn create(&self, cwd: Option<&str>) -> Result<SessionKey, EngineError> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let key = SessionKey::new(EngineId::Claude, &id);
+        let mut session = Session::bare(key.clone(), now_ms());
+        session.cwd = cwd.map(str::to_string);
+        self.state().sessions.insert(id.clone(), session.clone());
+        self.emit(EngineEvent::SessionUpdated(session));
+        Ok(key)
+    }
+
+    /// The directory a session works in.
+    async fn session_cwd(&self, session: &SessionKey) -> Result<String, EngineError> {
+        if session.engine != EngineId::Claude {
+            return Err(EngineError::UnknownSession(session.clone()));
+        }
+        if let Some(cwd) = self
+            .state()
+            .sessions
+            .get(session.raw())
+            .and_then(|session| session.cwd.clone())
+        {
+            return Ok(cwd);
+        }
+        let file = self
+            .transcript_of(session.raw())
+            .ok_or_else(|| EngineError::UnknownSession(session.clone()))?;
+        peek(&file.path)
+            .cwd
+            .ok_or_else(|| EngineError::upstream("the transcript does not name a cwd"))
+    }
+
     /// Every day of activity in every transcript.
     ///
     /// A directory read rather than a call: Claude Code writes the usage the
@@ -838,5 +951,26 @@ impl Engine for ClaudeEngine {
 
     fn subscribe(&self) -> broadcast::Receiver<EngineEvent> {
         self.events.subscribe()
+    }
+}
+
+/// The first line of a tool's argument or output, cut to one readable line.
+fn first_line_of(text: Option<&str>) -> String {
+    let line = text
+        .unwrap_or_default()
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim();
+    line.chars().take(160).collect()
+}
+
+/// The suffix an activity id ends with, one per kind.
+fn kind_slug(kind: ActivityKind) -> &'static str {
+    match kind {
+        ActivityKind::Thinking => "thinking",
+        ActivityKind::Command => "command",
+        ActivityKind::Output => "output",
+        ActivityKind::Tool => "tool",
     }
 }
