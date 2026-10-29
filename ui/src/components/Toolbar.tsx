@@ -15,7 +15,7 @@ interface ToolbarProps {
 export function Toolbar({ title, badge, children }: ToolbarProps) {
   return (
     <header
-      data-tauri-drag-region
+      data-tauri-drag-region="deep"
       className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-6"
     >
       <h1 className="text-[13px] font-semibold text-fg">{title}</h1>

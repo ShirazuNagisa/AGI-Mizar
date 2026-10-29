@@ -70,17 +70,9 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-/* A window with no title bar still has to move: anything marked as a drag
-   region moves it, and nothing else in the chrome should. */
-[data-tauri-drag-region] {
-  -webkit-app-region: drag;
-}
-
-button,
-input,
-select {
-  -webkit-app-region: no-drag;
-}
+/* The window has no title bar; its top edge moves it. That is Tauri's
+   `data-tauri-drag-region` (see Toolbar and the sidebar's first strip), not the
+   old Electron `-webkit-app-region`, which WKWebView ignores. */
 
 ::-webkit-scrollbar {
   width: 10px;
