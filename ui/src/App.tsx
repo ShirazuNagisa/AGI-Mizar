@@ -258,6 +258,35 @@ export function App() {
     }
   }, [])
 
+  const appleStart = useCallback(async () => {
+    setAccountBusy(true)
+    setAccountError(null)
+    try {
+      const answer = await kernel.send<{ authorizeUrl: string }>({ op: 'account_apple_start' })
+      await kernel.send({ op: 'open_external', url: answer.authorizeUrl })
+    } catch (error) {
+      setAccountError(error instanceof Error ? error.message : '无法打开 Apple 登录')
+    } finally {
+      setAccountBusy(false)
+    }
+  }, [])
+
+  const appleExchange = useCallback(async (handoff: string) => {
+    setAccountBusy(true)
+    setAccountError(null)
+    try {
+      const answer = await kernel.send<{ user: AccountUser }>({
+        op: 'account_apple_exchange',
+        handoff,
+      })
+      setAccount(answer.user)
+    } catch (error) {
+      setAccountError(error instanceof Error ? error.message : 'Apple 登录失败')
+    } finally {
+      setAccountBusy(false)
+    }
+  }, [])
+
   const logout = useCallback(async () => {
     setAccountBusy(true)
     try {
@@ -308,6 +337,8 @@ export function App() {
             onLogout={logout}
             onGithubStart={githubStart}
             onGithubExchange={githubExchange}
+            onAppleStart={appleStart}
+            onAppleExchange={appleExchange}
           />
         ) : null}
         {page.kind === 'settings' ? (

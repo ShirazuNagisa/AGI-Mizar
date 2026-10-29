@@ -14,6 +14,7 @@ interface LoginPageProps {
   onGithubStart: () => Promise<void>
   onGithubExchange: (handoff: string) => Promise<void>
   onAppleStart?: () => Promise<void>
+  onAppleExchange?: (handoff: string) => Promise<void>
 }
 
 /**
@@ -34,10 +35,11 @@ export function LoginPage({
   onGithubStart,
   onGithubExchange,
   onAppleStart,
+  onAppleExchange,
 }: LoginPageProps) {
   const [identifier, setIdentifier] = useState('')
   const [password, setPassword] = useState('')
-  const [githubStarted, setGithubStarted] = useState(false)
+  const [codeStarted, setCodeStarted] = useState<'github' | 'apple' | null>(null)
   const [handoff, setHandoff] = useState('')
 
   async function submit(event: React.FormEvent) {
@@ -118,24 +120,32 @@ export function LoginPage({
                   disabled={busy}
                   onClick={() => {
                     void onGithubStart()
-                    setGithubStarted(true)
+                    setCodeStarted('github')
                   }}
                 >
                   <span aria-hidden></span>
                   使用 GitHub 登录
                 </Button>
                 {onAppleStart === undefined ? null : (
-                  <Button variant="outline" size="lg" disabled={busy} onClick={() => void onAppleStart()}>
+                  <Button
+                    variant="outline"
+                    size="lg"
+                    disabled={busy}
+                    onClick={() => {
+                      void onAppleStart()
+                      setCodeStarted('apple')
+                    }}
+                  >
                      Apple 登录
                   </Button>
                 )}
               </div>
 
-              {githubStarted ? (
+              {codeStarted !== null ? (
                 <div className="mt-4 rounded-xl border border-border p-4">
                   <p className="text-[12px] leading-5 text-muted">
-                    浏览器里完成 GitHub 授权后，页面会给出一个 <code>MZ-XXXX-XXXX</code> 代码，
-                    粘贴到这里完成登录。
+                    浏览器里完成 {codeStarted === 'apple' ? 'Apple' : 'GitHub'} 授权后，页面会给出一个
+                    <code>MZ-XXXX-XXXX</code> 代码，粘贴到这里完成登录。
                   </p>
                   <div className="mt-3 flex gap-2">
                     <input
@@ -148,7 +158,11 @@ export function LoginPage({
                     <Button
                       variant="primary"
                       disabled={busy || handoff.trim().length < 5}
-                      onClick={() => void onGithubExchange(handoff.trim())}
+                      onClick={() =>
+                        void (codeStarted === 'apple' && onAppleExchange !== undefined
+                          ? onAppleExchange(handoff.trim())
+                          : onGithubExchange(handoff.trim()))
+                      }
                     >
                       完成
                     </Button>

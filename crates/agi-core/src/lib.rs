@@ -504,6 +504,16 @@ impl Core {
                     Err(error) => CommandResponse::error(error.code, error.message),
                 }
             }
+            Command::AccountAppleStart => match self.account.apple_start().await {
+                Ok(url) => CommandResponse::ok(json!({ "authorizeUrl": url })),
+                Err(error) => CommandResponse::error(error.code, error.message),
+            },
+            Command::AccountAppleExchange { handoff } => {
+                match self.account.apple_exchange(&handoff).await {
+                    Ok(user) => CommandResponse::ok(json!({ "user": user })),
+                    Err(error) => CommandResponse::error(error.code, error.message),
+                }
+            }
             Command::OpenExternal { url } => {
                 if !url.starts_with("https://") {
                     CommandResponse::error("MALFORMED_FRAME", "only https URLs are opened")

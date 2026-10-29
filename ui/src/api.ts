@@ -270,6 +270,8 @@ export type Command =
   | { op: 'account_desktops' }
   | { op: 'account_github_start' }
   | { op: 'account_github_exchange'; handoff: string }
+  | { op: 'account_apple_start' }
+  | { op: 'account_apple_exchange'; handoff: string }
   | { op: 'open_external'; url: string }
   | { op: 'ping' }
 

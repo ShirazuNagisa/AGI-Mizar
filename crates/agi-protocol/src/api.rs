@@ -193,6 +193,10 @@ pub enum Command {
     AccountGithubStart,
     /// Spend the handoff code GitHub's done page showed.
     AccountGithubExchange { handoff: String },
+    /// Where the browser should go to sign in with Apple.
+    AccountAppleStart,
+    /// Spend the handoff code Apple's done page showed.
+    AccountAppleExchange { handoff: String },
     /// Open an https URL in the system browser.
     OpenExternal { url: String },
 
