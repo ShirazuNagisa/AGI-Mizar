@@ -658,14 +658,17 @@ impl Engine for ClaudeEngine {
     }
 
     fn capabilities(&self) -> Capabilities {
+        // Model metadata is the one API Claude Code does not offer; the picker
+        // stays hidden rather than listing nothing. File preview follows from
+        // the cwd in the transcript.
         Capabilities {
             attachments: false,
-            file_preview: false,
+            file_preview: true,
             fork: false,
             archive: false,
             activity: true,
             balance: false,
-            models: true,
+            models: false,
             permissions: true,
         }
     }
