@@ -25,7 +25,8 @@ use std::time::Duration;
 
 use agi_engine::{Answer, Engine, EngineError, EngineEvent};
 use agi_protocol::domain::{
-    Interaction, InteractionKind, ModelInfo, PermissionPreset, Record, Session, SessionKey,
+    ActivityEntry, ActivityKind, Interaction, InteractionKind, ModelInfo, PermissionPreset, Record,
+    RecordKind, Session, SessionKey,
 };
 use agi_protocol::engine::{Capabilities, EngineId};
 use async_trait::async_trait;
@@ -43,6 +44,9 @@ const TURN_PAGE: u64 = 100;
 
 /// How many models one list request asks for.
 const MODEL_PAGE: u64 = 100;
+
+/// How many records one activity feed may look back over.
+const ACTIVITY_PAGE: usize = 200;
 
 /// First restart delay, and the ceiling.
 const RESTART_BASE: Duration = Duration::from_secs(1);
@@ -548,6 +552,121 @@ impl Engine for CodexEngine {
     /// page at a time, so a year of usage cannot be asked for over RPC. The
     /// rollouts under `~/.codex/sessions` are the durable record of what was
     /// billed, and they are read from disk instead.
+    /// What this thread has cost: turns, steps, time in the model and in tools,
+    /// and the token total its rollout ends with.
+    ///
+    /// The durations come from the items the app-server reports; the tokens come
+    /// from `thread.path`, the rollout Codex writes beside the thread, because
+    /// the protocol only volunteers totals through notifications, and a session
+    /// page opened a day later has no notifications to fold.
+    async fn stats(
+        &self,
+        session: &SessionKey,
+    ) -> Result<agi_protocol::domain::SessionStats, EngineError> {
+        if session.engine != EngineId::Codex {
+            return Err(EngineError::UnknownSession(session.clone()));
+        }
+        let value = self
+            .server
+            .call(
+                "thread/read",
+                json!({ "threadId": session.raw(), "includeTurns": true }),
+            )
+            .await
+            .map_err(engine_error)?;
+        let thread = value.get("thread").cloned().unwrap_or(Value::Null);
+        let turns = thread
+            .get("turns")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut stats = agi_protocol::domain::SessionStats {
+            turns: turns.len() as u32,
+            ..Default::default()
+        };
+        for turn in &turns {
+            for item in turn
+                .get("items")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+            {
+                let kind = item.get("type").and_then(Value::as_str).unwrap_or("");
+                let duration = item.get("durationMs").and_then(Value::as_i64).unwrap_or(0);
+                match kind {
+                    "userMessage" => continue,
+                    "reasoning" | "agentMessage" => {
+                        stats.steps = stats.steps.saturating_add(1);
+                        stats.llm_ms += duration;
+                    }
+                    _ => {
+                        stats.steps = stats.steps.saturating_add(1);
+                        stats.tool_ms += duration;
+                    }
+                }
+            }
+        }
+        if let Some(path) = thread.get("path").and_then(Value::as_str) {
+            if let Some((input, output)) = crate::usage::thread_tokens(std::path::Path::new(path)) {
+                stats.input_tokens = input;
+                stats.output_tokens = output;
+            }
+        }
+        Ok(stats)
+    }
+
+    /// What the running turn is doing, taken from the records it already
+    /// produced.
+    ///
+    /// Derived rather than listened for: a second feed that can disagree with
+    /// the transcript under it is worse than none, and the records already carry
+    /// the tool names, the arguments and the output.
+    async fn activity(
+        &self,
+        session: &SessionKey,
+        limit: usize,
+    ) -> Result<Vec<ActivityEntry>, EngineError> {
+        let records = self.records(session, ACTIVITY_PAGE, None).await?;
+        let Some(latest) = records.iter().filter_map(|record| record.turn).max() else {
+            return Ok(Vec::new());
+        };
+        let mut entries: Vec<ActivityEntry> = records
+            .iter()
+            .filter(|record| record.turn == Some(latest))
+            .filter_map(|record| {
+                let tool = record.tool.as_ref()?;
+                let kind = match record.kind {
+                    RecordKind::ToolCall => {
+                        if matches!(tool.name.as_str(), "bash" | "shell" | "exec" | "command") {
+                            ActivityKind::Command
+                        } else {
+                            ActivityKind::Tool
+                        }
+                    }
+                    RecordKind::ToolResult => ActivityKind::Output,
+                    _ => return None,
+                };
+                let text = match kind {
+                    ActivityKind::Output => first_line(tool.output.as_deref()),
+                    _ => first_line(tool.arguments.as_deref()),
+                };
+                Some(ActivityEntry {
+                    id: format!("{}-{}", record.seq, kind_slug(kind)),
+                    seq: record.seq,
+                    at: record.time,
+                    kind,
+                    title: tool.name.clone(),
+                    text,
+                    turn: Some(latest),
+                })
+            })
+            .collect();
+        if entries.len() > limit {
+            entries = entries.split_off(entries.len() - limit);
+        }
+        Ok(entries)
+    }
+
     /// Every model this host can run.
     ///
     /// The list comes from the app-server, which means it is the same list the
@@ -871,5 +990,26 @@ impl Engine for CodexEngine {
 
     fn subscribe(&self) -> broadcast::Receiver<EngineEvent> {
         self.events.subscribe()
+    }
+}
+
+/// The first line of a tool's argument or output, cut to one readable line.
+fn first_line(text: Option<&str>) -> String {
+    let line = text
+        .unwrap_or_default()
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim();
+    line.chars().take(160).collect()
+}
+
+/// The suffix an activity id ends with, one per kind.
+fn kind_slug(kind: ActivityKind) -> &'static str {
+    match kind {
+        ActivityKind::Thinking => "thinking",
+        ActivityKind::Command => "command",
+        ActivityKind::Output => "output",
+        ActivityKind::Tool => "tool",
     }
 }

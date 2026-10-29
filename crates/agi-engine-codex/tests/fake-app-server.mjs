@@ -122,7 +122,14 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     case 'thread/read':
       send({
         id: message.id,
-        result: { thread: { id: message.params.threadId, cwd: '/Users/example/project' } },
+        result: {
+          thread: {
+            id: message.params.threadId,
+            cwd: '/Users/example/project',
+            path: '/tmp/rollout-does-not-exist.jsonl',
+            ...(message.params.includeTurns ? { turns: [turn] } : {}),
+          },
+        },
       })
       return
     case 'thread/settings/update':

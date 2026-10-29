@@ -519,3 +519,67 @@ mod tests {
         assert!(days(&sessions_dir().join("nonexistent-agi-mizar")).is_empty());
     }
 }
+
+/// The token totals a thread's rollout ends with.
+///
+/// The last `token_count` event carries `total_token_usage` for the whole
+/// thread, which is exactly what a session's cost page asks for. `None` when the
+/// file is missing or predates the counter — a zero would look like a thread
+/// that has never run.
+pub fn thread_tokens(path: &Path) -> Option<(u64, u64)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut last = None;
+    for line in text.lines() {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if event.get("type").and_then(Value::as_str) != Some("event_msg") {
+            continue;
+        }
+        let payload = event.get("payload");
+        if payload
+            .and_then(|payload| payload.get("type"))
+            .and_then(Value::as_str)
+            != Some("token_count")
+        {
+            continue;
+        }
+        let total = payload
+            .and_then(|payload| payload.get("info"))
+            .and_then(|info| info.get("total_token_usage"));
+        let (input, output) = token_pair(total);
+        if input > 0 || output > 0 {
+            last = Some((input, output));
+        }
+    }
+    last
+}
+
+#[cfg(test)]
+mod thread_token_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn reads_the_last_total_a_rollout_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        let mut file = std::fs::File::create(&path).unwrap();
+        for (input, output) in [(10, 5), (30, 12)] {
+            writeln!(
+                file,
+                r#"{{"type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":{input},"output_tokens":{output}}}}}}}}}"#
+            )
+            .unwrap();
+        }
+        assert_eq!(thread_tokens(&path), Some((30, 12)));
+    }
+
+    #[test]
+    fn a_thread_without_counts_has_no_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        std::fs::write(&path, "{\"type\":\"event_msg\"}\n").unwrap();
+        assert_eq!(thread_tokens(&path), None);
+    }
+}

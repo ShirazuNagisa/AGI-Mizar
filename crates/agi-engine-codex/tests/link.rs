@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use agi_engine::{Answer, Engine, EngineEvent};
 use agi_engine_codex::{AppServerConfig, CodexEngine};
-use agi_protocol::domain::{RecordKind, SessionKey};
+use agi_protocol::domain::{ActivityKind, RecordKind, SessionKey};
 use agi_protocol::engine::EngineId;
 
 /// One engine wired to the stand-in, plus the file it records decisions in.
@@ -249,4 +249,27 @@ async fn starts_renames_archives_and_locates_a_thread() {
         h.engine.session_cwd(&created).await.unwrap(),
         "/Users/example/project"
     );
+}
+
+#[tokio::test]
+async fn describes_the_latest_turn_from_its_records() {
+    let h = start();
+    wait_connected(&h.engine).await;
+
+    let entries = h.engine.activity(&key(), 20).await.unwrap();
+    assert!(!entries.is_empty());
+    assert!(entries
+        .iter()
+        .any(|entry| entry.kind == ActivityKind::Command));
+    assert!(entries.iter().all(|entry| entry.turn.is_some()));
+}
+
+#[tokio::test]
+async fn reports_the_turns_and_steps_of_a_thread() {
+    let h = start();
+    wait_connected(&h.engine).await;
+
+    let stats = h.engine.stats(&key()).await.unwrap();
+    assert_eq!(stats.turns, 1);
+    assert!(stats.steps >= 2, "the turn has a command and a reply");
 }
