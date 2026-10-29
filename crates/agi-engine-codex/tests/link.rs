@@ -213,3 +213,40 @@ async fn switches_model_and_permission_through_settings() {
     // Codex names a profile with a leading colon.
     wait_for_record(&h.record, r#""permissions":":workspace""#);
 }
+
+#[tokio::test]
+async fn reads_the_catalog_the_app_server_volunteers() {
+    let h = start();
+    wait_connected(&h.engine).await;
+
+    let models = h.engine.models().await.unwrap();
+    assert_eq!(models[0].id, "deepseek-flash");
+    assert_eq!(models[0].reasoning, vec!["max".to_string()]);
+
+    let presets = h.engine.permissions().await.unwrap();
+    assert_eq!(presets[0].id, ":read-only");
+    assert_eq!(presets[0].label, "read only");
+}
+
+#[tokio::test]
+async fn starts_renames_archives_and_locates_a_thread() {
+    let h = start();
+    wait_connected(&h.engine).await;
+
+    let created = h.engine.create(Some("/tmp/new")).await.unwrap();
+    assert_eq!(created.raw(), "th_new");
+    wait_for_record(&h.record, r#""started":{"cwd":"/tmp/new"}"#);
+
+    h.engine.rename(&created, "A name").await.unwrap();
+    let renamed = wait_for_record(&h.record, r#""renamed""#);
+    assert!(renamed.contains(r#""threadId":"th_new""#));
+    assert!(renamed.contains(r#""name":"A name""#));
+
+    h.engine.archive(&created, false).await.unwrap();
+    wait_for_record(&h.record, r#""archived":{"threadId":"th_new"}"#);
+
+    assert_eq!(
+        h.engine.session_cwd(&created).await.unwrap(),
+        "/Users/example/project"
+    );
+}

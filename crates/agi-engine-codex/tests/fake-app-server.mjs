@@ -76,6 +76,55 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     case 'thread/resume':
       send({ id: message.id, result: { thread } })
       return
+    case 'model/list':
+      send({
+        id: message.id,
+        result: {
+          data: [
+            {
+              id: 'deepseek-flash',
+              displayName: 'deepseek-flash',
+              supportedReasoningEfforts: [{ reasoningEffort: 'max', description: 'hardest' }],
+            },
+            { id: 'plain', displayName: 'Plain' },
+          ],
+          nextCursor: null,
+        },
+      })
+      return
+    case 'permissionProfile/list':
+      send({
+        id: message.id,
+        result: {
+          data: [
+            { id: ':read-only', description: 'Read only', allowed: true },
+            { id: ':workspace', description: null, allowed: true },
+          ],
+          nextCursor: null,
+        },
+      })
+      return
+    case 'thread/start':
+      remember({ started: message.params })
+      send({
+        id: message.id,
+        result: { thread: { id: 'th_new', cwd: message.params.cwd ?? '/tmp/new' } },
+      })
+      return
+    case 'thread/name/set':
+      remember({ renamed: message.params })
+      send({ id: message.id, result: {} })
+      return
+    case 'thread/archive':
+      remember({ archived: message.params })
+      send({ id: message.id, result: {} })
+      return
+    case 'thread/read':
+      send({
+        id: message.id,
+        result: { thread: { id: message.params.threadId, cwd: '/Users/example/project' } },
+      })
+      return
     case 'thread/settings/update':
       remember({ settings: message.params })
       send({ id: message.id, result: {} })

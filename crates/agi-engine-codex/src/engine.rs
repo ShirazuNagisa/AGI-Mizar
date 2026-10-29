@@ -24,7 +24,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use agi_engine::{Answer, Engine, EngineError, EngineEvent};
-use agi_protocol::domain::{Interaction, InteractionKind, Record, Session, SessionKey};
+use agi_protocol::domain::{
+    Interaction, InteractionKind, ModelInfo, PermissionPreset, Record, Session, SessionKey,
+};
 use agi_protocol::engine::{Capabilities, EngineId};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -38,6 +40,9 @@ const THREAD_PAGE: u64 = 100;
 
 /// How many turns one history read asks for.
 const TURN_PAGE: u64 = 100;
+
+/// How many models one list request asks for.
+const MODEL_PAGE: u64 = 100;
 
 /// First restart delay, and the ceiling.
 const RESTART_BASE: Duration = Duration::from_secs(1);
@@ -472,9 +477,9 @@ impl Engine for CodexEngine {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             attachments: false,
-            file_preview: false,
+            file_preview: true,
             fork: false,
-            archive: false,
+            archive: true,
             activity: true,
             balance: false,
             models: true,
@@ -543,6 +548,156 @@ impl Engine for CodexEngine {
     /// page at a time, so a year of usage cannot be asked for over RPC. The
     /// rollouts under `~/.codex/sessions` are the durable record of what was
     /// billed, and they are read from disk instead.
+    /// Every model this host can run.
+    ///
+    /// The list comes from the app-server, which means it is the same list the
+    /// GUI shows: with a routed provider it is that provider's models, not
+    /// OpenAI's. `supportedReasoningEfforts` is what the reasoning picker needs,
+    /// and it is absent for models that have none.
+    async fn models(&self) -> Result<Vec<ModelInfo>, EngineError> {
+        let value = self
+            .server
+            .call(
+                "model/list",
+                json!({ "limit": MODEL_PAGE, "includeHidden": false }),
+            )
+            .await
+            .map_err(engine_error)?;
+        let mut models = Vec::new();
+        for model in value
+            .get("data")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+        {
+            let Some(id) = model.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            models.push(ModelInfo {
+                id: id.to_string(),
+                label: model
+                    .get("displayName")
+                    .and_then(Value::as_str)
+                    .unwrap_or(id)
+                    .to_string(),
+                provider: None,
+                reasoning: model
+                    .get("supportedReasoningEfforts")
+                    .and_then(Value::as_array)
+                    .map(|efforts| {
+                        efforts
+                            .iter()
+                            .filter_map(|effort| {
+                                effort.get("reasoningEffort").and_then(Value::as_str)
+                            })
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            });
+        }
+        Ok(models)
+    }
+
+    /// The permission profiles the app-server will accept.
+    ///
+    /// They arrive with a leading colon — that spelling is the id, and the same
+    /// string is what `thread/settings/update` takes.
+    async fn permissions(&self) -> Result<Vec<PermissionPreset>, EngineError> {
+        let value = self
+            .server
+            .call("permissionProfile/list", json!({}))
+            .await
+            .map_err(engine_error)?;
+        Ok(value
+            .get("data")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|profile| {
+                let id = profile.get("id").and_then(Value::as_str)?.to_string();
+                Some(PermissionPreset {
+                    label: id.trim_start_matches(':').replace('-', " "),
+                    description: profile
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    id,
+                })
+            })
+            .collect())
+    }
+
+    /// Start a thread, the way the GUI's "new thread" does.
+    async fn create(&self, cwd: Option<&str>) -> Result<SessionKey, EngineError> {
+        let mut params = json!({});
+        if let Some(cwd) = cwd {
+            params["cwd"] = json!(cwd);
+        }
+        let value = self
+            .server
+            .call("thread/start", params)
+            .await
+            .map_err(engine_error)?;
+        let id = value
+            .get("thread")
+            .and_then(|thread| thread.get("id"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| EngineError::upstream("thread/start answered without a thread"))?;
+        Ok(SessionKey::new(EngineId::Codex, id))
+    }
+
+    async fn rename(&self, session: &SessionKey, title: &str) -> Result<(), EngineError> {
+        if session.engine != EngineId::Codex {
+            return Err(EngineError::UnknownSession(session.clone()));
+        }
+        self.server
+            .call(
+                "thread/name/set",
+                json!({ "threadId": session.raw(), "name": title }),
+            )
+            .await
+            .map_err(engine_error)?;
+        Ok(())
+    }
+
+    async fn archive(&self, session: &SessionKey, _stop_activity: bool) -> Result<(), EngineError> {
+        if session.engine != EngineId::Codex {
+            return Err(EngineError::UnknownSession(session.clone()));
+        }
+        self.server
+            .call("thread/archive", json!({ "threadId": session.raw() }))
+            .await
+            .map_err(engine_error)?;
+        Ok(())
+    }
+
+    /// The directory a thread was started in, from the thread itself.
+    ///
+    /// Every file feature — preview, stat, slices — hangs off this, so it is the
+    /// one piece that turns "the model says it wrote a file" into something the
+    /// preview page can open.
+    async fn session_cwd(&self, session: &SessionKey) -> Result<String, EngineError> {
+        if session.engine != EngineId::Codex {
+            return Err(EngineError::UnknownSession(session.clone()));
+        }
+        let value = self
+            .server
+            .call(
+                "thread/read",
+                json!({ "threadId": session.raw(), "includeTurns": false }),
+            )
+            .await
+            .map_err(engine_error)?;
+        value
+            .get("thread")
+            .and_then(|thread| thread.get("cwd"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| EngineError::upstream("thread/read answered without a cwd"))
+    }
+
     async fn usage_history(&self) -> Result<Vec<agi_protocol::api::UsageDay>, EngineError> {
         let mut cache = self
             .usage_cache
