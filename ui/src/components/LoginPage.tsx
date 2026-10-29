@@ -11,6 +11,9 @@ interface LoginPageProps {
   error: string | null
   onLogin: (identifier: string, password: string) => Promise<void>
   onLogout: () => Promise<void>
+  onGithubStart: () => Promise<void>
+  onGithubExchange: (handoff: string) => Promise<void>
+  onAppleStart?: () => Promise<void>
 }
 
 /**
@@ -28,9 +31,14 @@ export function LoginPage({
   error,
   onLogin,
   onLogout,
+  onGithubStart,
+  onGithubExchange,
+  onAppleStart,
 }: LoginPageProps) {
   const [identifier, setIdentifier] = useState('')
   const [password, setPassword] = useState('')
+  const [githubStarted, setGithubStarted] = useState(false)
+  const [handoff, setHandoff] = useState('')
 
   async function submit(event: React.FormEvent) {
     event.preventDefault()
@@ -96,6 +104,57 @@ export function LoginPage({
                 {busy ? <Spinner /> : null}
                 登录
               </Button>
+
+              <div className="my-5 flex items-center gap-3 text-[11px] text-muted">
+                <span className="h-px flex-1 bg-border" />
+                或
+                <span className="h-px flex-1 bg-border" />
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <Button
+                  variant="outline"
+                  size="lg"
+                  disabled={busy}
+                  onClick={() => {
+                    void onGithubStart()
+                    setGithubStarted(true)
+                  }}
+                >
+                  <span aria-hidden></span>
+                  使用 GitHub 登录
+                </Button>
+                {onAppleStart === undefined ? null : (
+                  <Button variant="outline" size="lg" disabled={busy} onClick={() => void onAppleStart()}>
+                     Apple 登录
+                  </Button>
+                )}
+              </div>
+
+              {githubStarted ? (
+                <div className="mt-4 rounded-xl border border-border p-4">
+                  <p className="text-[12px] leading-5 text-muted">
+                    浏览器里完成 GitHub 授权后，页面会给出一个 <code>MZ-XXXX-XXXX</code> 代码，
+                    粘贴到这里完成登录。
+                  </p>
+                  <div className="mt-3 flex gap-2">
+                    <input
+                      value={handoff}
+                      onChange={(event) => setHandoff(event.target.value.toUpperCase())}
+                      placeholder="MZ-XXXX-XXXX"
+                      spellCheck={false}
+                      className="h-9 flex-1 rounded-lg border border-border bg-transparent px-3 font-mono text-[13px] tracking-wider text-fg outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+                    />
+                    <Button
+                      variant="primary"
+                      disabled={busy || handoff.trim().length < 5}
+                      onClick={() => void onGithubExchange(handoff.trim())}
+                    >
+                      完成
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
             </form>
           ) : (
             <section>

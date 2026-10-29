@@ -189,6 +189,12 @@ pub enum Command {
     AccountLogout,
     /// The account's computers, with whether each is reachable now.
     AccountDesktops,
+    /// Where the browser should go to sign in with GitHub.
+    AccountGithubStart,
+    /// Spend the handoff code GitHub's done page showed.
+    AccountGithubExchange { handoff: String },
+    /// Open an https URL in the system browser.
+    OpenExternal { url: String },
 
     /// Liveness probe, used by the shell before it shows a window.
     Ping,

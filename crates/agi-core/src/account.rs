@@ -210,6 +210,74 @@ impl AccountService {
         Ok(answer.user)
     }
 
+    /// Where the browser should go to sign in with GitHub.
+    ///
+    /// The relay owns the OAuth app and its secret; this side only asks for the
+    /// authorize URL and, later, spends the handoff code the callback page shows.
+    pub async fn github_start(&self) -> Result<String, AccountError> {
+        let device = self.device();
+        let response = self
+            .http
+            .post(format!("{}/account/v1/github/start", self.base))
+            .header(
+                "x-mizar-client-id",
+                device["id"].as_str().unwrap_or_default(),
+            )
+            .json(&json!({ "device": device }))
+            .send()
+            .await
+            .map_err(|error| AccountError::new("UNREACHABLE", format!("the relay: {error}")))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(AccountError::new(
+                "GITHUB_START",
+                format!("the relay answered {status}: {text}"),
+            ));
+        }
+        #[derive(Deserialize)]
+        struct Answer {
+            #[serde(rename = "authorizeUrl")]
+            authorize_url: String,
+        }
+        response
+            .json::<Answer>()
+            .await
+            .map(|answer| answer.authorize_url)
+            .map_err(|_| AccountError::new("BAD_ANSWER", "the relay's answer was not readable"))
+    }
+
+    /// Spend the handoff code the GitHub callback page showed.
+    pub async fn github_exchange(&self, handoff: &str) -> Result<AccountUser, AccountError> {
+        let device = self.device();
+        let answer = self
+            .send(
+                self.http
+                    .post(format!("{}/account/v1/github/exchange", self.base))
+                    .header(
+                        "x-mizar-client-id",
+                        device["id"].as_str().unwrap_or_default(),
+                    )
+                    .json(&json!({ "handoff": handoff.trim(), "device": device })),
+            )
+            .await?;
+        let token = answer
+            .token
+            .clone()
+            .ok_or_else(|| AccountError::new("NO_TOKEN", "the relay did not return a session"))?;
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.token = Some(token);
+            state.user = Some(answer.user.clone());
+        }
+        self.save();
+        self.announce(true, Some(answer.user.id.clone()));
+        Ok(answer.user)
+    }
+
     /// Read the account again. A session the relay no longer accepts is dropped.
     pub async fn refresh(&self) -> Result<Option<AccountUser>, AccountError> {
         let Some(token) = self.token() else {

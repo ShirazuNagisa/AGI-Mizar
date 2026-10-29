@@ -494,6 +494,34 @@ impl Core {
                 Ok(user) => CommandResponse::ok(json!({ "user": user })),
                 Err(error) => CommandResponse::error(error.code, error.message),
             },
+            Command::AccountGithubStart => match self.account.github_start().await {
+                Ok(url) => CommandResponse::ok(json!({ "authorizeUrl": url })),
+                Err(error) => CommandResponse::error(error.code, error.message),
+            },
+            Command::AccountGithubExchange { handoff } => {
+                match self.account.github_exchange(&handoff).await {
+                    Ok(user) => CommandResponse::ok(json!({ "user": user })),
+                    Err(error) => CommandResponse::error(error.code, error.message),
+                }
+            }
+            Command::OpenExternal { url } => {
+                if !url.starts_with("https://") {
+                    CommandResponse::error("MALFORMED_FRAME", "only https URLs are opened")
+                } else {
+                    #[cfg(target_os = "macos")]
+                    let opened = std::process::Command::new("open").arg(&url).spawn();
+                    #[cfg(not(target_os = "macos"))]
+                    let opened: Result<std::process::Child, std::io::Error> = Err(
+                        std::io::Error::new(std::io::ErrorKind::Unsupported, "no opener"),
+                    );
+                    match opened {
+                        Ok(_) => CommandResponse::ok(json!({ "opened": true })),
+                        Err(error) => {
+                            CommandResponse::error("OPEN_FAILED", format!("the browser: {error}"))
+                        }
+                    }
+                }
+            }
             Command::AccountDesktops => match self.account.desktops().await {
                 Ok(desktops) => CommandResponse::ok(json!({ "desktops": desktops })),
                 Err(error) => CommandResponse::error(error.code, error.message),

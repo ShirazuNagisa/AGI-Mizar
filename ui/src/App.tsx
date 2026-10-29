@@ -229,6 +229,35 @@ export function App() {
     [],
   )
 
+  const githubStart = useCallback(async () => {
+    setAccountBusy(true)
+    setAccountError(null)
+    try {
+      const answer = await kernel.send<{ authorizeUrl: string }>({ op: 'account_github_start' })
+      await kernel.send({ op: 'open_external', url: answer.authorizeUrl })
+    } catch (error) {
+      setAccountError(error instanceof Error ? error.message : '无法打开 GitHub')
+    } finally {
+      setAccountBusy(false)
+    }
+  }, [])
+
+  const githubExchange = useCallback(async (handoff: string) => {
+    setAccountBusy(true)
+    setAccountError(null)
+    try {
+      const answer = await kernel.send<{ user: AccountUser }>({
+        op: 'account_github_exchange',
+        handoff,
+      })
+      setAccount(answer.user)
+    } catch (error) {
+      setAccountError(error instanceof Error ? error.message : 'GitHub 登录失败')
+    } finally {
+      setAccountBusy(false)
+    }
+  }, [])
+
   const logout = useCallback(async () => {
     setAccountBusy(true)
     try {
@@ -277,6 +306,8 @@ export function App() {
             error={accountError}
             onLogin={login}
             onLogout={logout}
+            onGithubStart={githubStart}
+            onGithubExchange={githubExchange}
           />
         ) : null}
         {page.kind === 'settings' ? (

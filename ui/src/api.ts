@@ -268,6 +268,9 @@ export type Command =
   | { op: 'account_login'; identifier: string; password: string }
   | { op: 'account_logout' }
   | { op: 'account_desktops' }
+  | { op: 'account_github_start' }
+  | { op: 'account_github_exchange'; handoff: string }
+  | { op: 'open_external'; url: string }
   | { op: 'ping' }
 
 export interface ApiError {
