@@ -76,8 +76,67 @@ pub struct MizarServer {
     foreground: Mutex<std::collections::HashSet<String>>,
     /// The client that talks to the relay's push API.
     http: reqwest::Client,
+    /// Devices with a socket open right now, and how many each has. A phone
+    /// that reconnects before its old socket is reaped must not read as offline
+    /// in between, so this counts rather than flags.
+    live: Mutex<std::collections::HashMap<String, usize>>,
     /// Files a phone is sending, staged until a prompt names them.
     uploads: std::sync::Arc<crate::uploads::UploadStore>,
+}
+
+/// Keeps the live count honest however the socket ends.
+struct LiveSocket {
+    server: Arc<MizarServer>,
+    device: String,
+}
+
+impl LiveSocket {
+    fn open(server: Arc<MizarServer>, device: String) -> Self {
+        *server
+            .live
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(device.clone())
+            .or_insert(0) += 1;
+        Self { server, device }
+    }
+}
+
+impl Drop for LiveSocket {
+    fn drop(&mut self) {
+        let mut live = self
+            .server
+            .live
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match live.get_mut(&self.device) {
+            Some(count) if *count > 1 => *count -= 1,
+            _ => {
+                live.remove(&self.device);
+            }
+        }
+    }
+}
+
+impl agi_core::DeviceStatusSource for MizarServer {
+    fn device_views(&self) -> Vec<agi_protocol::api::DeviceView> {
+        let live = self
+            .live
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.store
+            .devices()
+            .into_iter()
+            .filter(|device| device.is_live())
+            .map(|device| agi_protocol::api::DeviceView {
+                online: live.get(&device.id).copied().unwrap_or(0) > 0,
+                last_seen_ms: device.last_seen_at,
+                id: device.id,
+                name: device.name,
+                model: device.model,
+            })
+            .collect()
+    }
 }
 
 impl agi_core::RelayStatusSource for MizarServer {
@@ -110,6 +169,7 @@ impl MizarServer {
             relay: Mutex::new(None),
             notices: broadcast::channel(16).0,
             foreground: Mutex::new(std::collections::HashSet::new()),
+            live: Mutex::new(std::collections::HashMap::new()),
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
                 .build()
@@ -2221,6 +2281,9 @@ async fn serve_socket(server: Arc<MizarServer>, peer: SocketAddr, socket: WebSoc
         device.name,
         hello.app_version.as_deref().unwrap_or("unknown version")
     );
+
+    // Held until this function returns, which is when the socket is done.
+    let _live = LiveSocket::open(Arc::clone(&server), device.id.clone());
 
     let _ = send(
         &out,

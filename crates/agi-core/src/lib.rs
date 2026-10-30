@@ -153,6 +153,8 @@ pub struct Core {
     /// The phone server, when this build has one. Attached after construction
     /// because it needs the kernel it serves.
     pairing: RwLock<Option<Arc<dyn PairingSource>>>,
+    /// The phone roster, attached the same way and for the same reason.
+    devices: RwLock<Option<Arc<dyn DeviceStatusSource>>>,
     preferences: RwLock<Preferences>,
     /// Where preferences are written, once a launch tells us.
     preferences_path: RwLock<Option<PathBuf>>,
@@ -211,6 +213,7 @@ impl Core {
             events,
             version: env!("CARGO_PKG_VERSION").to_string(),
             pairing: RwLock::new(None),
+            devices: RwLock::new(None),
             preferences: RwLock::new(Preferences::default()),
             preferences_path: RwLock::new(None),
             account: account::AccountService::new(account_base()),
@@ -238,6 +241,23 @@ impl Core {
     }
 
     /// Attach the phone server, so the window can show a pairing code.
+    pub fn attach_devices(&self, source: Arc<dyn DeviceStatusSource>) {
+        *self
+            .devices
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(source);
+    }
+
+    /// The phones, or none when nothing composed them (tests, the daemon).
+    pub fn device_views(&self) -> Vec<agi_protocol::api::DeviceView> {
+        self.devices
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(|source| source.device_views())
+            .unwrap_or_default()
+    }
+
     pub fn attach_pairing(&self, source: Arc<dyn PairingSource>) {
         *self
             .pairing
@@ -910,6 +930,7 @@ impl Core {
                 done: self.onboarding_done(),
             },
             model: self.model_service.state(),
+            devices: self.device_views(),
         }
     }
 
@@ -1326,6 +1347,12 @@ impl Core {
 /// A trait rather than a direct call because the phone server depends on the
 /// kernel, not the other way round: the kernel asks whoever is composed, and a
 /// build without a phone server simply has nobody to ask.
+/// The paired phones, for anything outside the window that lists them.
+pub trait DeviceStatusSource: Send + Sync {
+    /// Every phone that may connect, with whether it is connected now.
+    fn device_views(&self) -> Vec<agi_protocol::api::DeviceView>;
+}
+
 pub trait PairingSource: Send + Sync {
     /// The code to show, refreshed when asked.
     fn pairing_view(&self, refresh: bool) -> agi_protocol::api::PairingView;

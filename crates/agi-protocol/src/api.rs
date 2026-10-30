@@ -34,6 +34,23 @@ pub struct StateSnapshot {
     pub onboarding: OnboardingView,
     /// What model this install judges turns with, and whether it is running.
     pub model: ModelView,
+    /// The phones paired with this computer, and which of them are connected.
+    pub devices: Vec<DeviceView>,
+}
+
+/// One paired phone, as the menu bar lists it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DeviceView {
+    pub id: String,
+    pub name: String,
+    /// `iPhone17,1`, or absent when the phone never said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Whether this phone has a socket open right now.
+    pub online: bool,
+    /// When it last reached this computer, in milliseconds since the epoch.
+    #[serde(default)]
+    pub last_seen_ms: i64,
 }
 
 /// One engine's connection state, as the UI's engine switch reads it.

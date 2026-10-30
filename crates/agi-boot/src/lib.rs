@@ -217,6 +217,9 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
 
     // The window needs a code to show; the kernel asks whoever is composed.
     core.attach_pairing(Arc::clone(&mizar) as Arc<dyn agi_core::PairingSource>);
+    // The menu bar lists the phones; the roster and the live sockets both live
+    // in the server, so it answers for both.
+    core.attach_devices(Arc::clone(&mizar) as Arc<dyn agi_core::DeviceStatusSource>);
 
     let pairing_code = mizar.issue_code();
     let pairing_uri = mizar.pairing_uri(&pairing_code);
