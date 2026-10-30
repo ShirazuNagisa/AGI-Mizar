@@ -22,6 +22,7 @@
 
 pub mod account;
 pub mod endpoint;
+pub mod models;
 pub mod server;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -30,9 +31,10 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use agi_engine::{Engine, EngineError, EngineEvent};
 use agi_protocol::api::{
-    ApiEvent, Command, CommandResponse, EngineStatus, StateSnapshot, UsageOverview,
+    ApiEvent, Command, CommandResponse, EngineStatus, OnboardingView, StateSnapshot, UsageOverview,
 };
-use agi_layout::model::{Backend, LabelMap, ModelManifest, ModelRegistry};
+use agi_layout::model::{Backend, LabelMap, ModelManifest};
+use models::{ModelEvent, ModelService};
 use agi_layout::{facts_from_turn, Item, Layout, LayoutService, Live, StateMachine};
 use agi_protocol::domain::{Interaction, Record, RecordKind, Session, SessionKey};
 use agi_protocol::state_frame::HEARTBEAT_MS;
@@ -69,6 +71,48 @@ struct Store {
 pub struct Preferences {
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// Whether the first-run guide has been completed.
+    #[serde(default)]
+    pub onboarding: Onboarding,
+    /// Which agents the operator said yes to.
+    #[serde(default)]
+    pub engines: EnginePrefs,
+}
+
+/// The guide's own state.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Onboarding {
+    #[serde(default)]
+    pub done: bool,
+}
+
+/// Which agents were configured, by the guide or from an agent page.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EnginePrefs {
+    #[serde(default)]
+    pub dsh: bool,
+    #[serde(default)]
+    pub claude: bool,
+    #[serde(default)]
+    pub codex: bool,
+}
+
+impl EnginePrefs {
+    fn get(&self, engine: EngineId) -> bool {
+        match engine {
+            EngineId::Dsh => self.dsh,
+            EngineId::Claude => self.claude,
+            EngineId::Codex => self.codex,
+        }
+    }
+
+    fn set(&mut self, engine: EngineId, enabled: bool) {
+        match engine {
+            EngineId::Dsh => self.dsh = enabled,
+            EngineId::Claude => self.claude = enabled,
+            EngineId::Codex => self.codex = enabled,
+        }
+    }
 }
 
 fn default_theme() -> String {
@@ -79,6 +123,8 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             theme: default_theme(),
+            onboarding: Onboarding::default(),
+            engines: EnginePrefs::default(),
         }
     }
 }
@@ -110,14 +156,28 @@ pub struct Core {
     layout: RwLock<Option<Arc<LayoutService>>>,
     /// Judgements by `(session, turn)`, so a late result can be read back.
     layouts: Arc<Mutex<HashMap<(SessionKey, u32), Layout>>>,
-    /// The models this install can run, and which one is active.
-    models: ModelRegistry,
+    /// The model directory, the downloader and the sidecar, as one thing.
+    model_service: Arc<ModelService>,
     /// The active model, when one is.
     manifest: RwLock<Option<ModelManifest>>,
     /// What each session is doing, and the interval it is on.
     states: Arc<Mutex<HashMap<SessionKey, StateMachine>>>,
     /// The state channel: encoded frames, one per state change or heartbeat.
     frames: broadcast::Sender<(SessionKey, Vec<u8>)>,
+    /// Engines this installation knows about but could not host, and why.
+    ///
+    /// An agent that was never installed and one that is installed but silent
+    /// are different problems; only the second is worth a reconnect.
+    unavailable: RwLock<HashMap<EngineId, String>>,
+    /// Engines discovered after launch, because the operator installed one
+    /// while the window was open.
+    late: RwLock<HashMap<EngineId, Arc<dyn Engine>>>,
+    /// Installs the Claude Code hooks. The boot sequence owns this because the
+    /// shim's path is a packaging fact, not a kernel one.
+    claude_hooks: RwLock<Option<Arc<dyn Fn() -> Result<(), String> + Send + Sync>>>,
+    /// Re-runs discovery. Installed by the boot sequence, which is the only
+    /// thing that knows where an agent's binary might be.
+    rescan: RwLock<Option<Arc<dyn Fn(&[EngineId]) -> (Vec<Arc<dyn Engine>>, HashMap<EngineId, String>) + Send + Sync>>>,
     /// Whether the heartbeat task has been started.
     ///
     /// Starting it inside `new()` is not reliable: the kernel is constructed on
@@ -132,8 +192,8 @@ impl Core {
     pub fn new(engines: Vec<Arc<dyn Engine>>) -> Arc<Self> {
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         let (frame_tx, _) = broadcast::channel(EVENT_BUFFER);
-        let models = ModelRegistry::open(models_dir());
-        let layout = layout_from(&models);
+        let model_service = ModelService::open(models_dir());
+        let layout = layout_from(&model_service);
         let core = Arc::new(Self {
             engines,
             store: RwLock::new(Store::default()),
@@ -146,10 +206,14 @@ impl Core {
             relay_status: RwLock::new(None),
             layout: RwLock::new(layout.0.clone()),
             layouts: Arc::new(Mutex::new(HashMap::new())),
-            models: models.clone(),
-            manifest: RwLock::new(layout.1.clone()),
+            model_service: Arc::clone(&model_service),
+            manifest: RwLock::new(model_service.manifest()),
             states: Arc::new(Mutex::new(HashMap::new())),
             frames: frame_tx.clone(),
+            unavailable: RwLock::new(HashMap::new()),
+            late: RwLock::new(HashMap::new()),
+            claude_hooks: RwLock::new(None),
+            rescan: RwLock::new(None),
             heartbeat_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         core
@@ -250,16 +314,90 @@ impl Core {
         let Some(path) = path else {
             return;
         };
-        let stored = Preferences {
-            theme: theme.to_string(),
+        let _ = path;
+        self.save_preferences();
+    }
+
+    /// Whether the first-run guide has been completed on this install.
+    pub fn onboarding_done(&self) -> bool {
+        self.preferences
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .onboarding
+            .done
+    }
+
+    /// Remember that the guide finished, or re-arm it from the settings page.
+    pub fn set_onboarding_done(&self, done: bool) -> bool {
+        {
+            let mut preferences = self
+                .preferences
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if preferences.onboarding.done == done {
+                return preferences.onboarding.done;
+            }
+            preferences.onboarding.done = done;
+        }
+        self.save_preferences();
+        done
+    }
+
+    /// Whether an agent was configured, by the guide or from its page.
+    pub fn engine_configured(&self, engine: EngineId) -> bool {
+        self.preferences
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .engines
+            .get(engine)
+    }
+
+    /// Remember an agent's configured flag.
+    pub fn set_engine_configured(&self, engine: EngineId, enabled: bool) {
+        {
+            let mut preferences = self
+                .preferences
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if preferences.engines.get(engine) == enabled {
+                return;
+            }
+            preferences.engines.set(engine, enabled);
+        }
+        self.save_preferences();
+    }
+
+    /// Write the preference file the way the endpoint file is written: private,
+    /// and atomically, so a crash mid-write cannot leave half a JSON file where
+    /// the next launch expects its settings.
+    fn save_preferences(&self) {
+        let path = self
+            .preferences_path
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let Some(path) = path else {
+            return;
         };
+        let stored = self
+            .preferences
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let bytes = serde_json::to_vec_pretty(&stored).unwrap_or_default();
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(
-            &path,
-            serde_json::to_vec_pretty(&stored).unwrap_or_default(),
-        );
+        let temp = path.with_extension("json.tmp");
+        if std::fs::write(&temp, &bytes).is_err() {
+            return;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600));
+        }
+        let _ = std::fs::rename(&temp, &path);
     }
 
     /// The version reported in every snapshot.
@@ -273,8 +411,94 @@ impl Core {
     }
 
     /// The engine with this id, if it is hosted.
-    pub fn engine(&self, id: EngineId) -> Option<&Arc<dyn Engine>> {
-        self.engines.iter().find(|engine| engine.id() == id)
+    pub fn engine(&self, id: EngineId) -> Option<Arc<dyn Engine>> {
+        if let Some(engine) = self.engines.iter().find(|engine| engine.id() == id) {
+            return Some(Arc::clone(engine));
+        }
+        self.late
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&id)
+            .cloned()
+    }
+
+    /// Which agents this machine does not have, and why.
+    pub fn set_unavailable(&self, entries: Vec<(EngineId, String)>) {
+        let mut slot = self
+            .unavailable
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        slot.clear();
+        for (id, reason) in entries {
+            slot.insert(id, reason);
+        }
+    }
+
+    /// Hand the kernel the hook installer, so the guide can run it.
+    pub fn set_claude_hooks(&self, install: Arc<dyn Fn() -> Result<(), String> + Send + Sync>) {
+        *self
+            .claude_hooks
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(install);
+    }
+
+    /// Run the hook installer, if this build has one.
+    fn install_claude_hooks(&self) -> Result<(), String> {
+        let install = self
+            .claude_hooks
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        match install {
+            Some(install) => install(),
+            None => Err("this build cannot install the Claude Code hooks".to_string()),
+        }
+    }
+
+    /// Hand the kernel a way to look for agents again.
+    pub fn set_rescan(
+        &self,
+        rescan: Arc<dyn Fn(&[EngineId]) -> (Vec<Arc<dyn Engine>>, HashMap<EngineId, String>) + Send + Sync>,
+    ) {
+        *self
+            .rescan
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(rescan);
+    }
+
+    /// Look for every agent again, host the ones that appeared, and say what is
+    /// still missing.
+    pub fn rescan_engines(&self) -> Vec<EngineStatus> {
+        let rescan = self
+            .rescan
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(rescan) = rescan {
+            let mut already: Vec<EngineId> = self.engines.iter().map(|engine| engine.id()).collect();
+            already.extend(
+                self.late
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .keys()
+                    .copied(),
+            );
+            let (hosted, missing) = rescan(&already);
+            {
+                let mut slot = self
+                    .late
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                for engine in hosted {
+                    slot.insert(engine.id(), engine);
+                }
+            }
+            self.set_unavailable(missing.into_iter().collect());
+        }
+        EngineId::all()
+            .into_iter()
+            .filter_map(|id| self.status_of(id))
+            .collect()
     }
 
     /// Start listening to every engine and seed the store from what they know.
@@ -283,6 +507,29 @@ impl Core {
     /// failure to list one engine is logged and does not stop the others: a
     /// kernel where Codex is unavailable should still show DSH.
     pub async fn start(self: &Arc<Self>) {
+        // Model changes are the kernel's to publish: the downloader and the
+        // sidecar only know their own state.
+        {
+            let mut models = self.model_service.subscribe();
+            let core = Arc::clone(self);
+            tokio::spawn(async move {
+                while let Ok(event) = models.recv().await {
+                    match event {
+                        ModelEvent::Progress(download) => {
+                            core.publish(ApiEvent::ModelProgress { download })
+                        }
+                        ModelEvent::Changed(model) => {
+                            // A finished download is a new judge: without this the
+                            // kernel would keep the rule fallback until the next
+                            // launch.
+                            core.sync_layout();
+                            core.publish(ApiEvent::ModelChanged { model })
+                        }
+                    }
+                }
+            });
+        }
+
         for engine in &self.engines {
             let id = engine.id();
 
@@ -402,30 +649,54 @@ impl Core {
         Some((machine.state(), machine.interval()))
     }
 
-    /// The models this install can run, for the desktop UI.
-    pub fn models(&self) -> &ModelRegistry {
-        &self.models
+    /// The model service, for the dispatch layer and the snapshot.
+    pub fn models(&self) -> &Arc<ModelService> {
+        &self.model_service
     }
 
     /// Switch models while the app runs.
     ///
-    /// The registry already owns the list; this only swaps which manifest the
-    /// kernel calls, so an upgraded model is a file plus one call — no restart,
-    /// no rebuild, no phone-side change.
-    pub fn activate_model(
-        &self,
-        id: &str,
-    ) -> Result<ModelManifest, agi_layout::model::ManifestError> {
-        let manifest = self.models.activate(id)?;
-        let service = Arc::new(LayoutService::new(manifest.judge()));
+    /// A swapped model is a file plus one call: no restart, no rebuild, no
+    /// phone-side change. The judge is rebuilt because it holds the service, not
+    /// the manifest.
+    pub fn activate_model(&self, id: &str) -> Result<ModelManifest, String> {
+        let manifest = self.model_service.activate(id)?;
+        self.rebuild_layout(&manifest);
+        Ok(manifest)
+    }
+
+    /// Re-read the model the service holds and install (or remove) the judge.
+    ///
+    /// Called when a download finishes and when the window switches models: the
+    /// judge is built from the service, so the port is not frozen at launch.
+    fn sync_layout(&self) {
+        match self.model_service.manifest() {
+            Some(manifest) => {
+                let judge = Arc::new(models::SidecarJudge::new(Arc::clone(&self.model_service)));
+                if let Ok(mut slot) = self.layout.write() {
+                    *slot = Some(Arc::new(LayoutService::new(judge)));
+                }
+                if let Ok(mut slot) = self.manifest.write() {
+                    *slot = Some(manifest);
+                }
+            }
+            None => {
+                if let Ok(mut slot) = self.layout.write() {
+                    *slot = None;
+                }
+            }
+        }
+    }
+
+    fn rebuild_layout(&self, manifest: &ModelManifest) {
+        let judge = Arc::new(models::SidecarJudge::new(Arc::clone(&self.model_service)));
         if let Ok(mut slot) = self.layout.write() {
-            *slot = Some(service);
+            *slot = Some(Arc::new(LayoutService::new(judge)));
         }
         if let Ok(mut slot) = self.manifest.write() {
             *slot = Some(manifest.clone());
         }
         tracing::info!(model = %manifest.id, version = %manifest.version, "layout: model switched");
-        Ok(manifest)
     }
 
     /// The model currently answering, if any.
@@ -557,21 +828,51 @@ impl Core {
 
     /// One engine's status, as the engine switch draws it.
     fn status_of(&self, id: EngineId) -> Option<EngineStatus> {
-        let engine = self.engine(id)?;
-        let (connected, detail) = engine.status();
+        let configured = self.engine_configured(id);
+        let missing = self
+            .unavailable
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&id)
+            .cloned();
         let sessions = self
             .store_read()
             .sessions
             .keys()
             .filter(|key| key.engine == id)
             .count();
-        Some(EngineStatus {
-            engine: id,
-            connected,
-            capabilities: engine.capabilities(),
-            detail,
-            sessions,
-        })
+
+        match self.engine(id) {
+            Some(engine) => {
+                let (connected, detail) = engine.status();
+                Some(EngineStatus {
+                    engine: id,
+                    connected,
+                    // Hosted is not the same as installed: Claude's engine runs
+                    // against transcripts even when its CLI is nowhere.
+                    available: missing.is_none(),
+                    configured,
+                    capabilities: engine.capabilities(),
+                    detail,
+                    sessions,
+                })
+            }
+            // Known but not hosted: say so instead of dropping the row. The
+            // window has to be able to tell "not installed" from "installed and
+            // quiet", and only this row carries that answer.
+            None => {
+                let reason = missing?;
+                Some(EngineStatus {
+                    engine: id,
+                    connected: false,
+                    available: false,
+                    configured,
+                    capabilities: agi_protocol::engine::Capabilities::default(),
+                    detail: Some(reason),
+                    sessions,
+                })
+            }
+        }
     }
 
     /// Everything a freshly opened window needs.
@@ -592,6 +893,10 @@ impl Core {
             engines,
             sessions,
             interactions: store.interactions.values().cloned().collect(),
+            onboarding: OnboardingView {
+                done: self.onboarding_done(),
+            },
+            model: self.model_service.state(),
         }
     }
 
@@ -886,6 +1191,41 @@ impl Core {
                     ),
                 }
             }
+            Command::ModelState => CommandResponse::ok(self.model_service.state()),
+            Command::ModelCheck => CommandResponse::ok(self.model_service.check().await),
+            Command::ModelDownload { version } => match self.model_service.start_download(Some(version)) {
+                Ok(started) => CommandResponse::ok(started),
+                Err(error) => CommandResponse::error("MODEL_DOWNLOAD_REFUSED", error),
+            },
+            Command::ModelCancel => CommandResponse::ok(self.model_service.cancel()),
+            Command::ModelActivate { id } => match self.activate_model(&id) {
+                Ok(manifest) => CommandResponse::ok(manifest.id),
+                Err(error) => CommandResponse::error("MODEL_ACTIVATE_FAILED", error),
+            },
+            Command::ModelRemove { version } => match self.model_service.remove(&version) {
+                Ok(()) => CommandResponse::done(),
+                Err(error) => CommandResponse::error("MODEL_REMOVE_FAILED", error),
+            },
+            Command::ModelRollback => match self.model_service.rollback() {
+                Ok(manifest) => CommandResponse::ok(manifest.version),
+                Err(error) => CommandResponse::error("MODEL_ROLLBACK_FAILED", error),
+            },
+            Command::EngineRescan => CommandResponse::ok(self.rescan_engines()),
+            Command::EngineConfigure { engine, enabled } => {
+                self.set_engine_configured(engine, enabled);
+                if enabled && engine == EngineId::Claude {
+                    match self.install_claude_hooks() {
+                        Ok(()) => {}
+                        Err(error) => {
+                            tracing::warn!("hooks: {error}");
+                            return CommandResponse::error("HOOKS_NOT_INSTALLED", error);
+                        }
+                    }
+                }
+                CommandResponse::ok(self.engine_configured(engine))
+            }
+            Command::OnboardingComplete => CommandResponse::ok(self.set_onboarding_done(true)),
+            Command::OnboardingReset => CommandResponse::ok(self.set_onboarding_done(false)),
             Command::Ping => CommandResponse::done(),
             Command::Messages {
                 session,
@@ -1230,15 +1570,25 @@ mod tests {
 /// Order: an activated manifest (`MIZAR_MODEL`, or the only manifest present),
 /// then `MIZAR_LAYOUT_URL` as a one-off escape hatch for development. Nothing
 /// here knows what "Mizarllm" is — the manifest does.
-fn layout_from(models: &ModelRegistry) -> (Option<Arc<LayoutService>>, Option<ModelManifest>) {
-    let manifest = models.activate_from_env().or_else(env_manifest);
-    let service = manifest
-        .as_ref()
-        .map(|m| Arc::new(LayoutService::new(m.judge())));
-    if let Some(m) = &manifest {
-        tracing::info!(model = %m.id, version = %m.version, "layout: model activated");
+fn layout_from(
+    service: &Arc<ModelService>,
+) -> (Option<Arc<LayoutService>>, Option<ModelManifest>) {
+    // An explicit URL still wins: it is how a sidecar started by hand, or a
+    // remote one, gets used without being installed through the app.
+    if let Some(manifest) = env_manifest() {
+        let judge = manifest.judge();
+        tracing::info!(model = %manifest.id, version = %manifest.version, "layout: MIZAR_LAYOUT_URL");
+        return (Some(Arc::new(LayoutService::new(judge))), Some(manifest));
     }
-    (service, manifest)
+
+    let Some(manifest) = service.manifest() else {
+        return (None, None);
+    };
+    // The judge asks the service for the port, so a sidecar started after this
+    // point is still reachable.
+    let judge = Arc::new(models::SidecarJudge::new(Arc::clone(service)));
+    tracing::info!(model = %manifest.id, version = %manifest.version, "layout: model activated");
+    (Some(Arc::new(LayoutService::new(judge))), Some(manifest))
 }
 
 /// A manifest built from `MIZAR_LAYOUT_URL`, for a sidecar started by hand.
@@ -1342,10 +1692,15 @@ fn models_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("MIZAR_MODEL_DIR") {
         return PathBuf::from(dir);
     }
-    let base = std::env::var("MIZAR_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("models"));
-    base.join("models")
+    if let Ok(dir) = std::env::var("MIZAR_DATA_DIR") {
+        return PathBuf::from(dir).join("models");
+    }
+    // Beside the endpoint, the account and the device roster: one directory to
+    // back up, one to look in when something is missing. The old default was
+    // `models/models` relative to the working directory, which for a Finder
+    // launch meant `/models/models` and never found anything.
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".agi-mizar").join("models")
 }
 
 /// The live signal a record carries, if any.

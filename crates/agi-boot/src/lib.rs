@@ -19,11 +19,13 @@
 //! 4. The tunnel dials last: it replays onto the phone server, so that server has
 //!    to exist first.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use agi_core::{endpoint, server, Core};
 use agi_engine::Engine;
+use agi_protocol::engine::EngineId;
 use agi_engine_claude::ClaudeEngine;
 use agi_engine_codex::{AppServerConfig, CodexEngine};
 use agi_engine_dsh::DshEngine;
@@ -102,57 +104,34 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
     let dsh = DshEngine::new(plugin_token.clone());
     let mut engines: Vec<Arc<dyn Engine>> = vec![dsh.clone()];
 
-    // Codex is spawned, so it is only hosted when there is something to spawn: an
-    // absent binary would otherwise mean a supervisor retrying a missing file
-    // forever and a permanently red status on a machine that has no Codex.
-    let codex_binary = std::env::var("AGI_CODEX_BIN").unwrap_or_else(|_| "codex".to_string());
-    // The ChatGPT app ships the same app-server binary; when nobody installed a
-    // `codex` on PATH, that copy is the one the GUI itself uses.
-    let codex_path = which(&codex_binary)
-        .or_else(|| which("/Applications/ChatGPT.app/Contents/Resources/codex"));
-    match codex_path {
-        Some(path) => {
-            let codex = CodexEngine::new(AppServerConfig {
-                binary: path.to_string_lossy().to_string(),
-                args: Vec::new(),
-                cwd: None,
-            });
-            let supervisor = Arc::clone(&codex);
-            tokio::spawn(async move { supervisor.run().await });
-            engines.push(codex);
-            tracing::info!("codex at {}", path.display());
-        }
-        None => tracing::info!("codex not found — set AGI_CODEX_BIN to point at one"),
-    }
+    // Claude is built once and kept: the HTTP server hands it the hook events,
+    // so it needs the concrete engine, not the trait object.
+    let claude = build_claude();
+    engines.push(Arc::clone(&claude) as Arc<dyn Engine>);
 
-    // Claude Code is always hosted: with no `claude` executable there are still
-    // transcripts to read, and a list is useful without the ability to prompt.
-    let claude_binary = std::env::var("AGI_CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string());
-    let claude = match which(&claude_binary) {
-        Some(path) => {
-            tracing::info!("claude at {}", path.display());
-            // The discovered path, not the bare name: a Finder-launched app's
-            // PATH is launchd's, and "claude" would not resolve there even
-            // though the file exists.
-            agi_engine_claude::ClaudeEngine::new(
-                agi_engine_claude::paths::projects_dir(),
-                path.to_string_lossy().to_string(),
-            )
-        }
-        None => {
-            tracing::info!("claude not found — transcripts readable, prompts are not");
-            ClaudeEngine::from_environment()
-        }
-    };
-    engines.push(claude.clone());
+    // Everything else that is a binary on this machine. DSH is not here: it
+    // dials in, and Claude is already above.
+    let (hosted, missing) = discover_local(&[EngineId::Dsh, EngineId::Claude]);
+    engines.extend(hosted);
 
     let core = Core::new(engines);
+    core.set_unavailable(missing.clone().into_iter().collect());
+    core.set_rescan(Arc::new(|already| discover_local(already)));
+    core.set_claude_hooks(Arc::new(install_hooks));
     // The window's own preferences live beside the endpoint file, not in the
     // browser: the window's origin changes with the port on every launch.
     if let Some(home) = endpoint_file.parent() {
         core.load_preferences(home.join("preferences.json"));
         core.load_account(home.join("account.json"));
         dsh.set_usage_cache_path(home.join("usage-dsh.json"));
+
+        // An install that has already signed in has been configured by hand, in
+        // public builds that predate the guide. Do not lock those people behind
+        // a flow they never saw; a genuinely new machine has neither file.
+        if home.join("account.json").exists() && !core.onboarding_done() {
+            core.set_onboarding_done(true);
+            tracing::info!("onboarding: existing install, marked done");
+        }
     }
     core.start().await;
     core.refresh_account_in_background();
@@ -252,19 +231,124 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
 }
 
 /// Install the Claude Code hooks, reporting the outcome rather than failing.
-fn install_hooks() {
+fn install_hooks() -> Result<(), String> {
     let Some(shim) = shim_path() else {
-        tracing::warn!("hooks: agi-mizar-hook not found next to this binary");
-        return;
+        return Err("agi-mizar-hook was not found next to this binary".to_string());
     };
     match agi_engine_claude::install(&agi_engine_claude::paths::settings_path(), &shim) {
-        Ok(outcome) => tracing::info!(
-            "hooks: {} added, {} already present",
-            outcome.added,
-            outcome.present
-        ),
-        Err(error) => tracing::warn!("hooks: could not be installed — {error}"),
+        Ok(outcome) => {
+            tracing::info!(
+                "hooks: {} added, {} already present",
+                outcome.added,
+                outcome.present
+            );
+            Ok(())
+        }
+        Err(error) => Err(format!("{error}")),
     }
+}
+
+/// The Claude engine, discovered or transcript-only.
+///
+/// Always built: with no `claude` executable there are still transcripts to
+/// read, and a list is useful without the ability to prompt.
+fn build_claude() -> Arc<ClaudeEngine> {
+    let claude_binary = std::env::var("AGI_CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string());
+    match which(&claude_binary) {
+        Some(path) => {
+            tracing::info!("claude at {}", path.display());
+            // The discovered path, not the bare name: a Finder-launched app's
+            // PATH is launchd's, and "claude" would not resolve there even
+            // though the file exists.
+            agi_engine_claude::ClaudeEngine::new(
+                agi_engine_claude::paths::projects_dir(),
+                path.to_string_lossy().to_string(),
+            )
+        }
+        None => {
+            tracing::info!("claude not found — transcripts readable, prompts are not");
+            ClaudeEngine::from_environment()
+        }
+    }
+}
+
+/// Find the agents that are actual binaries on this machine.
+///
+/// Called at launch and again whenever the operator asks the window to look
+/// again, which is the case that matters: they just installed the CLI in another
+/// terminal and want the agent row to stop being grey.
+fn discover_local(already: &[EngineId]) -> (Vec<Arc<dyn Engine>>, HashMap<EngineId, String>) {
+    let mut hosted: Vec<Arc<dyn Engine>> = Vec::new();
+    let mut missing: HashMap<EngineId, String> = HashMap::new();
+
+    // Codex is spawned, so it is only hosted when there is something to spawn:
+    // an absent binary would otherwise mean a supervisor retrying a missing file
+    // forever and a permanently red status on a machine that has no Codex.
+    let codex_binary = std::env::var("AGI_CODEX_BIN").unwrap_or_else(|_| "codex".to_string());
+    // The ChatGPT app ships the same app-server binary; when nobody installed a
+    // `codex` on PATH, that copy is the one the GUI itself uses.
+    let codex_path = which(&codex_binary)
+        .or_else(|| which("/Applications/ChatGPT.app/Contents/Resources/codex"));
+    match codex_path {
+        Some(path) => {
+            if !already.contains(&EngineId::Codex) {
+                let codex = CodexEngine::new(AppServerConfig {
+                    binary: path.to_string_lossy().to_string(),
+                    args: Vec::new(),
+                    cwd: None,
+                });
+                let supervisor = Arc::clone(&codex);
+                tokio::spawn(async move { supervisor.run().await });
+                hosted.push(codex);
+                tracing::info!("codex at {}", path.display());
+            }
+        }
+        None => {
+            missing.insert(
+                EngineId::Codex,
+                "codex was not found; install the ChatGPT app or the codex CLI".to_string(),
+            );
+            tracing::info!("codex not found — set AGI_CODEX_BIN to point at one");
+        }
+    }
+
+    // Claude Code is always hosted: with no `claude` executable there are still
+    // transcripts to read, and a list is useful without the ability to prompt.
+    let claude_binary = std::env::var("AGI_CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string());
+    if !already.contains(&EngineId::Claude) {
+        hosted.push(Arc::clone(&build_claude()) as Arc<dyn Engine>);
+    }
+    if which(&claude_binary).is_none() {
+        missing.insert(
+            EngineId::Claude,
+            "the claude CLI was not found; transcripts are still readable".to_string(),
+        );
+        tracing::info!("claude not found — transcripts readable, prompts are not");
+    }
+
+    // DSH is a link, not a binary, but "is DeepSeek Harness installed" still has
+    // an answer the window needs.
+    if !dsh_installed() {
+        missing.insert(
+            EngineId::Dsh,
+            "DeepSeek Harness was not found on this machine".to_string(),
+        );
+    }
+
+    (hosted, missing)
+}
+
+/// Whether the DSH host exists: the app, its CLI, or its home directory.
+fn dsh_installed() -> bool {
+    if std::path::Path::new("/Applications/DeepSeek Harness.app").exists() {
+        return true;
+    }
+    if which("dsh").is_some() {
+        return true;
+    }
+    std::env::var("HOME")
+        .map(|home| std::path::Path::new(&home).join(".dsh").exists())
+        .unwrap_or(false)
 }
 
 /// The hook shim, installed beside this binary.

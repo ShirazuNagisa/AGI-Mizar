@@ -30,6 +30,10 @@ pub struct StateSnapshot {
     pub engines: Vec<EngineStatus>,
     pub sessions: Vec<Session>,
     pub interactions: Vec<Interaction>,
+    /// Whether the first-run guide still has to be shown.
+    pub onboarding: OnboardingView,
+    /// What model this install judges turns with, and whether it is running.
+    pub model: ModelView,
 }
 
 /// One engine's connection state, as the UI's engine switch reads it.
@@ -38,11 +42,104 @@ pub struct EngineStatus {
     pub engine: EngineId,
     /// Whether prompts can be sent right now.
     pub connected: bool,
+    /// Whether the agent is installed on this machine at all.
+    ///
+    /// `connected` answers "can I send a prompt"; this answers the earlier
+    /// question. An agent that was never installed and one that is installed
+    /// but silent are different problems for the person in front of the window,
+    /// and only the second one is worth a reconnect button.
+    pub available: bool,
+    /// Whether the operator picked this agent in the guide (or configured it
+    /// later) and its dependencies are in place.
+    pub configured: bool,
     pub capabilities: Capabilities,
     /// A short human-readable fact: the plugin version, the app-server version,
-    /// or why the engine is not connected.
+    /// or why the engine is not usable.
     pub detail: Option<String>,
     pub sessions: usize,
+}
+
+/// Whether the first-run guide has been completed.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct OnboardingView {
+    pub done: bool,
+}
+
+/// What model this install has, and whether the thing that runs it is up.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ModelView {
+    /// Every model in the models directory.
+    pub installed: Vec<InstalledModel>,
+    /// The one the kernel would call, when one is set.
+    pub active: Option<InstalledModel>,
+    /// The model an upgrade replaced, kept for a rollback.
+    pub previous: Option<InstalledModel>,
+    pub runtime: RuntimeView,
+    /// A download in flight, when one is.
+    pub download: Option<DownloadView>,
+}
+
+/// One model on disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InstalledModel {
+    pub id: String,
+    pub version: String,
+    pub path: String,
+    pub size_bytes: u64,
+}
+
+/// The sidecar's own state, separate from the model's.
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeView {
+    /// `stopped`, `starting`, `ready` or `failed`.
+    pub state: String,
+    pub port: Option<u16>,
+    /// Why it failed, or which binary was started.
+    pub detail: Option<String>,
+}
+
+impl Default for RuntimeView {
+    fn default() -> Self {
+        Self {
+            state: "stopped".to_string(),
+            port: None,
+            detail: None,
+        }
+    }
+}
+
+/// A download in flight.
+#[derive(Debug, Clone, Serialize)]
+pub struct DownloadView {
+    pub version: String,
+    pub done: u64,
+    pub total: u64,
+    /// `running`, `verifying` or `failed`.
+    pub state: String,
+    pub error: Option<String>,
+}
+
+/// What the model repository says about the newest release.
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelCheckView {
+    /// The version installed on this machine, when one is.
+    pub installed: Option<String>,
+    pub latest: Option<RemoteModel>,
+    /// Why the check failed, when it did.
+    pub error: Option<String>,
+}
+
+/// A release the repository offers, resolved to a downloadable asset.
+#[derive(Debug, Clone, Serialize)]
+pub struct RemoteModel {
+    pub id: String,
+    pub version: String,
+    /// Direct asset URL, version-pinned.
+    pub url: String,
+    pub sha256: Option<String>,
+    pub size_bytes: Option<u64>,
+    /// Whether this is newer than what is installed.
+    pub newer: bool,
 }
 
 /// One day of work, as the home page charts it.
@@ -204,6 +301,31 @@ pub enum Command {
     /// Open an https URL in the system browser.
     OpenExternal { url: String },
 
+    /// What model this install has, and whether its sidecar is up.
+    ModelState,
+    /// Ask the model repository what the newest release is.
+    ModelCheck,
+    /// Download a model version; progress arrives as `model_progress` events.
+    ModelDownload { version: String },
+    /// Stop the download in flight.
+    ModelCancel,
+    /// Make an installed model the one the kernel calls.
+    ModelActivate { id: String },
+    /// Delete an installed model that is not the active one.
+    ModelRemove { version: String },
+    /// Go back to the model the last upgrade replaced.
+    ModelRollback,
+
+    /// Run engine discovery again, so an agent installed after launch shows up.
+    EngineRescan,
+    /// Remember whether an agent is configured on this machine.
+    EngineConfigure { engine: EngineId, enabled: bool },
+
+    /// The guide finished; do not show it again.
+    OnboardingComplete,
+    /// Show the guide again on the next snapshot.
+    OnboardingReset,
+
     /// Liveness probe, used by the shell before it shows a window.
     Ping,
 }
@@ -288,6 +410,13 @@ pub enum ApiEvent {
     InteractionResolved { id: String },
     /// An engine connected, disconnected, or changed its detail.
     EngineStatus { status: EngineStatus },
+    /// A model download moved; sent throttled, so a 1 GB download is not a
+    /// thousand frames a second.
+    ModelProgress { download: DownloadView },
+    /// The model set or its sidecar changed in a way worth redrawing.
+    ModelChanged { model: ModelView },
+    /// The first-run guide was finished or re-armed.
+    OnboardingChanged { done: bool },
     /// Something the operator should see but that is not an error.
     Notice { level: String, message: String },
 }
