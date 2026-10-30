@@ -17,6 +17,8 @@ pub mod catalog;
 pub mod domain;
 pub mod engine;
 pub mod link;
+pub mod session_state;
+pub mod state_frame;
 pub mod usage;
 
 pub use account::{AccountDesktop, AccountDevice, AccountUser};
@@ -25,4 +27,6 @@ pub use domain::{
     SessionKey, ToolInfo,
 };
 pub use engine::{Capabilities, EngineId};
+pub use session_state::{SessionState, SessionStateFrame, StateKind, UnknownState};
+pub use state_frame::{StateChannel, StateFrame};
 pub use usage::SessionUsage;

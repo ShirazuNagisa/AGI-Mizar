@@ -51,6 +51,7 @@ dependencies = [
  "agi-engine",
  "agi-engine-claude",
  "agi-engine-dsh",
+ "agi-layout",
  "agi-protocol",
  "anyhow",
  "async-trait",
@@ -146,6 +147,18 @@ name = "agi-hook-shim"
 version = "0.1.1"
 dependencies = [
  "serde_json",
+]
+
+[[package]]
+name = "agi-layout"
+version = "0.1.1"
+dependencies = [
+ "agi-protocol",
+ "async-trait",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

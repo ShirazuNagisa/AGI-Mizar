@@ -26,13 +26,17 @@ pub mod server;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use agi_engine::{Engine, EngineError, EngineEvent};
 use agi_protocol::api::{
     ApiEvent, Command, CommandResponse, EngineStatus, StateSnapshot, UsageOverview,
 };
-use agi_protocol::domain::{Interaction, Record, Session, SessionKey};
+use agi_layout::model::{Backend, LabelMap, ModelManifest, ModelRegistry};
+use agi_layout::{facts_from_turn, Item, Layout, LayoutService, Live, StateMachine};
+use agi_protocol::domain::{Interaction, Record, RecordKind, Session, SessionKey};
+use agi_protocol::state_frame::HEARTBEAT_MS;
+use agi_protocol::{SessionState, StateFrame};
 use agi_protocol::engine::EngineId;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -99,13 +103,38 @@ pub struct Core {
     account: account::AccountService,
     /// The tunnel's own state, when this build dials a relay.
     relay_status: RwLock<Option<Arc<dyn RelayStatusSource>>>,
+    /// Turn-completion judge, when this build has a model sidecar.
+    ///
+    /// Shadow mode by default: results are recorded and logged but nothing is
+    /// published to clients until the UI asks for them.
+    layout: RwLock<Option<Arc<LayoutService>>>,
+    /// Judgements by `(session, turn)`, so a late result can be read back.
+    layouts: Arc<Mutex<HashMap<(SessionKey, u32), Layout>>>,
+    /// The models this install can run, and which one is active.
+    models: ModelRegistry,
+    /// The active model, when one is.
+    manifest: RwLock<Option<ModelManifest>>,
+    /// What each session is doing, and the interval it is on.
+    states: Arc<Mutex<HashMap<SessionKey, StateMachine>>>,
+    /// The state channel: encoded frames, one per state change or heartbeat.
+    frames: broadcast::Sender<(SessionKey, Vec<u8>)>,
+    /// Whether the heartbeat task has been started.
+    ///
+    /// Starting it inside `new()` is not reliable: the kernel is constructed on
+    /// the main thread, before any runtime context exists, so the ticker silently
+    /// never spawns. The first emitted frame comes from the engine's async loop,
+    /// which is a runtime, and that is where it starts.
+    heartbeat_started: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Core {
     /// Build a kernel over the given engines.
     pub fn new(engines: Vec<Arc<dyn Engine>>) -> Arc<Self> {
         let (events, _) = broadcast::channel(EVENT_BUFFER);
-        Arc::new(Self {
+        let (frame_tx, _) = broadcast::channel(EVENT_BUFFER);
+        let models = ModelRegistry::open(models_dir());
+        let layout = layout_from(&models);
+        let core = Arc::new(Self {
             engines,
             store: RwLock::new(Store::default()),
             events,
@@ -115,7 +144,15 @@ impl Core {
             preferences_path: RwLock::new(None),
             account: account::AccountService::new(account_base()),
             relay_status: RwLock::new(None),
-        })
+            layout: RwLock::new(layout.0.clone()),
+            layouts: Arc::new(Mutex::new(HashMap::new())),
+            models: models.clone(),
+            manifest: RwLock::new(layout.1.clone()),
+            states: Arc::new(Mutex::new(HashMap::new())),
+            frames: frame_tx.clone(),
+            heartbeat_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        core
     }
 
     /// Attach the tunnel's state, so the window can show whether it is up.
@@ -286,6 +323,150 @@ impl Core {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Read back the judgement for one turn, if the shadow judge has produced one.
+    pub fn layout_of(&self, session: &SessionKey, turn: u32) -> Option<Layout> {
+        self.layouts.lock().ok()?.get(&(session.clone(), turn)).cloned()
+    }
+
+    /// Feed one record into a session's state machine and emit what it says.
+    fn advance(&self, session: &SessionKey, record: &Record) {
+        let mut frames: Vec<StateFrame> = Vec::new();
+        {
+            let Ok(mut map) = self.states.lock() else {
+                return;
+            };
+            let machine = map
+                .entry(session.clone())
+                .or_insert_with(StateMachine::new);
+
+            if record.kind == RecordKind::AssistantMessage {
+                if let Some(text) = record.text.as_deref() {
+                    frames.extend(machine.on_text(text));
+                }
+            } else if let Some(live) = live_of(record) {
+                if let Some(frame) = machine.on_live(live) {
+                    frames.push(frame);
+                }
+            }
+        }
+        self.emit(session, frames);
+    }
+
+    /// Announce a finished turn's resulting state.
+    fn settle(&self, session: &SessionKey, facts: &agi_layout::Facts, verdict: Option<agi_layout::State>) {
+        let frames = {
+            let Ok(mut map) = self.states.lock() else {
+                return;
+            };
+            let machine = map
+                .entry(session.clone())
+                .or_insert_with(StateMachine::new);
+            machine.on_turn_end(facts, verdict)
+        };
+        self.emit(session, frames);
+    }
+
+    /// Send frames to whoever is listening, and to the log.
+    fn emit(&self, session: &SessionKey, frames: Vec<StateFrame>) {
+        if !frames.is_empty()
+            && !self
+                .heartbeat_started
+                .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            start_heartbeat(self.states.clone(), self.frames.clone());
+        }
+        for frame in frames {
+            tracing::debug!(
+                session = %session.id,
+                state = frame.state.text(),
+                interval = frame.interval,
+                bytes = agi_protocol::state_frame::HEADER_LEN + frame.text.len(),
+                "state frame"
+            );
+            let _ = self.frames.send((session.clone(), frame.encode()));
+        }
+    }
+
+    /// Subscribe to encoded state frames, one per state change or heartbeat.
+    ///
+    /// The transport is not wired yet: this is the seam the sync channel will
+    /// read from, and the reason the kernel never touches the wire itself.
+    pub fn subscribe_states(&self) -> broadcast::Receiver<(SessionKey, Vec<u8>)> {
+        self.frames.subscribe()
+    }
+
+    /// The state a session is in, for the desktop UI.
+    pub fn session_state(&self, session: &SessionKey) -> Option<(SessionState, u32)> {
+        let map = self.states.lock().ok()?;
+        let machine = map.get(session)?;
+        Some((machine.state(), machine.interval()))
+    }
+
+    /// The models this install can run, for the desktop UI.
+    pub fn models(&self) -> &ModelRegistry {
+        &self.models
+    }
+
+    /// Switch models while the app runs.
+    ///
+    /// The registry already owns the list; this only swaps which manifest the
+    /// kernel calls, so an upgraded model is a file plus one call — no restart,
+    /// no rebuild, no phone-side change.
+    pub fn activate_model(
+        &self,
+        id: &str,
+    ) -> Result<ModelManifest, agi_layout::model::ManifestError> {
+        let manifest = self.models.activate(id)?;
+        let service = Arc::new(LayoutService::new(manifest.judge()));
+        if let Ok(mut slot) = self.layout.write() {
+            *slot = Some(service);
+        }
+        if let Ok(mut slot) = self.manifest.write() {
+            *slot = Some(manifest.clone());
+        }
+        tracing::info!(model = %manifest.id, version = %manifest.version, "layout: model switched");
+        Ok(manifest)
+    }
+
+    /// The model currently answering, if any.
+    pub fn active_model(&self) -> Option<ModelManifest> {
+        self.manifest.read().ok().and_then(|m| m.clone())
+    }
+
+    /// Judge a finished turn without blocking the event loop.
+    ///
+    /// Shadow mode: the answer lands in `layouts` and in the log, and nothing is
+    /// pushed to clients. Promotion to the wire is a deliberate, separate change.
+    fn judge_turn(self: &Arc<Self>, session: SessionKey, turn: Option<u32>, records: Vec<Record>) {
+        let Some(service) = self.layout.read().ok().and_then(|l| l.clone()) else {
+            return;
+        };
+        let Some(turn) = turn else {
+            return;
+        };
+        let facts = facts_for(&session, turn, &records);
+        let store = self.layouts.clone();
+        let core = Arc::clone(self);
+        tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let layout = service.judge_turn(Some(turn), &facts).await;
+            // The turn's verdict becomes the session's state; the frames go out
+            // through the same channel as every live signal.
+            core.settle(&session, &facts, Some(layout.state));
+            tracing::debug!(
+                session = %session.id,
+                turn,
+                state = layout.state.as_str(),
+                source = ?layout.source,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "layout judged"
+            );
+            if let Ok(mut map) = store.lock() {
+                map.insert((session, turn), layout);
+            }
+        });
+    }
+
     fn store_write(&self) -> std::sync::RwLockWriteGuard<'_, Store> {
         self.store
             .write()
@@ -298,7 +479,7 @@ impl Core {
     }
 
     /// Fold one engine event into the store and announce it.
-    fn on_engine_event(&self, engine: EngineId, event: EngineEvent) {
+    fn on_engine_event(self: &Arc<Self>, engine: EngineId, event: EngineEvent) {
         match event {
             EngineEvent::SessionUpdated(session) => {
                 {
@@ -316,13 +497,28 @@ impl Core {
                 self.publish(ApiEvent::SessionRemoved { session: key });
             }
             EngineEvent::RecordAppended { session, record } => {
-                {
+                let turn_slice = {
                     let mut store = self.store_write();
                     let bucket = store.records.entry(session.clone()).or_default();
                     bucket.push_back(record.clone());
                     while bucket.len() > MAX_RECORDS {
                         bucket.pop_front();
                     }
+                    if record.kind == RecordKind::TurnEnd {
+                        Some((turn_records(bucket, record.turn), record.turn))
+                    } else {
+                        None
+                    }
+                };
+                self.advance(&session, &record);
+                if let Some((slice, turn)) = turn_slice {
+                    // Structure settles the turn immediately, so a session never
+                    // stays stuck in "thinking" when no model is configured. A
+                    // model verdict can correct it a moment later; an agreeing
+                    // verdict sends nothing.
+                    let facts = facts_for(&session, turn.unwrap_or(0), &slice);
+                    self.settle(&session, &facts, None);
+                    self.judge_turn(session.clone(), turn, slice);
                 }
                 self.publish(ApiEvent::RecordAppended { session, record });
             }
@@ -1025,4 +1221,168 @@ mod tests {
         assert_eq!(wire["sessions"], 0);
         assert_eq!(wire["days"], serde_json::json!([]));
     }
+}
+
+// ---------------------------------------------------------------- layout glue
+
+/// The judge this launch should use, if any.
+///
+/// Order: an activated manifest (`MIZAR_MODEL`, or the only manifest present),
+/// then `MIZAR_LAYOUT_URL` as a one-off escape hatch for development. Nothing
+/// here knows what "Mizarllm" is — the manifest does.
+fn layout_from(models: &ModelRegistry) -> (Option<Arc<LayoutService>>, Option<ModelManifest>) {
+    let manifest = models.activate_from_env().or_else(env_manifest);
+    let service = manifest
+        .as_ref()
+        .map(|m| Arc::new(LayoutService::new(m.judge())));
+    if let Some(m) = &manifest {
+        tracing::info!(model = %m.id, version = %m.version, "layout: model activated");
+    }
+    (service, manifest)
+}
+
+/// A manifest built from `MIZAR_LAYOUT_URL`, for a sidecar started by hand.
+fn env_manifest() -> Option<ModelManifest> {
+    let endpoint = std::env::var("MIZAR_LAYOUT_URL").ok()?;
+    let key = std::env::var("MIZAR_LAYOUT_KEY").is_ok();
+    Some(ModelManifest {
+        id: "env".to_string(),
+        version: "0".to_string(),
+        backend: Backend::Http {
+            endpoint,
+            timeout_ms: 1500,
+            api_key_env: key.then(|| "MIZAR_LAYOUT_KEY".to_string()),
+        },
+        labels: LabelMap {
+            done: SessionState::Completed.code(),
+            needs_user: SessionState::AwaitingUser.code(),
+            stalled: SessionState::Failed.code(),
+            waiting: Some(SessionState::Background.code()),
+        },
+        note: "from MIZAR_LAYOUT_URL".to_string(),
+    })
+}
+
+/// The records belonging to one turn: everything since the previous `TurnEnd`.
+fn turn_records(bucket: &VecDeque<Record>, turn: Option<u32>) -> Vec<Record> {
+    let mut out = Vec::new();
+    for record in bucket.iter().rev() {
+        if record.kind == RecordKind::TurnEnd && !out.is_empty() {
+            break;
+        }
+        if let (Some(wanted), Some(actual)) = (turn, record.turn) {
+            if wanted != actual {
+                break;
+            }
+        }
+        out.push(record.clone());
+    }
+    out.reverse();
+    out
+}
+
+/// Normalise the engine-specific turn-end text into the vocabulary the model was
+/// trained on. Engines disagree here: DSH writes the provider's reason, Codex
+/// writes its own status, Claude writes nothing.
+fn reason_of(text: Option<&str>) -> &'static str {
+    match text.unwrap_or("completed") {
+        "error" | "failed" | "failure" => "error",
+        "aborted" | "interrupted" | "cancelled" | "canceled" => "aborted",
+        _ => "completed",
+    }
+}
+
+/// `ToolResult` carries no error flag, so a failed call is recognised by its
+/// output. Lossy on purpose: shadow mode, and the alternative is dropping the
+/// failure signal entirely.
+fn looks_failed(output: &str) -> bool {
+    let head = output.trim_start();
+    ["Error", "error", "failed", "FAILED", "Fatal", "fatal"]
+        .iter()
+        .any(|p| head.starts_with(p))
+        || head.contains("exit code 1")
+}
+
+/// Map one turn's records onto the judge's view.
+fn facts_for(session: &SessionKey, turn: u32, records: &[Record]) -> agi_layout::Facts {
+    let first = records.first().map(|r| r.time).unwrap_or(0);
+    let last = records.last().map(|r| r.time).unwrap_or(first);
+    let minutes = ((last - first).max(0) as f64) / 60_000.0;
+
+    let items: Vec<Item<'_>> = records
+        .iter()
+        .filter_map(|r| match r.kind {
+            RecordKind::UserMessage => r.text.as_deref().map(Item::User),
+            RecordKind::AssistantMessage => r.text.as_deref().map(Item::Assistant),
+            RecordKind::ToolCall => Some(Item::Tool(
+                r.tool.as_ref().map(|t| t.name.as_str()).unwrap_or("tool"),
+            )),
+            RecordKind::ToolResult => r
+                .tool
+                .as_ref()
+                .and_then(|t| t.output.as_deref())
+                .filter(|o| looks_failed(o))
+                .map(Item::ToolFailed),
+            RecordKind::Step => Some(Item::Step),
+            RecordKind::TurnEnd => Some(Item::TurnEnd(reason_of(r.text.as_deref()))),
+            _ => None,
+        })
+        .collect();
+
+    facts_from_turn(&format!("{}:{}", session.id, turn), minutes, items)
+}
+
+// ------------------------------------------------------------- session states
+
+/// Where model manifests live.
+///
+/// `MIZAR_MODEL_DIR` wins, then `<data dir>/models`. A directory that does not
+/// exist is not a problem: without models the kernel falls back to rules.
+fn models_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("MIZAR_MODEL_DIR") {
+        return PathBuf::from(dir);
+    }
+    let base = std::env::var("MIZAR_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("models"));
+    base.join("models")
+}
+
+/// The live signal a record carries, if any.
+fn live_of(record: &Record) -> Option<Live> {
+    match record.kind {
+        RecordKind::TurnStart => Some(Live::Thinking),
+        RecordKind::AssistantMessage if record.text.is_some() => Some(Live::Writing),
+        RecordKind::ToolCall | RecordKind::ToolResult => Some(Live::Tool),
+        RecordKind::Step => Some(Live::Thinking),
+        RecordKind::TurnEnd => None,
+        _ => None,
+    }
+}
+
+/// Renew every held state every few seconds, so the phone can tell "still
+/// running" from "the host died" without any other traffic.
+///
+/// Terminal states are skipped by the machine itself: "failed" stays true after
+/// a disconnect, so it needs no renewal.
+fn start_heartbeat(
+    states: Arc<Mutex<HashMap<SessionKey, StateMachine>>>,
+    tx: broadcast::Sender<(SessionKey, Vec<u8>)>,
+) {
+    // A plain thread, not a tokio task: the kernel builds this outside any
+    // runtime (the Tauri main thread), and `Handle::try_current()` there is
+    // simply `None`, which silently disabled the ticker. Renewing a state once
+    // every five seconds does not need an async runtime.
+    std::thread::Builder::new()
+        .name("mizar-state-heartbeat".to_string())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(HEARTBEAT_MS));
+            let Ok(mut map) = states.lock() else { continue };
+            for (session, machine) in map.iter_mut() {
+                if let Some(frame) = machine.heartbeat() {
+                    let _ = tx.send((session.clone(), frame.encode()));
+                }
+            }
+        })
+        .ok();
 }

@@ -19,7 +19,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// Where the relay's account service lives unless a launch says otherwise.
-pub const OFFICIAL_ACCOUNT_URL: &str = "https://dshmizar-1.shirazu-nagisa.com";
+/// Where the account service lives.
+///
+/// The account-gated relay: same host and certificate as the paid relay, but the
+/// process that also owns this desktop's tunnel. Sign-in and `/me` are proxied
+/// to the origin account service from there, so the account is the same one;
+/// only `/desktops` and `/connect` are answered locally, because those are the
+/// two questions that need to see the tunnel.
+pub const OFFICIAL_ACCOUNT_URL: &str = "https://dshmizar-1.shirazu-nagisa.com:8443";
 
 /// A failure the window can show: a code to branch on and a sentence to read.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,0 +1,40 @@
+本轮事实：结尾是问句=是 · 用过提问工具=否 · 失败调用=0 · 结束原因=completed · 回复=1 条 · 步数=5
+
+用户指令：
+这个插件包有没有类似Claude Code一样的右侧栏显示？
+
+本轮工具：bash×8
+
+轮次信息：0.6 分钟 · 5 步 · 结束原因 completed · 共 1 条回复
+
+模型最后的话（按顺序，共 1 条）：
+--- 第 1 条 ---
+**没有。** 这六个插件都不提供常驻右侧栏。我把六个包的客户端 bundle 全量搜过一遍，`rightbar`、右栏 slot 相关引用为零。
+
+## 它们各自占的位置
+
+| 插件 | 界面落点 | 是否常驻 |
+|---|---|---|
+| `dsh-cds-theme` | 全局 token 换肤 + 组件规则（侧栏、消息行、代码块、工具卡） | 全局，但**只改样式，不加结构** |
+| `dsh-system-fonts` | 设置 → 通用 → 字体几行 | 设置页内 |
+| `@hwfee/dsh-usage-stats` | **新会话空白页**问候语下方的一张卡片 | ❌ 只在空白页，进对话就没了 |
+| `@hwfee/dsh-genui` | 对话流里的 `render_ui` 卡片 | 随消息出现 |
+| `@hwfee/dsh-predict` | 输入框里的灰色幽灵文字 | 只在空输入框 |
+| `@hwfee/dsh-git-bash` | 一个 `run_shell` 工具 + 设置里一行「默认 shell」 | 无界面 |
+
+最接近你截图里 `Context` 面板的是 `usage-stats`，但差别很大：它是**新会话页的一张统计卡**（会话数、消息数、Token、活跃天数、热力图），不是贴着会话的右栏，也不显示当前这轮对话的 context 占用（26% used 那类实时数字）。
+
+## 截图里的右栏是哪来的
+
+按你已装的包看，`dsh-ob-agent`、`dsh-compact-relay`、`dsh-mizar` 里也没有任何 `rightbar`/`Connectors`/`Cowork` 的实现。所以那套 Environment / Context / Connectors / Outputs 大概率不是当前这套插件生态给的 —— 要么是宿主自身的右栏（DSH 布局里确实存在 `rightbar` 这一列和 `data-rightbar-col` 钩子，没插件填充时就收起来），要么来自别的客户端。
+
+## 如果你想要一个
+
+宿主是支持右栏的：布局层有 `data-rightbar-col` 这一列，宽度由 grid 控制；插件可以往里面挂组件。要做的话是一个新的客户端插件（不是改这六个里的任何一个），需要：
+
+- 一个 bundle 声明往右栏 slot 注入；
+- 数据源方面，context 占用可以从会话的 usage 事件或 `~/.dsh/sessions` 日志算，`usage-stats` 已经写好了 zstd 多帧解压和增量缓存，逻辑可以复用；
+- 构建：Vite/TS 客户端 bundle + `cordis.patch.yml`，按 `link:` 方式挂进 profile 调试。
+
+
+只输出 JSON。

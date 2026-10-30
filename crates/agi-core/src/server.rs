@@ -260,6 +260,12 @@ async fn command_handler(
 #[derive(Deserialize)]
 struct TokenQuery {
     token: String,
+    /// Ask for the binary state channel on this socket (`?state=1`).
+    ///
+    /// Off by default, and the default is what a 0.9.8 client gets: it neither
+    /// asks nor would understand a binary frame, so it must never receive one.
+    #[serde(default)]
+    state: Option<String>,
 }
 
 async fn events_handler(
@@ -271,13 +277,21 @@ async fn events_handler(
         return unauthorized();
     }
     let attendance = Attendance::join(&app.claude, &app.watchers);
-    upgrade.on_upgrade(move |socket| pump_events(app.core, socket, attendance))
+    let wants_states = query.state.as_deref() == Some("1") && state_channel_enabled();
+    upgrade.on_upgrade(move |socket| pump_events(app.core, socket, attendance, wants_states))
 }
 
 /// Forward every API event to one client.
-async fn pump_events(core: Arc<Core>, socket: WebSocket, _attendance: Attendance) {
+async fn pump_events(
+    core: Arc<Core>,
+    socket: WebSocket,
+    _attendance: Attendance,
+    wants_states: bool,
+) {
     let (mut sink, mut stream) = socket.split();
     let mut events = core.subscribe();
+    let mut states = core.subscribe_states();
+    let mut wants_states = wants_states;
 
     loop {
         tokio::select! {
@@ -296,9 +310,42 @@ async fn pump_events(core: Arc<Core>, socket: WebSocket, _attendance: Attendance
                     Err(_) => return,
                 }
             }
+            // The state channel, for clients that asked for it. Binary frames
+            // carry their own type byte, so a client can tell them from the
+            // JSON events without any envelope.
+            frame = states.recv(), if wants_states => {
+                match frame {
+                    Ok((session, bytes)) => {
+                        // The socket carries many sessions; the frame does not
+                        // name one. A one-byte length prefix and the session id
+                        // make the binding explicit without touching the frame
+                        // format the phone already decodes.
+                        let mut payload = Vec::with_capacity(bytes.len() + 1 + session.id.len());
+                        payload.push(session.id.len().min(255) as u8);
+                        payload.extend_from_slice(session.id.as_bytes());
+                        payload.extend_from_slice(&bytes);
+                        if sink.send(Message::Binary(payload.into())).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => return,
+                }
+            }
             // Read (and ignore) client frames so a close is noticed promptly.
             frame = stream.next() => {
                 match frame {
+                    // The one client frame this socket acts on: asking for the
+                    // state channel. Everything else is still ignored -- the
+                    // socket is a push channel, not a command endpoint.
+                    Some(Ok(Message::Text(text))) => {
+                        if !wants_states
+                            && state_channel_enabled()
+                            && is_state_subscribe(&text)
+                        {
+                            wants_states = true;
+                        }
+                    }
                     Some(Ok(Message::Close(_))) | None => return,
                     Some(Err(_)) => return,
                     _ => {}
@@ -493,4 +540,24 @@ mod tests {
         assert!(!constant_time_eq("abc", "abcd"));
         assert!(!constant_time_eq("", "a"));
     }
+}
+
+/// Whether this build offers the state channel at all.
+///
+/// Off unless `MIZAR_STATE_CHANNEL=1`. The experimental channel runs on one
+/// relay host only; a build without the variable behaves exactly as before, so a
+/// client cannot discover a channel that is not meant to be there.
+fn state_channel_enabled() -> bool {
+    std::env::var("MIZAR_STATE_CHANNEL").map(|v| v == "1").unwrap_or(false)
+}
+
+/// Whether a client frame asks for the state channel.
+///
+/// Deliberately narrow: an exact `{"method":"state.subscribe"}` and nothing
+/// else. A typo is silence, not a half-subscription.
+fn is_state_subscribe(text: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return false;
+    };
+    value.get("method").and_then(Value::as_str) == Some("state.subscribe")
 }

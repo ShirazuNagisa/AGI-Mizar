@@ -357,6 +357,13 @@ impl RelayClient {
             .and_then(Value::as_str)
             .unwrap_or("Phone")
             .to_string();
+        // Which agent this phone asked for. Empty means "everything", which is
+        // what an older client gets: it never sends the field.
+        let engine = frame
+            .get("engine")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         let store = self
             .store
             .lock()
@@ -365,7 +372,7 @@ impl RelayClient {
         tokio::spawn(async move {
             let token = match store {
                 Some(store) if !account.is_empty() && !phone.is_empty() => {
-                    provision_for_phone(&store, &account, &phone, &name).ok()
+                    provision_for_phone(&store, &account, &phone, &name, &engine).ok()
                 }
                 _ => None,
             };
@@ -708,8 +715,28 @@ pub(crate) fn unbase64(text: &str) -> Option<Vec<u8>> {
 }
 
 /// The marker a provisioned token carries, so logout can find it again.
-fn account_marker(account: &str, phone: &str) -> String {
-    format!("account:{account}:{phone}")
+///
+/// The engine rides at the end: a phone that chose "DSH" gets a token that can
+/// see nothing else, and the choice survives a reconnect because it is part of
+/// the identity rather than part of the session.
+fn account_marker(account: &str, phone: &str, engine: &str) -> String {
+    if engine.is_empty() {
+        format!("account:{account}:{phone}")
+    } else {
+        format!("account:{account}:{phone}:{engine}")
+    }
+}
+
+/// The engine a provisioned token was scoped to, if any.
+pub fn engine_of_marker(marker: &str) -> Option<&str> {
+    let mut parts = marker.split(':');
+    if parts.next() != Some("account") {
+        return None;
+    }
+    parts.next()?; // account id
+    parts.next()?; // phone id
+    let engine = parts.next()?;
+    (!engine.is_empty()).then_some(engine)
 }
 
 /// Mint one phone's token, replacing the one it had before.
@@ -721,10 +748,18 @@ fn provision_for_phone(
     account: &str,
     phone: &str,
     name: &str,
+    engine: &str,
 ) -> std::io::Result<String> {
-    let marker = account_marker(account, phone);
+    let marker = account_marker(account, phone, engine);
+    // Revoke every token this phone had, whatever agent it was scoped to: the
+    // phone holds one token at a time, and switching from DSH to Codex must not
+    // leave the previous scope alive.
+    let stale = format!("account:{account}:{phone}");
     for device in store.devices() {
-        if device.is_live() && device.model.as_deref() == Some(marker.as_str()) {
+        let is_this_phone = device.model.as_deref().is_some_and(|model| {
+            model == stale || model.starts_with(&format!("{stale}:"))
+        });
+        if device.is_live() && is_this_phone {
             let _ = store.revoke(&device.id);
         }
     }
@@ -824,16 +859,16 @@ mod tests {
         // A pairing-issued device is not this code's business.
         let paired = store.issue("iPhone (paired)", None).unwrap();
 
-        let first = provision_for_phone(&store, "u1", "phone-a", "iPhone").unwrap();
+        let first = provision_for_phone(&store, "u1", "phone-a", "iPhone", "").unwrap();
         assert!(store.lookup(&first).is_some());
-        let second = provision_for_phone(&store, "u1", "phone-a", "iPhone").unwrap();
+        let second = provision_for_phone(&store, "u1", "phone-a", "iPhone", "").unwrap();
         assert_ne!(first, second);
         assert!(store.lookup(&first).is_none(), "the old token is revoked");
         assert!(store.lookup(&second).is_some());
         assert!(store.lookup(&paired.token).is_some());
 
         // Another phone of the same account keeps its own token.
-        let other = provision_for_phone(&store, "u1", "phone-b", "iPad").unwrap();
+        let other = provision_for_phone(&store, "u1", "phone-b", "iPad", "").unwrap();
         assert!(store.lookup(&other).is_some());
         assert!(store.lookup(&second).is_some());
 
@@ -848,8 +883,8 @@ mod tests {
     fn another_accounts_tokens_are_not_revoked_by_a_sign_out() {
         let dir = tempfile::tempdir().unwrap();
         let store = DeviceStore::open(dir.path().join("devices.json"), "host").unwrap();
-        let mine = provision_for_phone(&store, "u1", "p", "iPhone").unwrap();
-        let theirs = provision_for_phone(&store, "u2", "q", "iPhone").unwrap();
+        let mine = provision_for_phone(&store, "u1", "p", "iPhone", "").unwrap();
+        let theirs = provision_for_phone(&store, "u2", "q", "iPhone", "").unwrap();
         revoke_account_tokens(&store, "u1");
         assert!(store.lookup(&mine).is_none());
         assert!(store.lookup(&theirs).is_some());

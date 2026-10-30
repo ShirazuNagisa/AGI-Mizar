@@ -143,9 +143,12 @@ impl MizarServer {
     ///
     /// The list is the phone's too (`RelayTier`): a host that accepted an
     /// arbitrary origin would become a way to point a phone's traffic anywhere.
-    const SELECTABLE_RELAYS: [&'static str; 2] = [
+    const SELECTABLE_RELAYS: [&'static str; 3] = [
         "https://dshmizar.shirazu-nagisa.com",
         "https://dshmizar-1.shirazu-nagisa.com",
+        // The account-gated relay: same host, different port, no anonymous
+        // traffic. Experimental, and only this build knows the address.
+        "https://dshmizar-1.shirazu-nagisa.com:8443",
     ];
 
     /// Move the tunnel to another public relay.
@@ -351,6 +354,17 @@ impl MizarServer {
         true
     }
 
+    /// The agent this phone connected for, when it said.
+    ///
+    /// A token minted through the account flow carries the choice, so a phone
+    /// that picked "DSH" cannot see the Claude or Codex sessions at all -- the
+    /// filter lives here, not in the phone's view code, because "only that
+    /// agent's content" is a promise about what leaves this machine.
+    fn engine_scope(device: &crate::store::Device) -> Option<agi_protocol::engine::EngineId> {
+        let engine = crate::relay::engine_of_marker(device.model.as_deref()?)?;
+        agi_protocol::engine::EngineId::parse(engine)
+    }
+
     /// One Mizar method call.
     async fn call(&self, device: &crate::store::Device, frame: &ClientFrame) -> ServerFrame {
         let id = frame.id.clone().unwrap_or_default();
@@ -388,9 +402,11 @@ impl MizarServer {
 
             "session.list" => {
                 let snapshot = self.core.snapshot();
+                let scope = Self::engine_scope(device);
                 let items: Vec<SessionRow> = snapshot
                     .sessions
                     .iter()
+                    .filter(|session| scope.is_none_or(|engine| session.key.engine == engine))
                     .map(|session| SessionRow {
                         session_id: session.key.to_string(),
                         updated_at: session.updated_at,
@@ -1959,11 +1975,14 @@ async fn upgrade(
 /// kind of bug that only shows up as a truncated frame under load.
 async fn serve_socket(server: Arc<MizarServer>, peer: SocketAddr, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
-    let (out, mut out_rx) = tokio::sync::mpsc::channel::<String>(64);
+    // Text for the API, binary for the state channel: one queue, because one
+    // socket, and the order between "the turn ended" and "the answer streamed"
+    // is part of what the phone draws.
+    let (out, mut out_rx) = tokio::sync::mpsc::channel::<Message>(64);
 
     let writer = tokio::spawn(async move {
-        while let Some(text) = out_rx.recv().await {
-            if sink.send(Message::Text(text)).await.is_err() {
+        while let Some(message) = out_rx.recv().await {
+            if sink.send(message).await.is_err() {
                 break;
             }
         }
@@ -2036,6 +2055,37 @@ async fn serve_socket(server: Arc<MizarServer>, peer: SocketAddr, socket: WebSoc
     )
     .await;
 
+    // The state channel: one byte per session-state change, plus a heartbeat
+    // every few seconds, scoped to the agent this phone asked for. This is what
+    // turns the phone's status pill and stream bar on at all -- before this,
+    // the channel only reached the desktop's own window.
+    {
+        let out = out.clone();
+        let scope = MizarServer::engine_scope(&device);
+        let mut states = server.core.subscribe_states();
+        tokio::spawn(async move {
+            loop {
+                match states.recv().await {
+                    Ok((session, bytes)) => {
+                        if scope.is_some_and(|engine| session.engine != engine) {
+                            continue;
+                        }
+                        let id = session.to_string();
+                        let mut payload = Vec::with_capacity(1 + id.len() + bytes.len());
+                        payload.push(id.len().min(255) as u8);
+                        payload.extend_from_slice(id.as_bytes());
+                        payload.extend_from_slice(&bytes);
+                        if out.send(Message::Binary(payload.into())).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => return,
+                }
+            }
+        });
+    }
+
     // Interaction notifications, so an approval reaches the phone without a poll.
     let mut events = server.core.subscribe();
     let forwarder = {
@@ -2106,11 +2156,11 @@ async fn serve_socket(server: Arc<MizarServer>, peer: SocketAddr, socket: WebSoc
 
 /// Write one frame to the connection's writer task.
 async fn send(
-    out: &tokio::sync::mpsc::Sender<String>,
+    out: &tokio::sync::mpsc::Sender<Message>,
     frame: ServerFrame,
-) -> Result<(), tokio::sync::mpsc::error::SendError<String>> {
+) -> Result<(), tokio::sync::mpsc::error::SendError<Message>> {
     let text = serde_json::to_string(&frame).unwrap_or_else(|_| "{}".to_string());
-    out.send(text).await
+    out.send(Message::Text(text.into())).await
 }
 
 /// Translate one kernel event into the frame the phone understands.
