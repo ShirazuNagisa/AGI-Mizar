@@ -980,6 +980,29 @@ impl MizarServer {
             // The running turn's one-line process rows. The phone polls this a
             // couple of times a second while a turn runs, and clears the feed
             // when the host says no turn is running.
+            // What the phone's home page charts: the last weeks of work, one
+            // row per day that had any. The kernel already folds the engines
+            // together (a date two agents worked on is one row), so this is a
+            // pass-through rather than a second accumulation.
+            "usage.overview" => {
+                let response = self
+                    .core
+                    .dispatch(agi_protocol::api::Command::UsageOverview)
+                    .await;
+                match (response.ok, response.value, response.error) {
+                    (true, Some(value), _) => ServerFrame::ok(id, value),
+                    (_, _, Some(error)) => ServerFrame::error(
+                        Some(id),
+                        ErrorCode::from_engine(&error.code),
+                        error.message,
+                    ),
+                    _ => ServerFrame::error(
+                        Some(id),
+                        ErrorCode::RemoteError,
+                        "usage.overview answered nothing",
+                    ),
+                }
+            }
             "session.activity" => {
                 let Some(key) = self.scoped_session_of(scope, frame) else {
                     return ServerFrame::error(
