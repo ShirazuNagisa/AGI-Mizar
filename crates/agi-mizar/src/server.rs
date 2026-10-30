@@ -611,8 +611,30 @@ impl MizarServer {
                 match engine.records(&key, limit, before).await {
                     Ok(records) => {
                         let as_of = records.last().map(|record| record.seq).unwrap_or(0);
-                        let events: Vec<Value> =
+                        let mut events: Vec<Value> =
                             records.iter().filter_map(record_to_event).collect();
+                        // What each turn cost, hung on its own `turn/end` -- the
+                        // one place the phone reads it, and the one place it was
+                        // always empty. An engine that cannot say answers with an
+                        // empty map, so the footer falls back to its own words
+                        // rather than to a number nobody counted.
+                        if let Ok(totals) = engine.turn_usage(&key).await {
+                            if !totals.is_empty() {
+                                for event in &mut events {
+                                    let is_end = event.get("type").and_then(Value::as_str)
+                                        == Some("turn/end");
+                                    if !is_end {
+                                        continue;
+                                    }
+                                    let Some(data) = event.get_mut("data") else { continue };
+                                    let turn = data.get("turn").and_then(Value::as_u64);
+                                    let Some(turn) = turn else { continue };
+                                    if let Some(total) = totals.get(&(turn as u32)) {
+                                        data["mizarTokenUsage"] = json!({ "totalTokens": total });
+                                    }
+                                }
+                            }
+                        }
                         ServerFrame::ok(
                             id,
                             json!({

@@ -221,6 +221,21 @@ pub trait Engine: Send + Sync {
         Err(self.unsupported("deliverables"))
     }
 
+    /// What each turn of a session cost, when the engine can say.
+    ///
+    /// The conversation's per-turn footer is the one place a figure was never
+    /// available: the day charts are folded from the same records, so an
+    /// adapter that can answer `usage_history` can usually answer this too.
+    /// An engine that cannot returns an empty map rather than an error -- a
+    /// missing footer is a smaller failure than a conversation that will not
+    /// open.
+    async fn turn_usage(
+        &self,
+        _session: &SessionKey,
+    ) -> Result<std::collections::HashMap<u32, u64>, EngineError> {
+        Ok(std::collections::HashMap::new())
+    }
+
     /// Every day of work this engine can account for, oldest first.
     ///
     /// The home page's charts are one graph across three products, so each

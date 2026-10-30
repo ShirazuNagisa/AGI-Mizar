@@ -126,6 +126,47 @@ impl SessionUsage {
     }
 }
 
+/// Billed tokens per turn, from a session's raw records.
+///
+/// The same samples [`SessionUsage`] folds into days, kept by the turn they
+/// belong to instead of the day they happened on: a conversation's footer asks
+/// "what did this turn cost", and the host had no answer for it at all until
+/// this existed -- every turn said "Token usage unavailable" on a machine whose
+/// day charts were correct, because the two questions were reading the same
+/// records through different doors.
+///
+/// The replacement rule is the day fold's: one sample per `(turn, step)`, the
+/// last one wins, so a retried step is not counted twice.
+///
+/// - Parameters:
+///   - totals: the accumulator, turn to billed tokens.
+///   - records: one page of raw records.
+///   - session_model: the model to assume when a record names none.
+pub fn fold_per_turn(
+    totals: &mut std::collections::HashMap<u32, u64>,
+    records: &[Value],
+    session_model: Option<&str>,
+) {
+    let mut samples: std::collections::HashMap<Slot, Sample> = std::collections::HashMap::new();
+    for record in records {
+        let model = model_of(record).or(session_model).unwrap_or(UNKNOWN_MODEL);
+        let Some((slot, sample)) = usage_of(record, model) else {
+            continue;
+        };
+        samples.insert(slot, sample);
+    }
+    for (slot, sample) in samples {
+        // A record with no turn is not part of any conversation's footer: it is
+        // bookkeeping that happened outside a turn, and counting it would put
+        // tokens on a turn that did not spend them.
+        if let Slot::Step(turn, _) = slot {
+            if turn >= 0 {
+                *totals.entry(turn as u32).or_default() += sample.input + sample.output;
+            }
+        }
+    }
+}
+
 /// Count one page of a session's raw records into `days`.
 ///
 /// The one-call form; a caller reading several pages uses [`SessionUsage`].

@@ -1778,6 +1778,20 @@ impl Engine for DshEngine {
         Ok(stats)
     }
 
+    async fn turn_usage(
+        &self,
+        session: &SessionKey,
+    ) -> Result<std::collections::HashMap<u32, u64>, EngineError> {
+        // One page is enough for the footers on screen: the conversation reads
+        // the newest records, and a turn older than the page is a turn the
+        // operator has scrolled past. Reading the whole log to label a footer
+        // would be the tail wagging the dog.
+        let records = self.raw_page(session, USAGE_PAGE, None).await?;
+        let mut totals = std::collections::HashMap::new();
+        crate::history::fold_per_turn(&mut totals, &records, None);
+        Ok(totals)
+    }
+
     async fn usage(
         &self,
         session: &SessionKey,
