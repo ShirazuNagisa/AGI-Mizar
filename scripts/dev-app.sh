@@ -32,6 +32,10 @@ cd "$(dirname "$0")/.."
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 
 cargo build -p agi-app
+# The Claude hooks point at this binary by absolute path, so a dev bundle that
+# lacks it cannot configure Claude at all — the guide fails at step three with
+# "agi-mizar-hook was not found". Packaged builds get it from package.sh.
+cargo build -p agi-hook-shim
 
 # The bundle lives beside the binary: one directory to clean, one place to look.
 APP="$TARGET_DIR/debug/AGI Mizar.app"
@@ -44,6 +48,9 @@ cp crates/agi-app/icons/icon.icns "$RESOURCES/icon.icns"
 
 # The model runner is a bundle resource, exactly as packaged builds have it, so
 # `Resources/bin/llama-server` is the path a dev build exercises too.
+cp "$TARGET_DIR/debug/agi-mizar-hook" "$RESOURCES/agi-mizar-hook"
+chmod +x "$RESOURCES/agi-mizar-hook"
+
 if [[ -d crates/agi-app/resources/bin ]]; then
   mkdir -p "$RESOURCES/bin"
   cp -R crates/agi-app/resources/bin/. "$RESOURCES/bin/"
