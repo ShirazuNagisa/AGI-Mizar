@@ -8,7 +8,7 @@ import type {
   PairingView,
 } from '../api'
 import type { ThemePreference } from '../theme'
-import { formatGigabytes } from '../format'
+import { formatGigabytes, formatModelVersion } from '../format'
 import { ChevronIcon, Spinner } from '../icons'
 import { Button } from './ui/button'
 import { Progress } from './ui/progress'
@@ -309,7 +309,7 @@ function ModelSection({ kernel, model }: { kernel: Kernel; model: ModelState | n
         <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[13px]">
           <span className="shrink-0 text-muted">模型</span>
           <span className="selectable truncate text-fg">
-            {active === null ? '未安装' : `Mizarllm ${active.version}`}
+            {active === null ? '未安装' : `Mizarllm ${formatModelVersion(active.version)}`}
           </span>
         </div>
 
@@ -363,17 +363,17 @@ function ModelSection({ kernel, model }: { kernel: Kernel; model: ModelState | n
             <div className="flex items-center justify-between gap-4 text-[12px]">
               <span className="text-fg">
                 {download.state === 'verifying'
-                  ? `正在校验 ${download.version}`
+                  ? `正在校验 ${formatModelVersion(download.version)}`
                   : download.state === 'failed'
-                    ? `下载失败 ${download.version}`
-                    : `正在下载 ${download.version}`}
+                    ? `下载失败 ${formatModelVersion(download.version)}`
+                    : `正在下载 ${formatModelVersion(download.version)}`}
               </span>
               <span className="tabular shrink-0 text-muted">{percent}%</span>
             </div>
             <Progress
               className="mt-2"
               value={percent}
-              label={`下载模型 ${download.version}`}
+              label={`下载模型 ${formatModelVersion(download.version)}`}
             />
             <div className="mt-1.5 flex items-center justify-between gap-4 text-[11px] text-muted">
               <span className="tabular">

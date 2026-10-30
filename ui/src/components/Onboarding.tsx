@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import type { AccountUser, EngineId, EngineStatus, Kernel, ModelCheck, ModelState } from '../api'
 import { AGENTS } from '../navigation'
 import { ENGINE_INSTALL_HINTS } from '../engines'
-import { formatGigabytes } from '../format'
+import { formatGigabytes, formatModelVersion } from '../format'
 import { useShellSettings, type ShellSettingsState } from '../lib/use-shell-settings'
 import { quitApp, shellAvailable, shellFailure } from '../shell'
 import { Button } from './ui/button'
@@ -631,13 +631,13 @@ function ModelStep({ kernel, model, onLater }: ModelStepProps) {
         <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[13px]">
           <span className="shrink-0 text-muted">当前版本</span>
           <span className="selectable truncate text-fg">
-            {active === null ? '未下载' : active.version}
+            {active === null ? '未下载' : formatModelVersion(active.version)}
           </span>
         </div>
         <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[13px]">
           <span className="shrink-0 text-muted">最新版本</span>
           <span className="selectable truncate text-fg">
-            {checking ? '读取中…' : latest === null ? '未知' : latest.version}
+            {checking ? '读取中…' : latest === null ? '未知' : formatModelVersion(latest.version)}
           </span>
         </div>
 
@@ -676,7 +676,7 @@ function ModelStep({ kernel, model, onLater }: ModelStepProps) {
           ) : (
             <div className="flex items-center justify-between gap-4">
               <span className="text-[12px] leading-5 text-fg">
-                可下载 {latest.version}
+                可下载 {formatModelVersion(latest.version)}
                 <span className="text-muted"> · {formatGigabytes(latest.size_bytes)}</span>
               </span>
               <Button

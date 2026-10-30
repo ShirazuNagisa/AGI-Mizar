@@ -16,6 +16,21 @@ function trim(value: number): string {
 }
 
 /**
+ * A model version as the repository tags it: `v1`, `v2.1`.
+ *
+ * The repository numbers models by release, not by semver patch: the shipped
+ * manifest may say `1.0.0` while the tag says `v1`, and showing both forms in
+ * one window reads as two different models. Trailing zeros are dropped for the
+ * same reason.
+ */
+export function formatModelVersion(version: string): string {
+  const bare = version.trim().replace(/^v/i, '')
+  if (bare === '') return version
+  const trimmed = bare.replace(/(\.0)+$/, '')
+  return `v${trimmed === '' ? '0' : trimmed}`
+}
+
+/**
  * A file size as a download reads it: gigabytes, two decimals.
  *
  * Models are about a gigabyte and people compare them by that number, so even a

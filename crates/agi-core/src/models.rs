@@ -44,8 +44,12 @@ fn latest_manifest_url() -> String {
 }
 
 /// Where the assets of one release live.
+///
+/// The version *is* the tag: model releases are numbered `v1`, `v2`, and the
+/// manifest travels with them. Prefixing another `v` here produced
+/// `/download/vv1/`, which is a 404 nobody would look for.
 fn tag_asset_url() -> String {
-    format!("{}/releases/download/v{{version}}/{{file}}", repo_base())
+    format!("{}/releases/download/{{version}}/{{file}}", repo_base())
 }
 
 /// How often download progress is published.
