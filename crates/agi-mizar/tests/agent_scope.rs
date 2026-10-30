@@ -222,6 +222,22 @@ async fn http(port: u16, method: &str, path: &str, body: &str) -> (u16, String) 
     (0, String::new())
 }
 
+/// The phone measures the link with `ping`, so the host has to answer it --
+/// and answer it with a clock, which is all the phone reads.
+#[tokio::test]
+async fn ping_is_answered_with_the_hosts_clock() {
+    let (server, store, _core, _fakes, _dir) = start().await;
+    let issued = store.issue("iPhone", None).unwrap();
+    let (mut socket, _) = connect(server.port(), &issued.token, None).await;
+
+    let value = call(&mut socket, "ping", json!({})).await;
+    assert_eq!(value["type"], "ok");
+    let time = value["result"]["time"].as_f64().unwrap();
+    // Milliseconds since the epoch, so somewhere past 2020 and not in the
+    // future by more than a minute.
+    assert!(time > 1_577_836_800_000.0, "time was {time}");
+}
+
 #[tokio::test]
 async fn host_info_names_the_agents_the_computer_serves() {
     let (server, store, _core, _fakes, _dir) = start().await;

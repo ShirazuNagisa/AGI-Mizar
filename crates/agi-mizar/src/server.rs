@@ -477,6 +477,17 @@ impl MizarServer {
         let id = frame.id.clone().unwrap_or_default();
 
         match frame.kind.as_str() {
+            // The cheapest frame the phone can ask for, and the only one that
+            // answers without touching the store: a round trip measured with it
+            // is the link, not this machine's work. Answered before any method
+            // lookup for the same reason -- see the phone's `measureLatency`.
+            "ping" => {
+                let time = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|since| since.as_millis() as f64)
+                    .unwrap_or_default();
+                ServerFrame::ok(id, json!({ "time": time }))
+            }
             "host.info" => {
                 let addresses = self.addresses();
                 // Which agents this computer serves, so the phone can ask which
