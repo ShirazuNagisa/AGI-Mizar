@@ -47,7 +47,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$RESOURCES"
 
 cp "$TARGET_DIR/debug/agi-mizar" "$APP/Contents/MacOS/agi-mizar"
-cp crates/agi-app/icons/icon.icns "$RESOURCES/icon.icns"
+cp crates/agi-app/icons/icon-dark.icns "$RESOURCES/icon.icns"
 
 # The model runner is a bundle resource, exactly as packaged builds have it, so
 # `Resources/bin/llama-server` is the path a dev build exercises too.

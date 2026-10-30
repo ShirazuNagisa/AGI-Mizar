@@ -275,6 +275,11 @@ fn main() {
             // to stop the model runner explicitly or it stays resident with a
             // gigabyte of weights loaded.
             if let tauri::RunEvent::ExitRequested { .. } = event {
+                // The quit animation is drawn from the icon the app last set.
+                // Repaint it for the theme we actually have before the process
+                // goes away, so leaving does not flash the other tile.
+                #[cfg(target_os = "macos")]
+                dock_icon::follow(&core_for_exit.theme());
                 tauri::async_runtime::block_on(async {
                     core_for_exit.models().shutdown().await;
                 });
