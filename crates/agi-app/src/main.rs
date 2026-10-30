@@ -129,7 +129,18 @@ fn main() {
             // hatch for a scripted setup.
             install_claude_hooks: std::env::args()
                 .any(|argument| argument == "--install-claude-hooks"),
-            relay_url: std::env::var("AGI_RELAY_URL").ok(),
+            // Where the tunnel dials. Two relays run side by side, and only the
+            // account one publishes presence to the service the phone reads its
+            // desktop list from: dialling the free relay connects the tunnel and
+            // still leaves the computer invisible to the phone. Default to the
+            // relay that shares a host with the account API, and let
+            // `AGI_RELAY_URL` point somewhere else (a local relay, say).
+            relay_url: Some(
+                std::env::var("AGI_RELAY_URL")
+                    .ok()
+                    .filter(|url| !url.trim().is_empty())
+                    .unwrap_or_else(|| agi_core::account::OFFICIAL_ACCOUNT_URL.to_string()),
+            ),
             relay_token: std::env::var("AGI_RELAY_TOKEN").ok(),
         }))
         .expect("the kernel failed to start");
