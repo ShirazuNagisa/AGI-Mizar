@@ -1,6 +1,6 @@
 import type { EngineStatus } from '../api'
 import { AGENTS, type Page, samePage } from '../navigation'
-import { ClaudeMark, CodexMark, DshMark, GearIcon, PersonIcon } from '../icons'
+import { ENGINE_MARKS, GearIcon, PersonIcon } from '../icons'
 import { cn } from '../lib/utils'
 import mizar from '../assets/mizar.png'
 
@@ -11,9 +11,6 @@ interface SidebarProps {
   loggedIn: boolean
   onNavigate: (page: Page) => void
 }
-
-/** One agent's mark, named in the engine's own spelling. */
-const MARKS = { dsh: DshMark, claude: ClaudeMark, codex: CodexMark } as const
 
 /**
  * The window's left column: the mark that goes home, the three agents, and the
@@ -41,8 +38,12 @@ export function Sidebar({ engines, page, serverConnected, loggedIn, onNavigate }
         {AGENTS.map(({ engine, name }) => {
           const status = engines.find((candidate) => candidate.engine === engine)
           const connected = status?.connected ?? false
+          // Only an explicit "not installed" fades the dot; a snapshot that does
+          // not mention the engine at all keeps the plain unconnected look.
+          const installed = status?.available ?? true
           const active = samePage(page, { kind: 'agent', engine })
-          const Mark = MARKS[engine]
+          const Mark = ENGINE_MARKS[engine]
+          const lamp = connected ? '已连接' : installed ? '未连接' : '本机未安装'
           return (
             <button
               key={engine}
@@ -57,7 +58,7 @@ export function Sidebar({ engines, page, serverConnected, loggedIn, onNavigate }
               <span
                 className={cn(
                   'flex-1 truncate text-[13px]',
-                  active ? 'font-medium text-fg' : 'text-fg/90',
+                  active ? 'font-medium text-fg' : installed ? 'text-fg/90' : 'text-fg/60',
                 )}
               >
                 {name}
@@ -67,10 +68,12 @@ export function Sidebar({ engines, page, serverConnected, loggedIn, onNavigate }
                   'size-2 rounded-full transition-colors',
                   connected
                     ? 'bg-accent shadow-[0_0_0_3px_var(--accent-soft)]'
-                    : 'bg-muted/40',
+                    : installed
+                      ? 'bg-muted/40'
+                      : 'bg-muted/20',
                 )}
-                title={connected ? '可用' : '不可用'}
-                aria-label={connected ? '可用' : '不可用'}
+                title={lamp}
+                aria-label={lamp}
               />
             </button>
           )

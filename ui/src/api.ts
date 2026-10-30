@@ -30,9 +30,66 @@ export interface Capabilities {
 export interface EngineStatus {
   engine: EngineId
   connected: boolean
+  /** Whether the agent is installed on this machine at all. */
+  available: boolean
+  /** Whether the operator picked it and its dependencies are in place. */
+  configured: boolean
   capabilities: Capabilities
   detail: string | null
   sessions: number
+}
+
+/** Whether the first-run guide still has to be shown. */
+export interface OnboardingState {
+  done: boolean
+}
+
+/** One model on disk. */
+export interface InstalledModel {
+  id: string
+  version: string
+  path: string
+  size_bytes: number
+}
+
+/** The sidecar that runs the model, state included. */
+export interface ModelRuntime {
+  state: 'stopped' | 'starting' | 'ready' | 'failed'
+  port: number | null
+  detail: string | null
+}
+
+/** A download in flight. */
+export interface ModelDownload {
+  version: string
+  done: number
+  total: number
+  state: 'running' | 'verifying' | 'failed'
+  error: string | null
+}
+
+/** What model this install has, and whether the thing that runs it is up. */
+export interface ModelState {
+  installed: InstalledModel[]
+  active: InstalledModel | null
+  previous: InstalledModel | null
+  runtime: ModelRuntime
+  download: ModelDownload | null
+}
+
+/** What the model repository says the newest release is. */
+export interface ModelCheck {
+  installed: string | null
+  latest: {
+    id: string
+    version: string
+    url: string
+    sha256: string
+    size_bytes: number
+    /** Whether `latest` is newer than what is installed. */
+    newer: boolean
+  } | null
+  error: string | null
 }
 
 export interface ContextPressure {
@@ -166,6 +223,10 @@ export interface StateSnapshot {
   engines: EngineStatus[]
   sessions: Session[]
   interactions: Interaction[]
+  /** Whether the first-run guide still has to be shown. */
+  onboarding: OnboardingState
+  /** What model this install judges turns with, and whether it is running. */
+  model: ModelState
 }
 
 export interface ActivityEntry {
@@ -275,6 +336,17 @@ export type Command =
   | { op: 'account_github_await'; state: string }
   | { op: 'account_apple_exchange'; handoff: string }
   | { op: 'open_external'; url: string }
+  | { op: 'model_state' }
+  | { op: 'model_check' }
+  | { op: 'model_download'; version: string }
+  | { op: 'model_cancel' }
+  | { op: 'model_activate'; id: string }
+  | { op: 'model_remove'; version: string }
+  | { op: 'model_rollback' }
+  | { op: 'engine_rescan' }
+  | { op: 'engine_configure'; engine: EngineId; enabled: boolean }
+  | { op: 'onboarding_complete' }
+  | { op: 'onboarding_reset' }
   | { op: 'ping' }
 
 export interface ApiError {
@@ -295,6 +367,9 @@ export type ApiEvent =
   | { type: 'interaction_requested'; interaction: Interaction }
   | { type: 'interaction_resolved'; id: string }
   | { type: 'engine_status'; status: EngineStatus }
+  | { type: 'model_progress'; download: ModelDownload }
+  | { type: 'model_changed'; model: ModelState }
+  | { type: 'onboarding_changed'; done: boolean }
   | { type: 'notice'; level: string; message: string }
 
 /** The token the shell put in this page's URL. */

@@ -1,11 +1,30 @@
-import { useState } from 'react'
-import type { AccountUser, Kernel, PairingView } from '../api'
+import { useEffect, useState } from 'react'
+import type {
+  AccountUser,
+  Kernel,
+  ModelCheck,
+  ModelRuntime,
+  ModelState,
+  PairingView,
+} from '../api'
 import type { ThemePreference } from '../theme'
-import { ChevronIcon } from '../icons'
+import { formatGigabytes } from '../format'
+import { ChevronIcon, Spinner } from '../icons'
 import { Button } from './ui/button'
+import { Progress } from './ui/progress'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
 import { Toolbar } from './Toolbar'
-import { cn } from '../lib/utils'
+import { ShellSettingsList } from './ShellSettingsList'
+import { useShellSettings } from '../lib/use-shell-settings'
+import {
+  shellAvailable,
+  shellFailure,
+  updateCheck,
+  updateInstall,
+  updateState,
+  type UpdateStatus,
+} from '../shell'
+import { cn, failureMessage } from '../lib/utils'
 
 interface SettingsPageProps {
   version: string
@@ -15,6 +34,9 @@ interface SettingsPageProps {
   theme: ThemePreference
   onThemeChange: (theme: ThemePreference) => void
   kernel: Kernel
+  model: ModelState | null
+  /** Re-arm the first-run guide; the window then shows it instead of this page. */
+  onRerunOnboarding: () => Promise<void>
 }
 
 /**
@@ -33,6 +55,8 @@ export function SettingsPage({
   theme,
   onThemeChange,
   kernel,
+  model,
+  onRerunOnboarding,
 }: SettingsPageProps) {
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
@@ -73,6 +97,10 @@ export function SettingsPage({
             </div>
           </Section>
 
+          <Section title="模型">
+            <ModelSection kernel={kernel} model={model} />
+          </Section>
+
           <Section title="外观">
             <div className="flex items-center justify-between rounded-xl border border-border px-4 py-2.5">
               <span className="text-[13px] text-fg">主题</span>
@@ -92,14 +120,17 @@ export function SettingsPage({
             </div>
           </Section>
 
+          <Section title="启动与窗口">
+            <StartupSection />
+          </Section>
+
           <Section title="关于">
-            <div className="divide-y divide-border rounded-xl border border-border">
-              <AboutRow label="版本" value={version === '' ? '—' : version} />
-              <AboutRow label="构建" value="开发预览版" />
-            </div>
+            <AboutSection version={version} />
           </Section>
 
           <DeveloperPairing kernel={kernel} />
+
+          <RerunGuide onRerun={onRerunOnboarding} />
         </div>
       </div>
     </div>
@@ -178,11 +209,400 @@ function relative(at: number): string {
 
 function AboutRow({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-center justify-between px-4 py-2.5 text-[13px]">
-      <span className="text-muted">{label}</span>
-      <span className="selectable text-fg">{value}</span>
+    <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[13px]">
+      <span className="shrink-0 text-muted">{label}</span>
+      <span className="selectable truncate text-fg">{value}</span>
     </div>
   )
+}
+
+const RUNTIME_LABELS: Record<ModelRuntime['state'], string> = {
+  stopped: '未运行',
+  starting: '启动中',
+  ready: '就绪',
+  failed: '启动失败',
+}
+
+const RUNTIME_DOTS: Record<ModelRuntime['state'], string> = {
+  stopped: 'bg-muted/40',
+  starting: 'bg-amber-400',
+  ready: 'bg-emerald-500',
+  failed: 'bg-red-500',
+}
+
+/**
+ * The model: what is installed, whether the sidecar that runs it is up, and the
+ * two things a person does here — ask for a newer version, and go back one.
+ *
+ * Progress does not live on this page: the kernel pushes `model_progress` and
+ * the window hands the snapshot's download down, so closing the page mid-way
+ * and coming back shows the same bar.
+ */
+function ModelSection({ kernel, model }: { kernel: Kernel; model: ModelState | null }) {
+  const [check, setCheck] = useState<ModelCheck | null>(null)
+  const [checking, setChecking] = useState(false)
+  const [busy, setBusy] = useState<'download' | 'cancel' | 'rollback' | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const runtime: ModelRuntime = model?.runtime ?? { state: 'stopped', port: null, detail: null }
+  const active = model?.active ?? null
+  const previous = model?.previous ?? null
+  const download = model?.download ?? null
+  const latest = check?.latest ?? null
+  const percent =
+    download === null || download.total === 0
+      ? 0
+      : Math.round((download.done / download.total) * 100)
+
+  async function checkLatest() {
+    setChecking(true)
+    setError(null)
+    try {
+      setCheck(await kernel.send<ModelCheck>({ op: 'model_check' }))
+    } catch (failure) {
+      setError(failureMessage(failure, '检查模型更新失败'))
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  async function startDownload(version: string) {
+    setBusy('download')
+    setError(null)
+    try {
+      await kernel.send({ op: 'model_download', version })
+    } catch (failure) {
+      setError(failureMessage(failure, '下载没有开始'))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function cancelDownload() {
+    setBusy('cancel')
+    setError(null)
+    try {
+      await kernel.send({ op: 'model_cancel' })
+    } catch (failure) {
+      setError(failureMessage(failure, '取消没有成功'))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function rollback() {
+    setBusy('rollback')
+    setError(null)
+    try {
+      await kernel.send({ op: 'model_rollback' })
+      setCheck(null)
+    } catch (failure) {
+      setError(failureMessage(failure, '回滚没有成功'))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-border">
+      <div className="divide-y divide-border">
+        <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[13px]">
+          <span className="shrink-0 text-muted">模型</span>
+          <span className="selectable truncate text-fg">
+            {active === null ? '未安装' : `Mizarllm ${active.version}`}
+          </span>
+        </div>
+
+        <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[13px]">
+          <span className="shrink-0 text-muted">运行状态</span>
+          <span className="flex items-center gap-2 text-fg">
+            <span className={cn('size-2 rounded-full', RUNTIME_DOTS[runtime.state])} />
+            {RUNTIME_LABELS[runtime.state]}
+          </span>
+        </div>
+
+        {runtime.state === 'failed' && runtime.detail !== null ? (
+          <p className="px-4 py-2 text-[11px] leading-5 text-red-400">{runtime.detail}</p>
+        ) : null}
+
+        <div className="flex items-start justify-between gap-4 px-4 py-2.5">
+          <div className="min-w-0 text-[12px] leading-5">
+            <CheckSummary
+              checking={checking}
+              check={check}
+              active={active === null ? null : active.version}
+              downloading={download !== null}
+            />
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            {latest !== null && latest.newer && download === null ? (
+              <Button
+                size="sm"
+                variant="primary"
+                onClick={() => void startDownload(latest.version)}
+                disabled={busy !== null}
+              >
+                {busy === 'download' ? <Spinner /> : null}
+                下载模型
+              </Button>
+            ) : null}
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void checkLatest()}
+              disabled={checking || busy !== null || download !== null}
+            >
+              {checking ? <Spinner /> : null}
+              检查模型更新
+            </Button>
+          </div>
+        </div>
+
+        {download === null ? null : (
+          <div className="px-4 py-3">
+            <div className="flex items-center justify-between gap-4 text-[12px]">
+              <span className="text-fg">
+                {download.state === 'verifying'
+                  ? `正在校验 ${download.version}`
+                  : download.state === 'failed'
+                    ? `下载失败 ${download.version}`
+                    : `正在下载 ${download.version}`}
+              </span>
+              <span className="tabular shrink-0 text-muted">{percent}%</span>
+            </div>
+            <Progress
+              className="mt-2"
+              value={percent}
+              label={`下载模型 ${download.version}`}
+            />
+            <div className="mt-1.5 flex items-center justify-between gap-4 text-[11px] text-muted">
+              <span className="tabular">
+                {formatGigabytes(download.done)} / {formatGigabytes(download.total)}
+              </span>
+              {download.state === 'failed' ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void startDownload(download.version)}
+                  disabled={busy !== null}
+                >
+                  重试
+                </Button>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void cancelDownload()}
+                  disabled={busy !== null}
+                >
+                  {busy === 'cancel' ? <Spinner /> : null}
+                  取消
+                </Button>
+              )}
+            </div>
+            {download.error === null ? null : (
+              <p className="mt-1.5 text-[11px] leading-5 text-red-400">{download.error}</p>
+            )}
+          </div>
+        )}
+
+        {previous === null ? null : (
+          <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[13px]">
+            <span className="text-muted">上一版 {previous.version}</span>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void rollback()}
+              disabled={busy !== null}
+            >
+              {busy === 'rollback' ? <Spinner /> : null}
+              回滚到 {previous.version}
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {error === null ? null : (
+        <p className="border-t border-border px-4 py-2 text-[11px] leading-5 text-red-400">{error}</p>
+      )}
+    </div>
+  )
+}
+
+/** The sentence beside 检查模型更新: what was found, or why nothing was. */
+function CheckSummary({
+  checking,
+  check,
+  active,
+  downloading,
+}: {
+  checking: boolean
+  check: ModelCheck | null
+  active: string | null
+  downloading: boolean
+}) {
+  if (checking) {
+    return (
+      <span className="flex items-center gap-1.5 text-muted">
+        <Spinner size={12} />
+        检查中…
+      </span>
+    )
+  }
+  if (check === null) {
+    return (
+      <span className="text-muted">
+        {active === null ? '还没有安装模型。' : '可检查是否有新版本。'}
+      </span>
+    )
+  }
+  if (check.error !== null) return <span className="text-red-400">{check.error}</span>
+  if (check.latest === null) return <span className="text-muted">没有取到最新版本。</span>
+  if (check.latest.newer) {
+    return (
+      <span className="text-fg">
+        可更新到 {check.latest.version}
+        <span className="text-muted">
+          {' '}
+          · {formatGigabytes(check.latest.size_bytes)}
+          {downloading ? ' · 正在下载' : ''}
+        </span>
+      </span>
+    )
+  }
+  return <span className="text-muted">已是最新（{check.latest.version}）。</span>
+}
+
+/** The three switches the shell owns; each one takes effect on click. */
+function StartupSection() {
+  const shell = useShellSettings()
+  return <ShellSettingsList shell={shell} />
+}
+
+/**
+ * Version, build, and the one button that asks whether a newer app exists.
+ *
+ * The check goes through the shell's updater, which is the only thing that knows
+ * how this app was installed; the last result is read on open so the row does
+ * not start blank every time the page is visited.
+ */
+function AboutSection({ version }: { version: string }) {
+  const available = shellAvailable()
+  const [status, setStatus] = useState<UpdateStatus | null>(null)
+  const [checking, setChecking] = useState(false)
+  const [installing, setInstalling] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!available) return
+    let cancelled = false
+    updateState()
+      .then((value) => {
+        if (!cancelled) setStatus(value)
+      })
+      .catch(() => {
+        // No stored result is the normal case before the first check; the row
+        // simply starts at 尚未检查.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [available])
+
+  async function check() {
+    setChecking(true)
+    setError(null)
+    try {
+      setStatus(await updateCheck())
+    } catch (failure) {
+      setError(shellFailure(failure))
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  async function install() {
+    setInstalling(true)
+    setError(null)
+    try {
+      await updateInstall()
+    } catch (failure) {
+      setError(shellFailure(failure))
+    } finally {
+      // A successful install relaunches the app; if the call returns instead,
+      // the button must not stay grey for the rest of the session.
+      setInstalling(false)
+    }
+  }
+
+  const newer = status !== null && status.available && status.latest !== null
+
+  return (
+    <div className="rounded-xl border border-border">
+      <div className="divide-y divide-border">
+        <AboutRow label="版本" value={version === '' ? '—' : version} />
+        <AboutRow label="构建" value={status === null || status.current === '' ? '—' : status.current} />
+        <div className="flex items-start justify-between gap-4 px-4 py-2.5">
+          <div className="min-w-0 text-[12px] leading-5">
+            <UpdateSummary checking={checking} status={status} error={error} />
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            {newer && status.latest !== null ? (
+              <Button
+                size="sm"
+                variant="primary"
+                onClick={() => void install()}
+                disabled={installing}
+              >
+                {installing ? <Spinner /> : null}
+                下载并安装
+              </Button>
+            ) : null}
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void check()}
+              disabled={!available || checking || installing}
+            >
+              {checking ? <Spinner /> : null}
+              检查更新
+            </Button>
+          </div>
+        </div>
+      </div>
+      {available ? null : (
+        <p className="border-t border-border px-4 py-2 text-[11px] leading-5 text-muted">
+          检查更新由桌面窗口负责（仅桌面窗口可用）。
+        </p>
+      )}
+    </div>
+  )
+}
+
+function UpdateSummary({
+  checking,
+  status,
+  error,
+}: {
+  checking: boolean
+  status: UpdateStatus | null
+  error: string | null
+}) {
+  if (checking) {
+    return (
+      <span className="flex items-center gap-1.5 text-muted">
+        <Spinner size={12} />
+        检查中…
+      </span>
+    )
+  }
+  if (error !== null) return <span className="text-red-400">{error}</span>
+  if (status === null) return <span className="text-muted">尚未检查</span>
+  if (status.error !== null) return <span className="text-red-400">{status.error}</span>
+  if (status.available) {
+    return <span className="text-fg">可更新到 {status.latest ?? '新版本'}</span>
+  }
+  return <span className="text-muted">已是最新</span>
 }
 
 /** The temporary way a phone attaches, until accounts replace it. */
@@ -238,6 +658,45 @@ function DeveloperPairing({ kernel }: { kernel: Kernel }) {
           )}
         </div>
       ) : null}
+    </section>
+  )
+}
+
+/** The way back into the first-run guide, for anyone who skipped past a step. */
+function RerunGuide({ onRerun }: { onRerun: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function rerun() {
+    setBusy(true)
+    setError(null)
+    try {
+      await onRerun()
+    } catch (failure) {
+      setError(failureMessage(failure, '无法重新运行新手引导'))
+    } finally {
+      // On success the window swaps to the guide and this page is gone.
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="border-t border-border pt-5">
+      <div className="flex items-start justify-between gap-6">
+        <div className="min-w-0">
+          <div className="text-[13px] text-fg">重新运行新手引导</div>
+          <p className="mt-0.5 text-[11px] leading-5 text-muted">
+            再走一遍欢迎、登录、Agent 与模型的设置；已经登录的账户和已安装的模型会原样保留。
+          </p>
+        </div>
+        <Button size="sm" variant="outline" onClick={() => void rerun()} disabled={busy}>
+          {busy ? <Spinner /> : null}
+          重新运行
+        </Button>
+      </div>
+      {error === null ? null : (
+        <p className="mt-2 text-[11px] leading-5 text-red-400">{error}</p>
+      )}
     </section>
   )
 }

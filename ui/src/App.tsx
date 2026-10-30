@@ -13,6 +13,7 @@ import { Sidebar } from './components/Sidebar'
 import { HomePage } from './components/HomePage'
 import { AgentPage } from './components/AgentPage'
 import { LoginPage } from './components/LoginPage'
+import { Onboarding } from './components/Onboarding'
 import { SettingsPage } from './components/SettingsPage'
 
 const kernel = new Kernel()
@@ -130,15 +131,38 @@ export function App() {
   useEffect(() => {
     return kernel.subscribe(
       (event: ApiEvent) => {
-        if (event.type !== 'engine_status') return
-        setSnapshot((current) => {
-          if (current === null) return current
-          const engines = current.engines.filter(
-            (entry) => entry.engine !== event.status.engine,
-          )
-          engines.push(event.status)
-          return { ...current, engines }
-        })
+        switch (event.type) {
+          case 'engine_status':
+            setSnapshot((current) => {
+              if (current === null) return current
+              const engines = current.engines.filter(
+                (entry) => entry.engine !== event.status.engine,
+              )
+              engines.push(event.status)
+              return { ...current, engines }
+            })
+            return
+          case 'model_progress':
+            // A download moves faster than the poll; the event carries the bar.
+            setSnapshot((current) =>
+              current === null
+                ? current
+                : { ...current, model: { ...current.model, download: event.download } },
+            )
+            return
+          case 'model_changed':
+            setSnapshot((current) =>
+              current === null ? current : { ...current, model: event.model },
+            )
+            return
+          case 'onboarding_changed':
+            setSnapshot((current) =>
+              current === null ? current : { ...current, onboarding: { done: event.done } },
+            )
+            return
+          default:
+            return
+        }
       },
       () => setBanner('与内核的连接已断开'),
     )
@@ -191,16 +215,36 @@ export function App() {
     }
   }, [page.kind, refreshUsage])
 
-  const reconnect = useCallback(async (_engine: EngineId) => {
-    // Until the engines expose a real reconnect, a fresh snapshot is the honest
-    // thing this window can do: it re-asks the kernel what it can reach now.
-    try {
-      setSnapshot(await kernel.state())
-      setBanner(null)
-    } catch (error) {
-      setBanner(error instanceof Error ? error.message : '内核没有应答')
-    }
+  const refreshState = useCallback(async () => {
+    setSnapshot(await kernel.state())
   }, [])
+
+  const reconnect = useCallback(
+    async (_engine: EngineId) => {
+      // Until the engines expose a real reconnect, a fresh snapshot is the honest
+      // thing this window can do: it re-asks the kernel what it can reach now.
+      try {
+        await refreshState()
+        setBanner(null)
+      } catch (error) {
+        setBanner(error instanceof Error ? error.message : '内核没有应答')
+      }
+    },
+    [refreshState],
+  )
+
+  // The guide is driven by the snapshot, so re-arming it is one command and one
+  // reread: the window then shows the guide because `done` is false again.
+  const rerunOnboarding = useCallback(async () => {
+    await kernel.send({ op: 'onboarding_reset' })
+    await refreshState()
+    setPage({ kind: 'home' })
+  }, [refreshState])
+
+  const finishOnboarding = useCallback(async () => {
+    await refreshState()
+    setPage({ kind: 'home' })
+  }, [refreshState])
 
   const chooseTheme = (next: ThemePreference) => {
     setTheme(next)
@@ -315,6 +359,29 @@ export function App() {
     }
   }, [])
 
+  // The guide owns the whole window while it runs: no sidebar, no toolbar, and
+  // no route around it — the snapshot says whether it is still owed.
+  if (snapshot !== null && snapshot.onboarding?.done === false) {
+    return (
+      <Onboarding
+        kernel={kernel}
+        account={account}
+        serverConnected={serverConnected}
+        engines={snapshot.engines}
+        model={snapshot.model ?? null}
+        accountBusy={accountBusy}
+        accountError={accountError}
+        onLogin={login}
+        onGithubStart={githubStart}
+        onGithubExchange={githubExchange}
+        onAppleStart={appleStart}
+        onAppleExchange={appleExchange}
+        onRefreshState={refreshState}
+        onFinished={finishOnboarding}
+      />
+    )
+  }
+
   return (
     <div className="flex h-full w-full overflow-hidden bg-bg text-fg">
       <Sidebar
@@ -366,6 +433,8 @@ export function App() {
             theme={theme}
             onThemeChange={chooseTheme}
             kernel={kernel}
+            model={snapshot?.model ?? null}
+            onRerunOnboarding={rerunOnboarding}
           />
         ) : null}
       </main>

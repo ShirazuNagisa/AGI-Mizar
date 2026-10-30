@@ -162,3 +162,15 @@ export function Spinner({ size = 14, className }: MarkProps) {
     </svg>
   )
 }
+
+/**
+ * The three marks, keyed by the engine they belong to.
+ *
+ * Written once here so the sidebar, the guide and an agent's own page cannot
+ * disagree about which whale is which.
+ */
+export const ENGINE_MARKS = {
+  dsh: DshMark,
+  claude: ClaudeMark,
+  codex: CodexMark,
+} as const

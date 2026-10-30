@@ -14,3 +14,15 @@ export function formatCount(value: number): string {
 function trim(value: number): string {
   return value.toFixed(1).replace(/\.0$/, '')
 }
+
+/**
+ * A file size as a download reads it: gigabytes, two decimals.
+ *
+ * Models are about a gigabyte and people compare them by that number, so even a
+ * small sidecar is worth saying in the same unit rather than switching to
+ * megabytes halfway through a progress line.
+ */
+export function formatGigabytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0.00 GB'
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`
+}
