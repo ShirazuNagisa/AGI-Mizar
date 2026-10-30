@@ -60,6 +60,15 @@ export function CodexMark({ size = 20, className }: MarkProps) {
   )
 }
 
+/** The Mizar star, drawn in the current colour so it inverts with its row. */
+export function StarMark({ size = 16, className }: MarkProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="currentColor" className={className} aria-hidden>
+      <path d="M8 0 L9.6 5.23 L14.93 4 L11.2 8 L14.93 12 L9.6 10.77 L8 16 L6.4 10.77 L1.07 12 L4.8 8 L1.07 4 L6.4 5.23 Z" />
+    </svg>
+  )
+}
+
 /** A gear, for settings. */
 export function GearIcon({ size = 18, className }: MarkProps) {
   return (

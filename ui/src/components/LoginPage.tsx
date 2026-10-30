@@ -56,8 +56,8 @@ export function LoginPage({
         <div className="mx-auto w-full max-w-[560px] px-8 py-10">
           {account === null ? (
             <form onSubmit={submit}>
-              <h2 className="text-[16px] font-semibold text-fg">登录后使用远程连接</h2>
-              <p className="mt-2 text-[13px] leading-6 text-muted">
+              <h2 className="text-[24px] font-semibold text-fg">登录后使用远程连接</h2>
+              <p className="mt-2 text-[12px] leading-6 text-muted">
                 手机端需要与这台电脑登录同一个账户，才能看到它的设备并连上它。
                 未登录时，本地功能照常可用，只是不能远程访问。
               </p>
@@ -73,7 +73,7 @@ export function LoginPage({
                   autoComplete="username"
                   autoCapitalize="off"
                   spellCheck={false}
-                  className="h-9 rounded-lg border border-border bg-transparent px-3 text-[13px] text-fg outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+                  className="h-9 border border-ink bg-transparent px-3 text-[12px] text-fg outline-none"
                 />
                 <label className="mt-2 text-[12px] text-muted" htmlFor="account-password">
                   密码
@@ -84,12 +84,12 @@ export function LoginPage({
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
                   autoComplete="current-password"
-                  className="h-9 rounded-lg border border-border bg-transparent px-3 text-[13px] text-fg outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+                  className="h-9 border border-ink bg-transparent px-3 text-[12px] text-fg outline-none"
                 />
               </div>
 
               {error === null ? null : (
-                <p className="mt-3 text-[12px] leading-5 text-red-400">{error}</p>
+                <p className="mt-3 bg-ink px-2 py-1 text-[12px] leading-5 text-bg">{error}</p>
               )}
 
               <p className="mt-3 text-[12px] text-muted">
@@ -107,10 +107,10 @@ export function LoginPage({
                 登录
               </Button>
 
-              <div className="my-5 flex items-center gap-3 text-[11px] text-muted">
-                <span className="h-px flex-1 bg-border" />
+              <div className="my-5 flex items-center gap-3 text-[12px] text-muted">
+                <span className="h-px flex-1 bg-ink" />
                 或
-                <span className="h-px flex-1 bg-border" />
+                <span className="h-px flex-1 bg-ink" />
               </div>
 
               <div className="flex flex-col gap-2">
@@ -123,7 +123,7 @@ export function LoginPage({
                     setCodeStarted('github')
                   }}
                 >
-                  <span aria-hidden></span>
+                  
                   使用 GitHub 登录
                 </Button>
                 {onAppleStart === undefined ? null : (
@@ -142,7 +142,7 @@ export function LoginPage({
               </div>
 
               {codeStarted !== null ? (
-                <div className="mt-4 rounded-xl border border-border p-4">
+                <div className="mt-4 border border-ink p-4">
                   <p className="text-[12px] leading-5 text-muted">
                     浏览器里完成 {codeStarted === 'apple' ? 'Apple' : 'GitHub'} 授权后，页面会给出一个
                     <code>MZ-XXXX-XXXX</code> 代码，粘贴到这里完成登录。
@@ -153,7 +153,7 @@ export function LoginPage({
                       onChange={(event) => setHandoff(event.target.value.toUpperCase())}
                       placeholder="MZ-XXXX-XXXX"
                       spellCheck={false}
-                      className="h-9 flex-1 rounded-lg border border-border bg-transparent px-3 font-mono text-[13px] tracking-wider text-fg outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+                      className="h-9 flex-1 border border-ink bg-transparent px-3 text-[12px] tracking-wider text-fg outline-none"
                     />
                     <Button
                       variant="primary"
@@ -172,8 +172,8 @@ export function LoginPage({
             </form>
           ) : (
             <section>
-              <p className="text-[13px] text-muted">已登录</p>
-              <div className="mt-3 flex flex-col divide-y divide-border rounded-xl border border-border">
+              <p className="text-[12px] text-muted">已登录</p>
+              <div className="mt-3 flex flex-col divide-y divide-ink border border-ink">
                 <Row label="账户" value={account.username} />
                 <Row label="邮箱" value={account.email ?? '—'} />
                 <Row
@@ -211,7 +211,7 @@ function date(at: number): string {
 
 function Row({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-center justify-between gap-6 px-4 py-3 text-[13px]">
+    <div className="flex items-center justify-between gap-6 px-4 py-3 text-[12px]">
       <span className="shrink-0 text-muted">{label}</span>
       <span className="selectable truncate text-fg">{value}</span>
     </div>

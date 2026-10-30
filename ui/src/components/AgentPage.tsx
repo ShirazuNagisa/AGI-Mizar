@@ -113,7 +113,7 @@ export function AgentPage({ engine, name, status, kernel, onReconnect }: AgentPa
             <Mark size={26} className="mx-auto text-muted" />
             {installed ? (
               <>
-                <h2 className="mt-4 text-[15px] font-semibold text-fg">尚未配置该 Agent</h2>
+                <h2 className="mt-4 text-[12px] font-semibold text-fg">尚未配置该 Agent</h2>
                 <p className="mt-2 text-[12px] leading-5 text-muted">
                   {name} 已经装在这台电脑上，但还没有在这里启用。启用后它的会话才会出现在左侧。
                 </p>
@@ -132,11 +132,11 @@ export function AgentPage({ engine, name, status, kernel, onReconnect }: AgentPa
               </>
             ) : (
               <>
-                <h2 className="mt-4 text-[15px] font-semibold text-fg">本机未检测到该 Agent</h2>
+                <h2 className="mt-4 text-[12px] font-semibold text-fg">本机未检测到该 Agent</h2>
                 <p className="mt-2 text-[12px] leading-5 text-muted">
                   {ENGINE_INSTALL_HINTS[engine]}
                 </p>
-                <p className="mt-1 text-[11px] leading-5 text-muted">
+                <p className="mt-1 text-[12px] leading-5 text-muted">
                   装好后回到这里点「重新检测」，不用重启应用。
                 </p>
                 <Button
@@ -181,14 +181,17 @@ export function AgentPage({ engine, name, status, kernel, onReconnect }: AgentPa
 
           {engine === 'dsh' ? (
             <section>
-              <h2 className="text-[12px] font-medium text-muted">账户余额</h2>
-              <div className="mt-2 rounded-xl border border-border px-4 py-3">
+              <h2 className="flex items-center gap-2 text-[12px] tracking-[1px]">
+                <span className="h-0.5 w-3 shrink-0 bg-ink" aria-hidden />
+                账户余额
+              </h2>
+              <div className="mt-2 border border-ink px-4 py-3">
                 <BalanceRows balance={balance} connected={connected} />
               </div>
             </section>
           ) : (
             <section>
-              <p className="text-[13px] leading-6 text-muted">
+              <p className="text-[12px] leading-6 text-muted">
                 {name} 在本机以命令行工具运行，模型与权限由它自己的配置文件管理。
                 这里暂时只保留重新检测。
               </p>
@@ -205,12 +208,8 @@ function StatusLamp({ connected, installed }: { connected: boolean; installed: b
     <span className="flex items-center gap-1.5 text-[12px] text-muted">
       <span
         className={cn(
-          'size-2 rounded-full',
-          connected
-            ? 'bg-accent shadow-[0_0_0_3px_var(--accent-soft)]'
-            : installed
-              ? 'bg-muted/40'
-              : 'bg-muted/20',
+ 'size-2',
+          connected ? 'bg-ink' : installed ? 'border border-ink' : 'border border-ink dither-50',
         )}
       />
       {connected ? '已连接' : installed ? '未连接' : '未安装'}
@@ -220,32 +219,32 @@ function StatusLamp({ connected, installed }: { connected: boolean; installed: b
 
 function BalanceRows({ balance, connected }: { balance: Balance | null; connected: boolean }) {
   if (!connected) {
-    return <p className="text-[13px] text-muted">连接后读取</p>
+    return <p className="text-[12px] text-muted">连接后读取</p>
   }
   if (balance === null) {
-    return <p className="text-[13px] text-muted">正在读取…</p>
+    return <p className="text-[12px] text-muted">正在读取…</p>
   }
   switch (balance.status) {
     case 'ready':
       return (
         <div className="flex flex-col gap-2">
           {balance.wallets.length === 0 ? (
-            <p className="text-[13px] text-muted">余额为空</p>
+            <p className="text-[12px] text-muted">余额为空</p>
           ) : (
             balance.wallets.map((wallet) => (
               <div key={wallet.currency} className="flex items-baseline justify-between">
                 <span className="text-[12px] text-muted">{wallet.currency}</span>
-                <span className="text-[22px] font-semibold text-fg tabular">{wallet.amount}</span>
+                <span className="text-[24px] font-semibold text-fg tabular">{wallet.amount}</span>
               </div>
             ))
           )}
         </div>
       )
     case 'signed_out':
-      return <p className="text-[13px] text-muted">需要先在 DSH 中登录账户</p>
+      return <p className="text-[12px] text-muted">需要先在 DSH 中登录账户</p>
     case 'unsupported':
-      return <p className="text-[13px] text-muted">DSH 没有提供余额</p>
+      return <p className="text-[12px] text-muted">DSH 没有提供余额</p>
     default:
-      return <p className="text-[13px] text-muted">余额暂时读不到</p>
+      return <p className="text-[12px] text-muted">余额暂时读不到</p>
   }
 }

@@ -7,11 +7,10 @@ import { useShellSettings, type ShellSettingsState } from '../lib/use-shell-sett
 import { quitApp, shellAvailable, shellFailure } from '../shell'
 import { Button } from './ui/button'
 import { Progress } from './ui/progress'
-import { CheckIcon, ENGINE_MARKS, Spinner } from '../icons'
+import { CheckIcon, ENGINE_MARKS, Spinner, StarMark } from '../icons'
 import { DshPluginHint } from './DshPluginHint'
 import { ShellSettingsList } from './ShellSettingsList'
 import { cn, failureMessage } from '../lib/utils'
-import mizar from '../assets/mizar.png'
 
 /** The six steps, in the order the guide walks them. */
 const STEP_TITLES = ['欢迎', '登录', '选择 Agent', '下载模型', '偏好', '完成'] as const
@@ -151,13 +150,13 @@ export function Onboarding({
               <span
                 key={title}
                 className={cn(
-                  'h-1 flex-1 rounded-full transition-colors',
-                  index <= step ? 'bg-accent' : 'bg-border',
+ 'h-2 flex-1 border border-ink',
+                  index <= step ? 'bg-ink' : 'bg-transparent',
                 )}
               />
             ))}
           </div>
-          <p className="mt-2.5 text-[11px] text-muted">
+          <p className="mt-2.5 text-[12px] text-muted">
             第 {step + 1} 步 / 共 {STEP_TITLES.length} 步 · {STEP_TITLES[step] ?? ''}
           </p>
 
@@ -208,19 +207,19 @@ export function Onboarding({
           </div>
 
           {error === null ? null : (
-            <p className="mt-4 text-[12px] leading-5 text-red-400">{error}</p>
+            <p className="mt-4 text-[12px] leading-5 bg-ink px-1.5 text-bg">{error}</p>
           )}
 
-          <footer className="mt-8 flex shrink-0 items-center gap-2 border-t border-border pt-4">
+          <footer className="mt-8 flex shrink-0 items-center gap-2 border-t border-ink pt-4">
             <Button variant="ghost" onClick={back} disabled={step === WELCOME || busy}>
               上一步
             </Button>
             <div className="flex-1" />
             {step === LOGIN && account === null ? (
-              <span className="text-[11px] text-muted">登录后才能继续</span>
+              <span className="text-[12px] text-muted">登录后才能继续</span>
             ) : null}
             {step === CHOOSE && selected.size === 0 ? (
-              <span className="text-[11px] text-muted">至少选一个 Agent</span>
+              <span className="text-[12px] text-muted">至少选一个 Agent</span>
             ) : null}
             <Button variant="primary" size="lg" onClick={forward} disabled={!canAdvance || busy}>
               {busy ? <Spinner /> : null}
@@ -236,13 +235,13 @@ export function Onboarding({
 function WelcomeStep() {
   return (
     <section>
-      <img src={mizar} alt="" className="size-12" />
-      <h1 className="mt-5 text-[20px] font-semibold tracking-tight text-fg">欢迎使用 AGI Mizar</h1>
-      <p className="mt-3 text-[13px] leading-6 text-muted">
+      <StarMark size={48} />
+      <h1 className="mt-5 text-[24px] font-semibold tracking-tight text-fg">欢迎使用 AGI Mizar</h1>
+      <p className="mt-3 text-[12px] leading-6 text-muted">
         这是一台电脑端宿主：它把本机的 agent 交给你的手机。手机端 DSH Mizar 用同一个账户登录后，
         就能看到并操控这台电脑，不需要扫码配对。
       </p>
-      <p className="mt-2 text-[13px] leading-6 text-muted">
+      <p className="mt-2 text-[12px] leading-6 text-muted">
         接下来依次登录账户、选择要用的 Agent、准备模型，再决定这台电脑以后怎么启动。
         已经登录的账户、已安装的 Agent 和模型都会原样带过来。
       </p>
@@ -307,7 +306,7 @@ function LoginStep({
 
   return (
     <section>
-      <h2 className="text-[15px] font-semibold text-fg">登录账户</h2>
+      <h2 className="text-[24px] leading-8">登录账户</h2>
       <p className="mt-1.5 text-[12px] leading-5 text-muted">
         手机端与这台电脑登录同一个账户，就能互相找到。这里没有配对码这一步。
       </p>
@@ -325,7 +324,7 @@ function LoginStep({
               autoComplete="username"
               autoCapitalize="off"
               spellCheck={false}
-              className="h-9 rounded-lg border border-border bg-transparent px-3 text-[13px] text-fg outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+              className="h-9 border border-ink bg-transparent px-3 text-[12px] text-fg outline-none"
             />
             <label className="mt-2 text-[12px] text-muted" htmlFor="onboarding-password">
               密码
@@ -336,7 +335,7 @@ function LoginStep({
               value={password}
               onChange={(event) => setPassword(event.target.value)}
               autoComplete="current-password"
-              className="h-9 rounded-lg border border-border bg-transparent px-3 text-[13px] text-fg outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+              className="h-9 border border-ink bg-transparent px-3 text-[12px] text-fg outline-none"
             />
           </div>
 
@@ -349,19 +348,19 @@ function LoginStep({
               {busy ? <Spinner /> : null}
               登录
             </Button>
-            <span className="text-[11px] text-muted">
+            <span className="text-[12px] text-muted">
               服务器连接：{serverConnected ? '已连接' : '未连接'}
             </span>
           </div>
 
           {error === null ? null : (
-            <p className="mt-3 text-[12px] leading-5 text-red-400">{error}</p>
+            <p className="mt-3 text-[12px] leading-5 bg-ink px-1.5 text-bg">{error}</p>
           )}
 
-          <div className="my-4 flex items-center gap-3 text-[11px] text-muted">
-            <span className="h-px flex-1 bg-border" />
+          <div className="my-4 flex items-center gap-3 text-[12px] text-muted">
+            <span className="h-px flex-1 bg-ink" />
             或
-            <span className="h-px flex-1 bg-border" />
+            <span className="h-px flex-1 bg-ink" />
           </div>
 
           <div className="flex flex-col gap-2">
@@ -388,7 +387,7 @@ function LoginStep({
           </div>
 
           {codeStarted === null ? null : (
-            <div className="mt-3 rounded-xl border border-border p-4">
+            <div className="mt-3 border border-ink p-4">
               <p className="text-[12px] leading-5 text-muted">
                 浏览器里完成 {codeStarted === 'apple' ? 'Apple' : 'GitHub'} 授权后，页面会给出一个
                 <code>MZ-XXXX-XXXX</code> 代码，粘贴到这里完成登录。
@@ -399,7 +398,7 @@ function LoginStep({
                   onChange={(event) => setHandoff(event.target.value.toUpperCase())}
                   placeholder="MZ-XXXX-XXXX"
                   spellCheck={false}
-                  className="h-9 flex-1 rounded-lg border border-border bg-transparent px-3 font-mono text-[13px] tracking-wider text-fg outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+                  className="h-9 flex-1 border border-ink bg-transparent px-3 font-mono text-[12px] tracking-wider text-fg outline-none"
                 />
                 <Button
                   variant="primary"
@@ -417,12 +416,12 @@ function LoginStep({
           )}
         </form>
       ) : (
-        <div className="mt-4 rounded-xl border border-border px-4 py-3">
-          <div className="flex items-center gap-2 text-[13px] text-fg">
-            <CheckIcon size={14} className="text-accent" />
+        <div className="mt-4 border border-ink px-4 py-3">
+          <div className="flex items-center gap-2 text-[12px] text-fg">
+            <CheckIcon size={14} />
             已登录 {account.username}
           </div>
-          <p className="mt-1 text-[11px] leading-5 text-muted">
+          <p className="mt-1 text-[12px] leading-5 text-muted">
             手机端用同一个账户登录后，就能在这台电脑的会话里远程操作。
           </p>
         </div>
@@ -439,8 +438,8 @@ function LoginStep({
           {quitting ? <Spinner /> : null}
           退出应用
         </Button>
-        {shellAvailable() ? null : <span className="text-[11px] text-muted">仅桌面窗口可用</span>}
-        {quitError === null ? null : <span className="text-[11px] text-red-400">{quitError}</span>}
+        {shellAvailable() ? null : <span className="text-[12px] text-muted">仅桌面窗口可用</span>}
+        {quitError === null ? null : <span className="text-[12px] bg-ink px-1.5 text-bg">{quitError}</span>}
       </div>
     </section>
   )
@@ -481,7 +480,7 @@ function AgentStep({ kernel, engines, selected, onToggle, onRefreshState }: Agen
     <section>
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <h2 className="text-[15px] font-semibold text-fg">选择要使用的 Agent</h2>
+          <h2 className="text-[24px] leading-8">选择要使用的 Agent</h2>
           <p className="mt-1.5 text-[12px] leading-5 text-muted">
             只列出本机已经安装的。没装的可以先跳过，装好之后在对应的 Agent 页面一键配置。
           </p>
@@ -512,21 +511,21 @@ function AgentStep({ kernel, engines, selected, onToggle, onRefreshState }: Agen
               disabled={!available}
               onClick={() => onToggle(engine)}
               className={cn(
-                'flex flex-col gap-2 rounded-xl border p-3 text-left transition-colors outline-none focus-visible:ring-2 focus-visible:ring-accent/60',
+ 'flex flex-col gap-2 border p-3 text-left outline-none',
                 available
                   ? chosen
-                    ? 'border-accent bg-accent/5'
-                    : 'border-border hover:bg-surface-2/60'
-                  : 'cursor-not-allowed border-border/60 bg-surface-2/30 opacity-55',
+                    ? 'border-ink bg-ink text-bg'
+                    : 'border-ink hover:border-2'
+                  : 'cursor-not-allowed border-dashed border-ink',
               )}
             >
               <span className="flex w-full items-center justify-between">
-                <Mark size={20} className={chosen ? 'text-accent' : 'text-muted'} />
-                {chosen ? <CheckIcon size={14} className="text-accent" /> : null}
+                <Mark size={20} />
+                {chosen ? <CheckIcon size={14} /> : null}
               </span>
               <span>
-                <span className="block text-[13px] text-fg">{name}</span>
-                <span className="mt-0.5 block text-[11px] leading-4 text-muted">
+                <span className="block text-[12px]">{name}</span>
+                <span className="mt-0.5 block text-[12px] leading-4">
                   {available ? (status?.configured ? '已配置' : '已安装') : '本机未检测到'}
                 </span>
               </span>
@@ -540,14 +539,14 @@ function AgentStep({ kernel, engines, selected, onToggle, onRefreshState }: Agen
       {missing.length === 0 ? null : (
         <div className="mt-4 flex flex-col gap-1">
           {missing.map(({ engine, name }) => (
-            <p key={engine} className="text-[11px] leading-5 text-muted">
+            <p key={engine} className="text-[12px] leading-5 text-muted">
               {name}：{ENGINE_INSTALL_HINTS[engine]}
             </p>
           ))}
         </div>
       )}
 
-      {error === null ? null : <p className="mt-3 text-[12px] text-red-400">{error}</p>}
+      {error === null ? null : <p className="mt-3 text-[12px] bg-ink px-1.5 text-bg">{error}</p>}
     </section>
   )
 }
@@ -622,19 +621,19 @@ function ModelStep({ kernel, model, onLater }: ModelStepProps) {
 
   return (
     <section>
-      <h2 className="text-[15px] font-semibold text-fg">准备模型</h2>
+      <h2 className="text-[24px] leading-8">准备模型</h2>
       <p className="mt-1.5 text-[12px] leading-5 text-muted">
         Mizarllm 是判断「这一轮做完没有」的本地模型，由这台电脑运行，约 1 GB，只需要下载一次。
       </p>
 
-      <div className="mt-4 divide-y divide-border rounded-xl border border-border">
-        <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[13px]">
+      <div className="mt-4 divide-y divide-ink border border-ink">
+        <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[12px]">
           <span className="shrink-0 text-muted">当前版本</span>
           <span className="selectable truncate text-fg">
             {active === null ? '未下载' : formatModelVersion(active.version)}
           </span>
         </div>
-        <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[13px]">
+        <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[12px]">
           <span className="shrink-0 text-muted">最新版本</span>
           <span className="selectable truncate text-fg">
             {checking ? '读取中…' : latest === null ? '未知' : formatModelVersion(latest.version)}
@@ -649,21 +648,21 @@ function ModelStep({ kernel, model, onLater }: ModelStepProps) {
             </span>
           ) : error !== null ? (
             <div className="flex items-center justify-between gap-4">
-              <span className="text-[12px] leading-5 text-red-400">{error}</span>
+              <span className="text-[12px] leading-5 bg-ink px-1.5 text-bg">{error}</span>
               <Button size="sm" variant="outline" onClick={() => void recheck()}>
                 重试
               </Button>
             </div>
           ) : check !== null && check.error !== null ? (
             <div className="flex items-center justify-between gap-4">
-              <span className="text-[12px] leading-5 text-red-400">{check.error}</span>
+              <span className="text-[12px] leading-5 bg-ink px-1.5 text-bg">{check.error}</span>
               <Button size="sm" variant="outline" onClick={() => void recheck()}>
                 重试
               </Button>
             </div>
           ) : ready ? (
             <div className="flex items-center gap-2">
-              <CheckIcon size={14} className="text-accent" />
+              <CheckIcon size={14} />
               <span className="text-[12px] text-fg">已就绪，无需下载</span>
             </div>
           ) : latest === null ? (
@@ -705,7 +704,7 @@ function ModelStep({ kernel, model, onLater }: ModelStepProps) {
               <span className="tabular shrink-0 text-muted">{percent}%</span>
             </div>
             <Progress className="mt-2" value={percent} label={`下载模型 ${download.version}`} />
-            <div className="mt-1.5 flex items-center justify-between gap-4 text-[11px] text-muted">
+            <div className="mt-1.5 flex items-center justify-between gap-4 text-[12px] text-muted">
               <span className="tabular">
                 {formatGigabytes(download.done)} / {formatGigabytes(download.total)}
               </span>
@@ -731,7 +730,7 @@ function ModelStep({ kernel, model, onLater }: ModelStepProps) {
               )}
             </div>
             {download.error === null ? null : (
-              <p className="mt-1.5 text-[11px] leading-5 text-red-400">{download.error}</p>
+              <p className="mt-1.5 text-[12px] leading-5 bg-ink px-1.5 text-bg">{download.error}</p>
             )}
           </div>
         )}
@@ -741,7 +740,7 @@ function ModelStep({ kernel, model, onLater }: ModelStepProps) {
         <Button variant="ghost" size="sm" onClick={onLater}>
           稍后再下载
         </Button>
-        <span className="text-[11px] leading-5 text-muted">
+        <span className="text-[12px] leading-5 text-muted">
           之后可以在「设置 → 模型」里下载。
         </span>
       </div>
@@ -753,7 +752,7 @@ function ModelStep({ kernel, model, onLater }: ModelStepProps) {
 function PreferenceStep({ shell }: { shell: ShellSettingsState }) {
   return (
     <section>
-      <h2 className="text-[15px] font-semibold text-fg">这台电脑怎么启动</h2>
+      <h2 className="text-[24px] leading-8">这台电脑怎么启动</h2>
       <p className="mt-1.5 text-[12px] leading-5 text-muted">
         三项现在都是关的，随时可以在「设置 → 启动与窗口」里改。改动立即生效。
       </p>
@@ -798,11 +797,11 @@ function DoneStep({ account, engines, selected, model, shell }: DoneStepProps) {
 
   return (
     <section>
-      <h2 className="text-[15px] font-semibold text-fg">都准备好了</h2>
+      <h2 className="text-[24px] leading-8">都准备好了</h2>
       <p className="mt-1.5 text-[12px] leading-5 text-muted">
         下面这些已经就绪；没准备好的，进主页后也能补。
       </p>
-      <div className="mt-4 divide-y divide-border rounded-xl border border-border">
+      <div className="mt-4 divide-y divide-ink border border-ink">
         <DoneRow label="登录账户" value={account?.username ?? '未登录'} />
         <DoneRow
           label="Agent"
@@ -817,7 +816,7 @@ function DoneStep({ account, engines, selected, model, shell }: DoneStepProps) {
 
 function DoneRow({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[13px]">
+    <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[12px]">
       <span className="shrink-0 text-muted">{label}</span>
       <span className="truncate text-fg">{value}</span>
     </div>

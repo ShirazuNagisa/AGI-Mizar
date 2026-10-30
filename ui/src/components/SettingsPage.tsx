@@ -81,12 +81,12 @@ export function SettingsPage({
           </Section>
 
           <Section title="连接状态">
-            <div className="flex items-center justify-between rounded-xl border border-border px-4 py-3">
-              <span className="flex items-center gap-2 text-[13px] text-fg">
+            <div className="flex items-center justify-between border border-ink px-4 py-3">
+              <span className="flex items-center gap-2 text-[12px] text-fg">
                 <span
                   className={cn(
-                    'size-2 rounded-full',
-                    serverConnected ? 'bg-accent' : 'bg-muted/40',
+ 'size-2',
+                    serverConnected ? 'bg-ink' : 'border border-ink',
                   )}
                 />
                 {serverConnected ? '已连接' : '未连接'}
@@ -102,8 +102,8 @@ export function SettingsPage({
           </Section>
 
           <Section title="外观">
-            <div className="flex items-center justify-between rounded-xl border border-border px-4 py-2.5">
-              <span className="text-[13px] text-fg">主题</span>
+            <div className="flex items-center justify-between border border-ink px-4 py-2.5">
+              <span className="text-[12px] text-fg">主题</span>
               <Select
                 value={theme}
                 onValueChange={(value) => onThemeChange(value as ThemePreference)}
@@ -140,7 +140,10 @@ export function SettingsPage({
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="mb-7">
-      <h2 className="mb-2 text-[12px] font-medium text-muted">{title}</h2>
+      <h2 className="mb-2 flex items-center gap-2 text-[12px] tracking-[1px]">
+        <span className="h-0.5 w-3 shrink-0 bg-ink" aria-hidden />
+        {title}
+      </h2>
       <div className="flex flex-col gap-2">{children}</div>
     </section>
   )
@@ -148,15 +151,15 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 
 function Group({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="rounded-xl border border-border">
-      <div className="border-b border-border/70 px-4 py-2 text-[12px] text-muted">{title}</div>
+    <div className="border border-ink">
+      <div className="border-b border-ink px-4 py-2 text-[12px] text-muted">{title}</div>
       <div className="px-4 py-3">{children}</div>
     </div>
   )
 }
 
 function Empty({ children }: { children: React.ReactNode }) {
-  return <p className="text-[13px] text-muted">{children}</p>
+  return <p className="text-[12px] text-muted">{children}</p>
 }
 
 /** The devices under the account, split by the group they are drawn in. */
@@ -175,20 +178,20 @@ function DeviceList({
       {devices.map((device) => (
         <div key={device.id} className="flex items-center gap-3">
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-1.5 text-[13px] text-fg">
+            <div className="flex items-center gap-1.5 text-[12px] text-fg">
               <span
                 className={
                   online.has(device.id)
-                    ? 'size-2 shrink-0 rounded-full bg-accent'
-                    : 'size-2 shrink-0 rounded-full bg-muted/40'
+                    ? 'size-2 shrink-0 bg-ink'
+                    : 'size-2 shrink-0 border border-ink'
                 }
               />
               <span className="truncate">{device.name}</span>
               {device.current ? (
-                <span className="rounded bg-surface-2 px-1 text-[10px] text-muted">本机</span>
+                <span className="border border-ink px-1 text-[12px]">本机</span>
               ) : null}
             </div>
-            <div className="truncate text-[11px] text-muted">
+            <div className="truncate text-[12px] text-muted">
               {device.model} · 最近 {relative(device.lastSeenAt)}
             </div>
           </div>
@@ -209,7 +212,7 @@ function relative(at: number): string {
 
 function AboutRow({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[13px]">
+    <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[12px]">
       <span className="shrink-0 text-muted">{label}</span>
       <span className="selectable truncate text-fg">{value}</span>
     </div>
@@ -224,10 +227,10 @@ const RUNTIME_LABELS: Record<ModelRuntime['state'], string> = {
 }
 
 const RUNTIME_DOTS: Record<ModelRuntime['state'], string> = {
-  stopped: 'bg-muted/40',
-  starting: 'bg-amber-400',
-  ready: 'bg-emerald-500',
-  failed: 'bg-red-500',
+  stopped: 'border border-ink',
+  starting: 'border border-ink dither-50',
+  ready: 'bg-ink',
+  failed: 'bg-ink',
 }
 
 /**
@@ -304,25 +307,25 @@ function ModelSection({ kernel, model }: { kernel: Kernel; model: ModelState | n
   }
 
   return (
-    <div className="rounded-xl border border-border">
-      <div className="divide-y divide-border">
-        <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[13px]">
+    <div className="border border-ink">
+      <div className="divide-y divide-ink">
+        <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[12px]">
           <span className="shrink-0 text-muted">模型</span>
           <span className="selectable truncate text-fg">
             {active === null ? '未安装' : `Mizarllm ${formatModelVersion(active.version)}`}
           </span>
         </div>
 
-        <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[13px]">
+        <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[12px]">
           <span className="shrink-0 text-muted">运行状态</span>
           <span className="flex items-center gap-2 text-fg">
-            <span className={cn('size-2 rounded-full', RUNTIME_DOTS[runtime.state])} />
+            <span className={cn('size-2', RUNTIME_DOTS[runtime.state])} />
             {RUNTIME_LABELS[runtime.state]}
           </span>
         </div>
 
         {runtime.state === 'failed' && runtime.detail !== null ? (
-          <p className="px-4 py-2 text-[11px] leading-5 text-red-400">{runtime.detail}</p>
+          <p className="border-t border-ink bg-ink px-4 py-1.5 text-[12px] leading-5 text-bg">{runtime.detail}</p>
         ) : null}
 
         <div className="flex items-start justify-between gap-4 px-4 py-2.5">
@@ -375,7 +378,7 @@ function ModelSection({ kernel, model }: { kernel: Kernel; model: ModelState | n
               value={percent}
               label={`下载模型 ${formatModelVersion(download.version)}`}
             />
-            <div className="mt-1.5 flex items-center justify-between gap-4 text-[11px] text-muted">
+            <div className="mt-1.5 flex items-center justify-between gap-4 text-[12px] text-muted">
               <span className="tabular">
                 {formatGigabytes(download.done)} / {formatGigabytes(download.total)}
               </span>
@@ -401,13 +404,13 @@ function ModelSection({ kernel, model }: { kernel: Kernel; model: ModelState | n
               )}
             </div>
             {download.error === null ? null : (
-              <p className="mt-1.5 text-[11px] leading-5 text-red-400">{download.error}</p>
+              <p className="mt-1.5 bg-ink px-2 py-1 text-[12px] leading-5 text-bg">{download.error}</p>
             )}
           </div>
         )}
 
         {previous === null ? null : (
-          <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[13px]">
+          <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[12px]">
             <span className="text-muted">上一版 {previous.version}</span>
             <Button
               size="sm"
@@ -423,7 +426,7 @@ function ModelSection({ kernel, model }: { kernel: Kernel; model: ModelState | n
       </div>
 
       {error === null ? null : (
-        <p className="border-t border-border px-4 py-2 text-[11px] leading-5 text-red-400">{error}</p>
+        <p className="border-t border-ink bg-ink px-4 py-1.5 text-[12px] leading-5 text-bg">{error}</p>
       )}
     </div>
   )
@@ -456,7 +459,7 @@ function CheckSummary({
       </span>
     )
   }
-  if (check.error !== null) return <span className="text-red-400">{check.error}</span>
+  if (check.error !== null) return <span className="bg-ink px-1 text-bg">{check.error}</span>
   if (check.latest === null) return <span className="text-muted">没有取到最新版本。</span>
   if (check.latest.newer) {
     return (
@@ -538,8 +541,8 @@ function AboutSection({ version }: { version: string }) {
   const newer = status !== null && status.available && status.latest !== null
 
   return (
-    <div className="rounded-xl border border-border">
-      <div className="divide-y divide-border">
+    <div className="border border-ink">
+      <div className="divide-y divide-ink">
         <AboutRow label="版本" value={version === '' ? '—' : version} />
         <AboutRow label="构建" value={status === null || status.current === '' ? '—' : status.current} />
         <div className="flex items-start justify-between gap-4 px-4 py-2.5">
@@ -571,7 +574,7 @@ function AboutSection({ version }: { version: string }) {
         </div>
       </div>
       {available ? null : (
-        <p className="border-t border-border px-4 py-2 text-[11px] leading-5 text-muted">
+        <p className="border-t border-ink px-4 py-2 text-[12px] leading-5 text-muted">
           检查更新由桌面窗口负责（仅桌面窗口可用）。
         </p>
       )}
@@ -596,9 +599,9 @@ function UpdateSummary({
       </span>
     )
   }
-  if (error !== null) return <span className="text-red-400">{error}</span>
+  if (error !== null) return <span className="bg-ink px-1 text-bg">{error}</span>
   if (status === null) return <span className="text-muted">尚未检查</span>
-  if (status.error !== null) return <span className="text-red-400">{status.error}</span>
+  if (status.error !== null) return <span className="bg-ink px-1 text-bg">{status.error}</span>
   if (status.available) {
     return <span className="text-fg">可更新到 {status.latest ?? '新版本'}</span>
   }
@@ -632,7 +635,7 @@ function DeveloperPairing({ kernel }: { kernel: Kernel }) {
         开发者
       </button>
       {open ? (
-        <div className="mt-2 rounded-xl border border-border p-4">
+        <div className="mt-2 border border-ink p-4">
           <p className="text-[12px] leading-5 text-muted">
             账户体系上线前的临时入口：手机扫码配对这台电脑。上线后删除。
           </p>
@@ -641,12 +644,12 @@ function DeveloperPairing({ kernel }: { kernel: Kernel }) {
             <div className="mt-3 flex items-center gap-4">
               {view.svg === null ? null : (
                 <div
-                  className="size-[132px] rounded-lg bg-white p-2"
+                  className="size-[132px] border border-ink bg-white p-2"
                   dangerouslySetInnerHTML={{ __html: view.svg }}
                 />
               )}
               <div>
-                <div className="selectable text-[15px] font-semibold tracking-wide text-fg">
+                <div className="selectable text-[12px] font-semibold tracking-wide text-fg">
                   {view.code}
                 </div>
                 <p className="mt-1 text-[12px] text-muted">在 Mizar 手机端扫码或输入此码</p>
@@ -681,11 +684,11 @@ function RerunGuide({ onRerun }: { onRerun: () => Promise<void> }) {
   }
 
   return (
-    <section className="border-t border-border pt-5">
+    <section className="border-t border-ink pt-5">
       <div className="flex items-start justify-between gap-6">
         <div className="min-w-0">
-          <div className="text-[13px] text-fg">重新运行新手引导</div>
-          <p className="mt-0.5 text-[11px] leading-5 text-muted">
+          <div className="text-[12px] text-fg">重新运行新手引导</div>
+          <p className="mt-0.5 text-[12px] leading-5 text-muted">
             再走一遍欢迎、登录、Agent 与模型的设置；已经登录的账户和已安装的模型会原样保留。
           </p>
         </div>
@@ -695,7 +698,7 @@ function RerunGuide({ onRerun }: { onRerun: () => Promise<void> }) {
         </Button>
       </div>
       {error === null ? null : (
-        <p className="mt-2 text-[11px] leading-5 text-red-400">{error}</p>
+        <p className="mt-2 bg-ink px-2 py-1 text-[12px] leading-5 text-bg">{error}</p>
       )}
     </section>
   )

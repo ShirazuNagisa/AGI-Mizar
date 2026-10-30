@@ -21,11 +21,11 @@ export function DshPluginHint({ className }: { className?: string }) {
   }
 
   return (
-    <div className={cn('rounded-lg border border-border/70 p-3', className)}>
+    <div className={cn('border border-ink p-3', className)}>
       <p className="text-[12px] leading-5 text-muted">
         DSH 需要在 agent 中安装 dsh-mizar 插件（≥ {DSH_PLUGIN_VERSION}）。
       </p>
-      <code className="selectable mt-2 block break-all rounded-md bg-surface-2 px-2.5 py-1.5 font-mono text-[11px] leading-5 text-fg/90">
+      <code className="selectable mt-2 block break-all border border-ink px-2.5 py-1.5 text-[12px] leading-5 text-fg">
         {DSH_PLUGIN_COMMAND}
       </code>
       <div className="mt-2 flex items-center gap-2">
@@ -39,7 +39,7 @@ export function DshPluginHint({ className }: { className?: string }) {
           {copied === 'done' ? '已复制' : '复制安装命令'}
         </Button>
         {copied === 'failed' ? (
-          <span className="text-[11px] text-red-400">复制失败，请手动选中上面的命令</span>
+          <span className="bg-ink px-1.5 text-[12px] text-bg">复制失败，请手动选中上面的命令</span>
         ) : null}
       </div>
     </div>

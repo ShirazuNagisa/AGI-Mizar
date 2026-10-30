@@ -4,28 +4,30 @@
    system means the class is rewritten when macOS changes appearance. */
 @custom-variant dark (&:where(.dark, .dark *));
 
+/* 1-bit OLED.
+ *
+ * Two colours per theme and nothing in between: no grey, no alpha, no gradient.
+ * The old token names are kept so existing utilities (`bg-surface`, `text-fg`,
+ * `border-border`) keep compiling — they now all resolve to the same two
+ * values, and "surface" is simply the background.
+ */
 :root {
-  --bg: #f6f6f7;
-  --surface: #ffffff;
-  --surface-2: #f0f0f2;
-  --border: #e2e2e6;
-  --fg: #16171a;
-  --muted: #6b6f76;
-  --accent: #0a78ae;
-  --accent-soft: rgb(10 120 174 / 0.12);
-  --heat-0: #ececef;
+  --bg: #ffffff;
+  --ink: #0a78ae;
+
+  --surface: var(--bg);
+  --surface-2: transparent;
+  --border: var(--ink);
+  --fg: var(--ink);
+  --muted: var(--ink);
+  --accent: var(--ink);
+  --accent-soft: transparent;
+  --heat-0: transparent;
 }
 
 .dark {
-  --bg: #0f1012;
-  --surface: #17181a;
-  --surface-2: #1d1f22;
-  --border: #2a2c30;
-  --fg: #f2f3f5;
-  --muted: #9aa0a8;
-  --accent: #3ccbf4;
-  --accent-soft: rgb(60 203 244 / 0.14);
-  --heat-0: #1c1e21;
+  --bg: #000000;
+  --ink: #ffffff;
 }
 
 @theme inline {
@@ -38,9 +40,27 @@
   --color-accent: var(--accent);
   --color-accent-soft: var(--accent-soft);
   --color-heat-0: var(--heat-0);
-  --font-sans:
-    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue",
-    "PingFang SC", "Hiragino Sans GB", sans-serif;
+  --color-ink: var(--ink);
+  --font-sans: "Fusion Pixel", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Fusion Pixel 12px — the font only reads as pixels at 12px and its integer
+   multiples (24, 36). Licence: OFL-1.1 + MIT, see assets/fonts/OFL.txt. */
+@font-face {
+  font-family: "Fusion Pixel";
+  src: url("./assets/fonts/fusion-pixel-12px-monospaced-zh_hans.ttf.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+
+/* The two rules that make it 1-bit: square everything, and never cast a shadow.
+   `ring-*` is a box-shadow in Tailwind, so focus is drawn as an outline below. */
+*,
+*::before,
+*::after {
+  border-radius: 0 !important;
+  box-shadow: none !important;
 }
 
 html,
@@ -54,8 +74,12 @@ body {
   background: var(--bg);
   color: var(--fg);
   font-family: var(--font-sans);
-  -webkit-font-smoothing: antialiased;
+  font-size: 12px;
+  line-height: 16px;
+  /* No anti-aliasing is the point: 12px text is drawn as 2×2 blocks. */
+  -webkit-font-smoothing: none;
   font-synthesis: none;
+  font-variant-ligatures: none;
   overflow: hidden;
   user-select: none;
 }
@@ -63,6 +87,16 @@ body {
 /* Text that a person may want to copy keeps the normal selection behaviour. */
 .selectable {
   user-select: text;
+}
+
+::selection {
+  background: var(--ink);
+  color: var(--bg);
+}
+
+:focus-visible {
+  outline: 2px dotted var(--ink);
+  outline-offset: 2px;
 }
 
 /* Numbers line up down a column even as their digits change. */
@@ -75,17 +109,45 @@ body {
    old Electron `-webkit-app-region`, which WKWebView ignores. */
 
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: color-mix(in oklab, var(--muted) 35%, transparent);
-  border-radius: 999px;
-  border: 3px solid transparent;
-  background-clip: content-box;
+  background: var(--ink);
 }
 
 ::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* Dither is the only "grey" this theme has. The tile has to divide the box it
+   fills, or the last row of the pattern is clipped into a visible seam. */
+@layer utilities {
+  .dither-dot {
+    background-image: linear-gradient(var(--ink), var(--ink));
+    background-size: 2px 2px;
+    background-position: center;
+    background-repeat: no-repeat;
+  }
+
+  .dither-25 {
+    background-image: repeating-conic-gradient(var(--ink) 0 25%, transparent 0 50%);
+    background-size: 4px 4px;
+  }
+
+  .dither-50 {
+    background-image: repeating-conic-gradient(
+      var(--ink) 0 25%,
+      transparent 0 50%,
+      var(--ink) 0 75%,
+      transparent 0
+    );
+    background-size: 4px 4px;
+  }
+
+  .dither-75 {
+    background-image: repeating-conic-gradient(transparent 0 25%, var(--ink) 0 50%);
+    background-size: 4px 4px;
+  }
 }

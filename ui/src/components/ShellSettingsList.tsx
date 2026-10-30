@@ -18,13 +18,13 @@ export function ShellSettingsList({
   className?: string
 }) {
   return (
-    <div className={cn('rounded-xl border border-border', className)}>
-      <div className="divide-y divide-border">
+    <div className={cn('border border-ink', className)}>
+      <div className="divide-y divide-ink">
         {SHELL_SETTING_ROWS.map((row) => (
           <div key={row.field} className="flex items-start justify-between gap-6 px-4 py-3">
             <div className="min-w-0">
-              <div className="text-[13px] text-fg">{row.title}</div>
-              <p className="mt-0.5 text-[11px] leading-5 text-muted">{row.detail}</p>
+              <div className="text-[12px] text-fg">{row.title}</div>
+              <p className="mt-0.5 text-[12px] leading-5 text-muted">{row.detail}</p>
             </div>
             <Switch
               className="mt-0.5"
@@ -37,15 +37,15 @@ export function ShellSettingsList({
         ))}
       </div>
       {shell.available ? null : (
-        <p className="border-t border-border px-4 py-2 text-[11px] leading-5 text-muted">
+        <p className="border-t border-ink px-4 py-2 text-[12px] leading-5 text-muted">
           这三个开关由桌面窗口负责（仅桌面窗口可用）。
         </p>
       )}
       {shell.loading ? (
-        <p className="border-t border-border px-4 py-2 text-[11px] text-muted">正在读取…</p>
+        <p className="border-t border-ink px-4 py-2 text-[12px] text-muted">正在读取…</p>
       ) : null}
       {shell.error === null ? null : (
-        <p className="border-t border-border px-4 py-2 text-[11px] leading-5 text-red-400">
+        <p className="border-t border-ink bg-ink px-4 py-1.5 text-[12px] leading-5 text-bg">
           {shell.error}
         </p>
       )}

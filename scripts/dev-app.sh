@@ -36,14 +36,16 @@ TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 # every launch. Debugging wants the fast build; running the app wants the quiet
 # one.
 PROFILE="${PROFILE:-debug}"
+# macOS still ships bash 3.2, where `"${empty[@]}"` is an unbound
+# variable under `set -u`; the ${x[@]+...} form expands to nothing instead.
 CARGO_PROFILE=()
 [[ "$PROFILE" == "release" ]] && CARGO_PROFILE=(--release)
 
-cargo build -p agi-app "${CARGO_PROFILE[@]}"
+cargo build -p agi-app ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"}
 # The Claude hooks point at this binary by absolute path, so a dev bundle that
 # lacks it cannot configure Claude at all — the guide fails at step three with
 # "agi-mizar-hook was not found". Packaged builds get it from package.sh.
-cargo build -p agi-hook-shim "${CARGO_PROFILE[@]}"
+cargo build -p agi-hook-shim ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"}
 
 # The bundle lives beside the binary: one directory to clean, one place to look.
 # A hidden parent keeps LaunchServices from indexing this copy: the visible app

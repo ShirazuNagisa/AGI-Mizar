@@ -394,7 +394,7 @@ export function App() {
 
       <main className="flex min-w-0 flex-1 flex-col">
         {banner === null ? null : (
-          <div className="border-b border-border bg-surface px-6 py-1.5 text-[11px] text-muted">
+          <div className="border-b border-ink bg-surface px-6 py-1.5 text-[12px] text-muted">
             {banner}
           </div>
         )}
