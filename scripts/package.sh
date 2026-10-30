@@ -74,8 +74,30 @@ if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" && -z "${TAURI_SIGNING_PRIVATE_KEY_PAT
   echo "note: no TAURI_SIGNING_PRIVATE_KEY; updater artifacts will not be produced" >&2
 fi
 
+if [[ ! -x crates/agi-app/resources/bin/llama-server ]]; then
+  echo "note: no llama-server in resources/bin; run scripts/fetch-llama.sh" >&2
+fi
+
 cargo tauri build "${TARGET_ARGS[@]}" \
-  --config '{"bundle":{"resources":{"resources/agi-mizar-hook":"agi-mizar-hook"}}}'
+  --config '{"bundle":{"resources":{"resources/agi-mizar-hook":"agi-mizar-hook","resources/bin":"bin"}}}'
+
+# Nested binaries are not signed by the bundler: it signs MacOS/, Frameworks/
+# and friends, not Resources/. Every dylib and the runner itself have to be
+# signed with the same identity first, then the app re-signed around them. Do
+# not use --deep here: it signs with the wrong options and hides the real error.
+APP_DIR="target/release/bundle/macos/AGI Mizar.app"
+if [[ "${#TARGET_ARGS[@]}" -gt 0 ]]; then
+  APP_DIR="target/${TARGET_ARGS[1]}/release/bundle/macos/AGI Mizar.app"
+fi
+if [[ -d "$APP_DIR/Contents/Resources/bin" && -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
+  find "$APP_DIR/Contents/Resources/bin" -type f -name '*.dylib' -print0 \
+    | xargs -0 -I{} codesign --force --options runtime --timestamp \
+        --sign "$APPLE_SIGNING_IDENTITY" {}
+  codesign --force --options runtime --timestamp \
+    --sign "$APPLE_SIGNING_IDENTITY" "$APP_DIR/Contents/Resources/bin/llama-server"
+  codesign --force --options runtime --timestamp \
+    --sign "$APPLE_SIGNING_IDENTITY" "$APP_DIR"
+fi
 
 # The bundler notarizes the .app, but the disk image around it is ours to
 # submit. A DMG that is signed and not notarized is still rejected by

@@ -42,6 +42,13 @@ mkdir -p "$APP/Contents/MacOS" "$RESOURCES"
 cp "$TARGET_DIR/debug/agi-mizar" "$APP/Contents/MacOS/agi-mizar"
 cp crates/agi-app/icons/icon.icns "$RESOURCES/icon.icns"
 
+# The model runner is a bundle resource, exactly as packaged builds have it, so
+# `Resources/bin/llama-server` is the path a dev build exercises too.
+if [[ -d crates/agi-app/resources/bin ]]; then
+  mkdir -p "$RESOURCES/bin"
+  cp -R crates/agi-app/resources/bin/. "$RESOURCES/bin/"
+fi
+
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
