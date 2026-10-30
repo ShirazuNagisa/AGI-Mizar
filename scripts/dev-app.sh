@@ -11,7 +11,7 @@
 # Launch it the same way the bundle would be launched:
 #
 #   AGI_RELAY_URL=... AGI_RELAY_TOKEN=... \
-#     "target/debug/AGI Mizar.app/Contents/MacOS/agi-mizar"
+#     "${CARGO_TARGET_DIR:-target}/debug/AGI Mizar.app/Contents/MacOS/agi-mizar"
 #
 # The executable path inside Contents/MacOS is what makes macOS read the bundle's
 # Info.plist and draw its icon.
@@ -24,14 +24,22 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Cargo decides where the binary lands, and `CARGO_TARGET_DIR` is how a machine
+# moves that directory — this one does, to a volume outside the repository.
+# Asking Cargo the same question is the point: a hardcoded `target/debug` does
+# not fail when the two disagree, it quietly packages whatever that directory
+# last held, so the app runs code that is no longer in the tree.
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+
 cargo build -p agi-app
 
-APP="target/debug/AGI Mizar.app"
+# The bundle lives beside the binary: one directory to clean, one place to look.
+APP="$TARGET_DIR/debug/AGI Mizar.app"
 RESOURCES="$APP/Contents/Resources"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$RESOURCES"
 
-cp target/debug/agi-mizar "$APP/Contents/MacOS/agi-mizar"
+cp "$TARGET_DIR/debug/agi-mizar" "$APP/Contents/MacOS/agi-mizar"
 cp crates/agi-app/icons/icon.icns "$RESOURCES/icon.icns"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
