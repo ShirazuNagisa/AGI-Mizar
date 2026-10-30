@@ -38,7 +38,10 @@ cargo build -p agi-app
 cargo build -p agi-hook-shim
 
 # The bundle lives beside the binary: one directory to clean, one place to look.
-APP="$TARGET_DIR/debug/AGI Mizar.app"
+# A hidden parent keeps LaunchServices from indexing this copy: the visible app
+# is the one in /Applications, and two bundles with one identifier means two
+# Dock icons and two entries in Launchpad.
+APP="$TARGET_DIR/debug/.dev-bundle/AGI Mizar.app"
 RESOURCES="$APP/Contents/Resources"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$RESOURCES"
@@ -55,6 +58,12 @@ if [[ -d crates/agi-app/resources/bin ]]; then
   mkdir -p "$RESOURCES/bin"
   cp -R crates/agi-app/resources/bin/. "$RESOURCES/bin/"
 fi
+
+# The version in the bundle is the workspace's, not a string kept by hand: a
+# bundle that claims 0.1.0 while the kernel reports 0.1.1 is a bug report waiting
+# to happen.
+VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+VERSION="${VERSION:-0.0.0}"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -78,7 +87,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
+  <string>__VERSION__</string>
   <key>CFBundleVersion</key>
   <string>1</string>
   <key>LSMinimumSystemVersion</key>
@@ -88,6 +97,11 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+
+sed -i '' "s/__VERSION__/$VERSION/" "$APP/Contents/Info.plist"
+
+# Keep Spotlight and Launchpad out of the build tree.
+printf '' > "$(dirname "$APP")/.metadata_never_index"
 
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
