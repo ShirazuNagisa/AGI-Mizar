@@ -338,7 +338,18 @@ pub fn record_to_event(record: &Record) -> Option<Value> {
                 }
             }
         }),
-        RecordKind::ToolCall | RecordKind::ToolResult | RecordKind::Notice => return None,
+        // A notice is the conversation talking about itself -- a compaction,
+        // a summary that replaced older turns -- and the phone draws it as one
+        // centred line in the stream. Dropping these is why a compacted
+        // conversation looked like it had simply lost its history.
+        RecordKind::Notice => json!({
+            "type": "notice", "seq": record.seq, "time": record.time,
+            "data": {
+                "turn": turn,
+                "text": record.text.clone().unwrap_or_default()
+            }
+        }),
+        RecordKind::ToolCall | RecordKind::ToolResult => return None,
     };
     Some(event)
 }
