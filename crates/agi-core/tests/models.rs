@@ -37,7 +37,7 @@ fn digest(bytes: &[u8]) -> String {
 async fn manifest(State(fixture): State<Fixture>) -> Response {
     let body = serde_json::json!({
         "id": "mizarllm-v1",
-        "version": "1.0.0",
+        "version": "v1",
         "backend": { "kind": "http", "endpoint": "http://127.0.0.1:0", "timeout_ms": 1500 },
         "labels": { "done": 11, "needs_user": 4, "stalled": 9, "waiting": 8 },
         "note": "test",
@@ -88,10 +88,7 @@ async fn asset(State(fixture): State<Fixture>, headers: HeaderMap) -> Response {
 async fn serve(fixture: Fixture) -> String {
     let app = Router::new()
         .route("/releases/latest/download/manifest.json", get(manifest))
-        .route(
-            "/releases/download/v1.0.0/mizarllm-1.0.0-q4km.gguf",
-            get(asset),
-        )
+        .route("/releases/download/v1/mizarllm-1.0.0-q4km.gguf", get(asset))
         .with_state(fixture);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -125,12 +122,8 @@ async fn settle(service: &Arc<ModelService>) -> String {
     "timed out".to_string()
 }
 
-/// The repository URL is process-wide, so the tests take turns.
-static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 #[tokio::test]
 async fn a_download_lands_whole_and_becomes_the_active_model() {
-    let _serial = ONE_AT_A_TIME.lock().await;
     let bytes = payload(64 * 1024);
     let base = serve(Fixture {
         sha256: digest(&bytes),
@@ -140,9 +133,10 @@ async fn a_download_lands_whole_and_becomes_the_active_model() {
     })
     .await;
     let dir = tempfile::tempdir().unwrap();
-    std::env::set_var("MIZAR_MODEL_REPO", &base);
-
     let service = ModelService::open(dir.path().to_path_buf());
+    // Each test has its own fixture and its own base: a process-wide variable
+    // made four tests overwrite each other's answer under CI's parallelism.
+    service.point_at(base.as_str());
     let check = service.check().await;
     assert!(
         check.latest.is_some(),
@@ -154,7 +148,7 @@ async fn a_download_lands_whole_and_becomes_the_active_model() {
 
     let state = service.state();
     let active = state.active.expect("a model is active");
-    assert_eq!(active.version, "1.0.0");
+    assert_eq!(active.version, "v1");
     assert_eq!(state.runtime.state, "stopped");
 
     let installed = std::fs::read(dir.path().join("mizarllm-v1.gguf")).unwrap();
@@ -169,7 +163,6 @@ async fn a_download_lands_whole_and_becomes_the_active_model() {
 
 #[tokio::test]
 async fn a_wrong_checksum_leaves_nothing_behind() {
-    let _serial = ONE_AT_A_TIME.lock().await;
     let bytes = payload(8 * 1024);
     let base = serve(Fixture {
         sha256: digest(b"not the same bytes"),
@@ -179,9 +172,10 @@ async fn a_wrong_checksum_leaves_nothing_behind() {
     })
     .await;
     let dir = tempfile::tempdir().unwrap();
-    std::env::set_var("MIZAR_MODEL_REPO", &base);
-
     let service = ModelService::open(dir.path().to_path_buf());
+    // Each test has its own fixture and its own base: a process-wide variable
+    // made four tests overwrite each other's answer under CI's parallelism.
+    service.point_at(base.as_str());
     service.start_download(None).expect("accepted");
     let error = settle(&service).await;
     assert!(
@@ -195,7 +189,6 @@ async fn a_wrong_checksum_leaves_nothing_behind() {
 
 #[tokio::test]
 async fn a_partial_file_resumes_instead_of_starting_over() {
-    let _serial = ONE_AT_A_TIME.lock().await;
     let bytes = payload(32 * 1024);
     let dir = tempfile::tempdir().unwrap();
     let partial = bytes[..16 * 1024].to_vec();
@@ -210,9 +203,10 @@ async fn a_partial_file_resumes_instead_of_starting_over() {
         delay_ms: 0,
     })
     .await;
-    std::env::set_var("MIZAR_MODEL_REPO", &base);
-
     let service = ModelService::open(dir.path().to_path_buf());
+    // Each test has its own fixture and its own base: a process-wide variable
+    // made four tests overwrite each other's answer under CI's parallelism.
+    service.point_at(base.as_str());
     service.start_download(None).expect("accepted");
     assert_eq!(settle(&service).await, "");
 
@@ -225,7 +219,6 @@ async fn a_partial_file_resumes_instead_of_starting_over() {
 
 #[tokio::test]
 async fn a_second_download_is_refused_while_one_runs() {
-    let _serial = ONE_AT_A_TIME.lock().await;
     let bytes = payload(4 * 1024);
     let base = serve(Fixture {
         sha256: digest(&bytes),
@@ -235,9 +228,10 @@ async fn a_second_download_is_refused_while_one_runs() {
     })
     .await;
     let dir = tempfile::tempdir().unwrap();
-    std::env::set_var("MIZAR_MODEL_REPO", &base);
-
     let service = ModelService::open(dir.path().to_path_buf());
+    // Each test has its own fixture and its own base: a process-wide variable
+    // made four tests overwrite each other's answer under CI's parallelism.
+    service.point_at(base.as_str());
     service.start_download(None).expect("first accepted");
     // Give the task a moment to claim the slot.
     tokio::time::sleep(std::time::Duration::from_millis(120)).await;
@@ -256,7 +250,6 @@ async fn a_second_download_is_refused_while_one_runs() {
 /// looked right in the manifest and was wrong on disk.
 #[tokio::test]
 async fn a_rollback_restores_the_previous_bytes() {
-    let _serial = ONE_AT_A_TIME.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
     std::fs::create_dir_all(root.join(".previous")).unwrap();

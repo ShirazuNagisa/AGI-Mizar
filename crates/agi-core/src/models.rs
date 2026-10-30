@@ -27,20 +27,14 @@ use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 
 /// The repository the model comes from.
-///
-/// `MIZAR_MODEL_REPO` exists so a test can point the whole flow at a local
-/// server; a release never sets it.
-fn repo_base() -> String {
-    std::env::var("MIZAR_MODEL_REPO")
-        .unwrap_or_else(|_| "https://github.com/ShirazuNagisa/Mizarllm".to_string())
-}
+const DEFAULT_REPO: &str = "https://github.com/ShirazuNagisa/Mizarllm";
 
 /// Where the newest release describes itself.
 ///
 /// GitHub's `releases/latest/download/<asset>` alias is a CDN redirect: no API
 /// call, no token, no hourly quota. One file, and the version is in it.
-fn latest_manifest_url() -> String {
-    format!("{}/releases/latest/download/manifest.json", repo_base())
+fn latest_manifest_url(base: &str) -> String {
+    format!("{base}/releases/latest/download/manifest.json")
 }
 
 /// Where the assets of one release live.
@@ -48,8 +42,8 @@ fn latest_manifest_url() -> String {
 /// The version *is* the tag: model releases are numbered `v1`, `v2`, and the
 /// manifest travels with them. Prefixing another `v` here produced
 /// `/download/vv1/`, which is a 404 nobody would look for.
-fn tag_asset_url() -> String {
-    format!("{}/releases/download/{{version}}/{{file}}", repo_base())
+fn tag_asset_url(base: &str) -> String {
+    format!("{base}/releases/download/{{version}}/{{file}}")
 }
 
 /// How often download progress is published.
@@ -137,6 +131,10 @@ pub struct ModelService {
     runtime: Arc<Runtime>,
     events: broadcast::Sender<ModelEvent>,
     http: reqwest::Client,
+    /// Where releases come from. Tests point this at a local server; nothing in
+    /// a release sets it. A field rather than an environment variable because
+    /// two tests in one process would otherwise overwrite each other's answer.
+    repo: RwLock<Option<String>>,
 }
 
 impl ModelService {
@@ -170,6 +168,7 @@ impl ModelService {
                 .read_timeout(Duration::from_secs(60))
                 .build()
                 .unwrap_or_default(),
+            repo: RwLock::new(None),
         })
     }
 
@@ -228,6 +227,24 @@ impl ModelService {
     }
 
     /// Everything the window needs to draw the model block.
+    /// Where releases come from this run.
+    fn repo_base(&self) -> String {
+        self.repo
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .unwrap_or_else(|| DEFAULT_REPO.to_string())
+    }
+
+    /// Point releases at another server. For tests: nothing in the app calls
+    /// this, and a release keeps the default.
+    pub fn point_at(&self, base: impl Into<String>) {
+        *self
+            .repo
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(base.into());
+    }
+
     pub fn state(&self) -> ModelView {
         let manifest = self.manifest();
         let active = manifest
@@ -284,7 +301,7 @@ impl ModelService {
             latest: Some(RemoteModel {
                 id: remote.manifest.id.clone(),
                 version: remote.manifest.version.clone(),
-                url: tag_asset_url()
+                url: tag_asset_url(&self.repo_base())
                     .replace("{version}", &remote.manifest.version)
                     .replace("{file}", &remote.file),
                 sha256: remote.sha256.clone(),
@@ -298,7 +315,7 @@ impl ModelService {
     async fn fetch_remote(&self) -> Result<RemoteManifest, String> {
         let response = self
             .http
-            .get(latest_manifest_url())
+            .get(latest_manifest_url(&self.repo_base()))
             .send()
             .await
             .map_err(|error| format!("could not reach the model repository: {error}"))?;
@@ -389,7 +406,7 @@ impl ModelService {
         }
 
         let version = remote.manifest.version.clone();
-        let url = tag_asset_url()
+        let url = tag_asset_url(&self.repo_base())
             .replace("{version}", &version)
             .replace("{file}", &remote.file);
 
