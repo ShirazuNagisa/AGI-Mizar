@@ -2075,7 +2075,7 @@ async fn serve_socket(server: Arc<MizarServer>, peer: SocketAddr, socket: WebSoc
                         payload.push(id.len().min(255) as u8);
                         payload.extend_from_slice(id.as_bytes());
                         payload.extend_from_slice(&bytes);
-                        if out.send(Message::Binary(payload.into())).await.is_err() {
+                        if out.send(Message::Binary(payload)).await.is_err() {
                             return;
                         }
                     }
@@ -2160,7 +2160,7 @@ async fn send(
     frame: ServerFrame,
 ) -> Result<(), tokio::sync::mpsc::error::SendError<Message>> {
     let text = serde_json::to_string(&frame).unwrap_or_else(|_| "{}".to_string());
-    out.send(Message::Text(text.into())).await
+    out.send(Message::Text(text)).await
 }
 
 /// Translate one kernel event into the frame the phone understands.

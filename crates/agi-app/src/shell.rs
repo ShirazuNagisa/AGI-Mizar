@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 /// What the shell remembers between launches.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -130,7 +130,7 @@ pub fn apply(app: &AppHandle, settings: &ShellSettings) -> Result<(), String> {
         } else {
             ActivationPolicy::Accessory
         };
-        app.set_activation_policy(policy);
+        let _ = app.set_activation_policy(policy);
     }
 
     Ok(())

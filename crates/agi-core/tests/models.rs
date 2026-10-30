@@ -126,11 +126,11 @@ async fn settle(service: &Arc<ModelService>) -> String {
 }
 
 /// The repository URL is process-wide, so the tests take turns.
-static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
 async fn a_download_lands_whole_and_becomes_the_active_model() {
-    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
+    let _serial = ONE_AT_A_TIME.lock().await;
     let bytes = payload(64 * 1024);
     let base = serve(Fixture {
         sha256: digest(&bytes),
@@ -169,7 +169,7 @@ async fn a_download_lands_whole_and_becomes_the_active_model() {
 
 #[tokio::test]
 async fn a_wrong_checksum_leaves_nothing_behind() {
-    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
+    let _serial = ONE_AT_A_TIME.lock().await;
     let bytes = payload(8 * 1024);
     let base = serve(Fixture {
         sha256: digest(b"not the same bytes"),
@@ -184,7 +184,10 @@ async fn a_wrong_checksum_leaves_nothing_behind() {
     let service = ModelService::open(dir.path().to_path_buf());
     service.start_download(None).expect("accepted");
     let error = settle(&service).await;
-    assert!(error.contains("checksum"), "expected a checksum error, got {error}");
+    assert!(
+        error.contains("checksum"),
+        "expected a checksum error, got {error}"
+    );
 
     assert!(service.state().active.is_none());
     assert!(!dir.path().join("mizarllm-v1.gguf").exists());
@@ -192,7 +195,7 @@ async fn a_wrong_checksum_leaves_nothing_behind() {
 
 #[tokio::test]
 async fn a_partial_file_resumes_instead_of_starting_over() {
-    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
+    let _serial = ONE_AT_A_TIME.lock().await;
     let bytes = payload(32 * 1024);
     let dir = tempfile::tempdir().unwrap();
     let partial = bytes[..16 * 1024].to_vec();
@@ -222,7 +225,7 @@ async fn a_partial_file_resumes_instead_of_starting_over() {
 
 #[tokio::test]
 async fn a_second_download_is_refused_while_one_runs() {
-    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
+    let _serial = ONE_AT_A_TIME.lock().await;
     let bytes = payload(4 * 1024);
     let base = serve(Fixture {
         sha256: digest(&bytes),
@@ -244,6 +247,62 @@ async fn a_second_download_is_refused_while_one_runs() {
         "two writers to one file is how a download gets corrupted"
     );
     let _ = settle(&service).await;
+}
+
+/// Rolling back must put the old bytes back, not the new ones under an old name.
+///
+/// The first version of this code renamed `<id>.gguf` over `<id>.gguf` and then
+/// renamed it back: the "previous" weights were the current ones, so a rollback
+/// looked right in the manifest and was wrong on disk.
+#[tokio::test]
+async fn a_rollback_restores_the_previous_bytes() {
+    let _serial = ONE_AT_A_TIME.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    std::fs::create_dir_all(root.join(".previous")).unwrap();
+
+    let v1 = payload(2048);
+    let v2: Vec<u8> = v1.iter().map(|byte| byte.wrapping_add(9)).collect();
+
+    std::fs::write(root.join("mizarllm-v1.gguf"), &v2).unwrap();
+    std::fs::write(
+        root.join("mizarllm-v1.json"),
+        serde_json::json!({
+            "id": "mizarllm-v1", "version": "2.0.0",
+            "backend": { "kind": "http", "endpoint": "http://127.0.0.1:0", "timeout_ms": 1500 },
+            "labels": { "done": 11, "needs_user": 4, "stalled": 9, "waiting": 8 }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(root.join(".previous/mizarllm-v1-1.0.0.gguf"), &v1).unwrap();
+    std::fs::write(
+        root.join(".previous/manifest.json"),
+        serde_json::json!({
+            "id": "mizarllm-v1", "version": "1.0.0",
+            "backend": { "kind": "http", "endpoint": "http://127.0.0.1:0", "timeout_ms": 1500 },
+            "labels": { "done": 11, "needs_user": 4, "stalled": 9, "waiting": 8 }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let service = ModelService::open(root.clone());
+    assert_eq!(service.manifest().unwrap().version, "2.0.0");
+
+    let restored = service.rollback().expect("a rollback");
+    assert_eq!(restored.version, "1.0.0");
+    assert_eq!(
+        std::fs::read(root.join("mizarllm-v1.gguf")).unwrap(),
+        v1,
+        "the bytes on disk must be the previous model's"
+    );
+    assert_eq!(
+        std::fs::read(root.join(".previous/mizarllm-v1-2.0.0.gguf")).unwrap(),
+        v2,
+        "and the model just replaced must be the one kept aside"
+    );
+    assert_eq!(service.state().active.unwrap().version, "1.0.0");
 }
 
 /// The real thing: start `llama-server` with the real weights and ask it.
@@ -281,7 +340,10 @@ async fn the_sidecar_starts_and_stops() {
     .unwrap();
 
     let service = ModelService::open(dir.path().to_path_buf());
-    assert!(service.manifest().is_some(), "the manifest should be adopted");
+    assert!(
+        service.manifest().is_some(),
+        "the manifest should be adopted"
+    );
 
     let endpoint = service.ensure_endpoint().await.expect("the sidecar starts");
     let health = reqwest::get(format!("{endpoint}/health")).await.unwrap();

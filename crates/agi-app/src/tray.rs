@@ -59,9 +59,7 @@ pub fn install(app: &AppHandle, window: &WebviewWindow) -> tauri::Result<()> {
     let quit = MenuItemBuilder::with_id("quit", "Quit AGI Mizar").build(app)?;
 
     let menu = MenuBuilder::new(app)
-        .items(&[
-            &show, &at_login, &dock, &menu_only, &theme, &update, &quit,
-        ])
+        .items(&[&show, &at_login, &dock, &menu_only, &theme, &update, &quit])
         .build()?;
 
     // The mark's white cut-out, not the coloured bundle icon: a status item is
@@ -128,7 +126,9 @@ pub fn install(app: &AppHandle, window: &WebviewWindow) -> tauri::Result<()> {
                                 let _ = menu_only.set_checked(applied.tray_menu_only);
                             }
                             Err(error) => {
-                                eprintln!("AGI Mizar: the tray behaviour was not changed — {error}");
+                                eprintln!(
+                                    "AGI Mizar: the tray behaviour was not changed — {error}"
+                                );
                                 let _ = menu_only.set_checked(shell::load().tray_menu_only);
                             }
                         }

@@ -184,17 +184,37 @@ impl SessionState {
             SessionState::Idle => ("idle", "neutral", "会话已就绪，没有任务在跑。"),
             SessionState::Thinking => ("thinking", "active", "模型正在推理，还没有正文输出。"),
             SessionState::Tool => ("tool", "active", "正在执行一个工具调用。"),
-            SessionState::AwaitingApproval => ("awaiting_approval", "waiting", "某个操作需要你批准才能继续。"),
-            SessionState::AwaitingUser => ("awaiting_user", "waiting", "模型停下来问了你一个问题。"),
-            SessionState::StreamNarration => ("stream_narration", "active", "模型正在输出过程正文，还会继续干活。"),
-            SessionState::StreamFinal => ("stream_final", "active", "模型正在输出这一轮的交代，输出完即结束。"),
+            SessionState::AwaitingApproval => (
+                "awaiting_approval",
+                "waiting",
+                "某个操作需要你批准才能继续。",
+            ),
+            SessionState::AwaitingUser => {
+                ("awaiting_user", "waiting", "模型停下来问了你一个问题。")
+            }
+            SessionState::StreamNarration => (
+                "stream_narration",
+                "active",
+                "模型正在输出过程正文，还会继续干活。",
+            ),
+            SessionState::StreamFinal => (
+                "stream_final",
+                "active",
+                "模型正在输出这一轮的交代，输出完即结束。",
+            ),
             SessionState::Subagent => ("subagent", "active", "派出的子代理还没结束。"),
-            SessionState::Background => ("background", "active", "有后台任务在跑，结束或失败时模型会被叫醒。"),
+            SessionState::Background => (
+                "background",
+                "active",
+                "有后台任务在跑，结束或失败时模型会被叫醒。",
+            ),
             SessionState::Failed => ("failed", "failure", "本轮因报错或中断停止，没有完成。"),
             SessionState::Editing => ("editing", "active", "正在写入或修改文件。"),
             SessionState::Completed => ("completed", "success", "用户本轮的指令已经办完。"),
             SessionState::Paused => ("paused", "neutral", "你主动中断了本轮。"),
-            SessionState::Compacting => ("compacting", "active", "正在压缩上下文，暂时不能开新任务。"),
+            SessionState::Compacting => {
+                ("compacting", "active", "正在压缩上下文，暂时不能开新任务。")
+            }
             SessionState::Retrying => ("retrying", "waiting", "请求失败，正在退避重试。"),
             SessionState::Queued => ("queued", "waiting", "指令已收到，还没开始执行。"),
         }
@@ -226,8 +246,7 @@ impl SessionState {
     pub fn carries_text(self) -> bool {
         matches!(
             self,
-            SessionState::StreamNarration
-            |             SessionState::StreamFinal
+            SessionState::StreamNarration | SessionState::StreamFinal
         )
     }
 
@@ -241,13 +260,13 @@ impl SessionState {
         matches!(
             self,
             SessionState::Thinking
-            |             SessionState::Tool
-            |             SessionState::StreamNarration
-            |             SessionState::StreamFinal
-            |             SessionState::Subagent
-            |             SessionState::Background
-            |             SessionState::Editing
-            |             SessionState::Compacting
+                | SessionState::Tool
+                | SessionState::StreamNarration
+                | SessionState::StreamFinal
+                | SessionState::Subagent
+                | SessionState::Background
+                | SessionState::Editing
+                | SessionState::Compacting
         )
     }
 }

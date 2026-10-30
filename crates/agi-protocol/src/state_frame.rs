@@ -134,7 +134,11 @@ impl StateFrame {
             } else {
                 0
             }),
-            text: if carries { text.to_string() } else { String::new() },
+            text: if carries {
+                text.to_string()
+            } else {
+                String::new()
+            },
         }
     }
 
@@ -416,18 +420,27 @@ mod tests {
     fn an_unknown_code_is_refused_rather_than_guessed() {
         let mut bytes = StateFrame::heartbeat(SessionState::Idle, 1).encode();
         bytes[1] = 200;
-        assert_eq!(StateFrame::decode(&bytes), Err(FrameError::UnknownState(200)));
+        assert_eq!(
+            StateFrame::decode(&bytes),
+            Err(FrameError::UnknownState(200))
+        );
     }
 
     #[test]
     fn the_receiver_follows_intervals_and_appends() {
         let mut ch = StateChannel::default();
         assert_eq!(
-            ch.apply(&StateFrame::begin(SessionState::StreamFinal, 1, "第一段"), 0),
+            ch.apply(
+                &StateFrame::begin(SessionState::StreamFinal, 1, "第一段"),
+                0
+            ),
             Applied::Began
         );
         assert_eq!(
-            ch.apply(&StateFrame::append(SessionState::StreamFinal, 1, 9, "第二段"), 100),
+            ch.apply(
+                &StateFrame::append(SessionState::StreamFinal, 1, 9, "第二段"),
+                100
+            ),
             Applied::Updated
         );
         assert_eq!(ch.text(), "第一段第二段");
@@ -469,7 +482,10 @@ mod tests {
     fn a_snapshot_repairs_a_missed_chunk() {
         let mut ch = StateChannel::default();
         ch.apply(&StateFrame::begin(SessionState::StreamFinal, 1, "开头"), 0);
-        ch.apply(&StateFrame::snapshot(SessionState::StreamFinal, 1, 0, "开头，补全了"), 5);
+        ch.apply(
+            &StateFrame::snapshot(SessionState::StreamFinal, 1, 0, "开头，补全了"),
+            5,
+        );
         assert_eq!(ch.text(), "开头，补全了");
     }
 }

@@ -25,12 +25,12 @@ use std::sync::Arc;
 
 use agi_core::{endpoint, server, Core};
 use agi_engine::Engine;
-use agi_protocol::engine::EngineId;
 use agi_engine_claude::ClaudeEngine;
 use agi_engine_codex::{AppServerConfig, CodexEngine};
 use agi_engine_dsh::DshEngine;
 use agi_mizar::pairing::PairingCode;
 use agi_mizar::{DeviceStore, MizarServer, RelayClient};
+use agi_protocol::engine::EngineId;
 
 /// What the caller wants.
 #[derive(Debug, Clone, Default)]
@@ -116,7 +116,7 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
 
     let core = Core::new(engines);
     core.set_unavailable(missing.clone().into_iter().collect());
-    core.set_rescan(Arc::new(|already| discover_local(already)));
+    core.set_rescan(Arc::new(discover_local));
     core.set_claude_hooks(Arc::new(install_hooks));
     // The window's own preferences live beside the endpoint file, not in the
     // browser: the window's origin changes with the port on every launch.
@@ -157,7 +157,9 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
     endpoint::write_hook_file(&endpoint::default_hook_path(), api_port, &hook_token)?;
 
     if config.install_claude_hooks {
-        install_hooks();
+        if let Err(error) = install_hooks() {
+            tracing::warn!("hooks: {error}");
+        }
     }
 
     // The phone's server: every interface, because a phone on the same network

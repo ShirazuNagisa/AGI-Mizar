@@ -33,6 +33,22 @@ pub async fn app_update_install(app: AppHandle) -> Result<(), String> {
     updates::install(app).await
 }
 
+/// One switch, or several: whatever the caller sent.
+///
+/// A patch rather than a whole object, because the page sends one field at a
+/// time and a missing field must mean "leave it alone" — deserialising a
+/// partial object into the full struct would silently reset the others to their
+/// defaults.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct ShellPatch {
+    #[serde(default)]
+    pub launch_at_login: Option<bool>,
+    #[serde(default)]
+    pub show_dock_icon: Option<bool>,
+    #[serde(default)]
+    pub tray_menu_only: Option<bool>,
+}
+
 /// The three switches.
 #[tauri::command]
 pub fn shell_settings_get() -> ShellSettings {
@@ -41,17 +57,24 @@ pub fn shell_settings_get() -> ShellSettings {
 
 /// Change them: each one takes effect before it is written down.
 #[tauri::command]
-pub fn shell_settings_set(
-    app: AppHandle,
-    settings: ShellSettings,
-) -> Result<ShellSettings, String> {
-    shell::update(&app, settings)
+pub fn shell_settings_set(app: AppHandle, settings: ShellPatch) -> Result<ShellSettings, String> {
+    let mut next = shell::current();
+    if let Some(value) = settings.launch_at_login {
+        next.launch_at_login = value;
+    }
+    if let Some(value) = settings.show_dock_icon {
+        next.show_dock_icon = value;
+    }
+    if let Some(value) = settings.tray_menu_only {
+        next.tray_menu_only = value;
+    }
+    shell::update(&app, next)
 }
 
 /// Start at login, for a script or a test — the same call the switch makes.
 #[tauri::command]
 pub fn shell_login_item(enabled: bool) -> Result<bool, String> {
-    login_item::set_enabled(enabled).map_err(|error| format!("{error}"))?;
+    login_item::set_enabled(enabled).map_err(|error| error.to_string())?;
     Ok(login_item::is_enabled())
 }
 

@@ -133,8 +133,13 @@ export function Onboarding({
     setStep(step + 1)
   }
 
+  const anyAvailable = engines.some((candidate) => candidate.available)
   const canAdvance =
-    step === LOGIN ? account !== null : step === CHOOSE ? selected.size > 0 : true
+    step === LOGIN
+      ? account !== null
+      : step === CHOOSE
+        ? selected.size > 0 || !anyAvailable
+        : true
 
   return (
     <div className="flex h-full w-full flex-col bg-bg text-fg">
@@ -567,7 +572,11 @@ function ModelStep({ kernel, model, onLater }: ModelStepProps) {
     download === null || download.total === 0
       ? 0
       : Math.round((download.done / download.total) * 100)
-  const ready = active !== null && (latest === null || !latest.newer)
+  // The download finishes while this step is mounted, so "ready" has to be
+  // judged against the model that is now on disk, not the check made on mount.
+  const ready =
+    active !== null &&
+    (latest === null || !latest.newer || active.version === latest.version)
 
   async function recheck() {
     setChecking(true)

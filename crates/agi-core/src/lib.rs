@@ -20,6 +20,10 @@
 //! be a second truth. The one exception is the window's own preferences — a
 //! theme name — which belongs to this app rather than to any engine.
 
+// Tests sit next to the code they exercise, which occasionally puts a helper
+// below a `mod tests`; clippy's default order is not this file's order.
+#![allow(clippy::items_after_test_module)]
+
 pub mod account;
 pub mod endpoint;
 pub mod models;
@@ -30,16 +34,16 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
 use agi_engine::{Engine, EngineError, EngineEvent};
+use agi_layout::model::{Backend, LabelMap, ModelManifest};
+use agi_layout::{facts_from_turn, Item, Layout, LayoutService, Live, StateMachine};
 use agi_protocol::api::{
     ApiEvent, Command, CommandResponse, EngineStatus, OnboardingView, StateSnapshot, UsageOverview,
 };
-use agi_layout::model::{Backend, LabelMap, ModelManifest};
-use models::{ModelEvent, ModelService};
-use agi_layout::{facts_from_turn, Item, Layout, LayoutService, Live, StateMachine};
 use agi_protocol::domain::{Interaction, Record, RecordKind, Session, SessionKey};
+use agi_protocol::engine::EngineId;
 use agi_protocol::state_frame::HEARTBEAT_MS;
 use agi_protocol::{SessionState, StateFrame};
-use agi_protocol::engine::EngineId;
+use models::{ModelEvent, ModelService};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
@@ -134,6 +138,13 @@ pub fn valid_theme(theme: &str) -> bool {
     matches!(theme, "system" | "light" | "dark")
 }
 
+/// Installs the Claude Code hooks, from whatever knows where the shim is.
+type HookInstaller = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
+
+/// Looks for agents again, given the ones already hosted.
+type RescanFn =
+    Arc<dyn Fn(&[EngineId]) -> (Vec<Arc<dyn Engine>>, HashMap<EngineId, String>) + Send + Sync>;
+
 pub struct Core {
     engines: Vec<Arc<dyn Engine>>,
     store: RwLock<Store>,
@@ -174,10 +185,10 @@ pub struct Core {
     late: RwLock<HashMap<EngineId, Arc<dyn Engine>>>,
     /// Installs the Claude Code hooks. The boot sequence owns this because the
     /// shim's path is a packaging fact, not a kernel one.
-    claude_hooks: RwLock<Option<Arc<dyn Fn() -> Result<(), String> + Send + Sync>>>,
+    claude_hooks: RwLock<Option<HookInstaller>>,
     /// Re-runs discovery. Installed by the boot sequence, which is the only
     /// thing that knows where an agent's binary might be.
-    rescan: RwLock<Option<Arc<dyn Fn(&[EngineId]) -> (Vec<Arc<dyn Engine>>, HashMap<EngineId, String>) + Send + Sync>>>,
+    rescan: RwLock<Option<RescanFn>>,
     /// Whether the heartbeat task has been started.
     ///
     /// Starting it inside `new()` is not reliable: the kernel is constructed on
@@ -194,7 +205,7 @@ impl Core {
         let (frame_tx, _) = broadcast::channel(EVENT_BUFFER);
         let model_service = ModelService::open(models_dir());
         let layout = layout_from(&model_service);
-        let core = Arc::new(Self {
+        Arc::new(Self {
             engines,
             store: RwLock::new(Store::default()),
             events,
@@ -215,8 +226,7 @@ impl Core {
             claude_hooks: RwLock::new(None),
             rescan: RwLock::new(None),
             heartbeat_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        });
-        core
+        })
     }
 
     /// Attach the tunnel's state, so the window can show whether it is up.
@@ -435,7 +445,7 @@ impl Core {
     }
 
     /// Hand the kernel the hook installer, so the guide can run it.
-    pub fn set_claude_hooks(&self, install: Arc<dyn Fn() -> Result<(), String> + Send + Sync>) {
+    pub fn set_claude_hooks(&self, install: HookInstaller) {
         *self
             .claude_hooks
             .write()
@@ -456,10 +466,7 @@ impl Core {
     }
 
     /// Hand the kernel a way to look for agents again.
-    pub fn set_rescan(
-        &self,
-        rescan: Arc<dyn Fn(&[EngineId]) -> (Vec<Arc<dyn Engine>>, HashMap<EngineId, String>) + Send + Sync>,
-    ) {
+    pub fn set_rescan(&self, rescan: RescanFn) {
         *self
             .rescan
             .write()
@@ -475,7 +482,8 @@ impl Core {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
         if let Some(rescan) = rescan {
-            let mut already: Vec<EngineId> = self.engines.iter().map(|engine| engine.id()).collect();
+            let mut already: Vec<EngineId> =
+                self.engines.iter().map(|engine| engine.id()).collect();
             already.extend(
                 self.late
                     .read()
@@ -523,7 +531,7 @@ impl Core {
                             // kernel would keep the rule fallback until the next
                             // launch.
                             core.sync_layout();
-                            core.publish(ApiEvent::ModelChanged { model })
+                            core.publish(ApiEvent::ModelChanged { model: *model })
                         }
                     }
                 }
@@ -572,7 +580,11 @@ impl Core {
 
     /// Read back the judgement for one turn, if the shadow judge has produced one.
     pub fn layout_of(&self, session: &SessionKey, turn: u32) -> Option<Layout> {
-        self.layouts.lock().ok()?.get(&(session.clone(), turn)).cloned()
+        self.layouts
+            .lock()
+            .ok()?
+            .get(&(session.clone(), turn))
+            .cloned()
     }
 
     /// Feed one record into a session's state machine and emit what it says.
@@ -582,9 +594,7 @@ impl Core {
             let Ok(mut map) = self.states.lock() else {
                 return;
             };
-            let machine = map
-                .entry(session.clone())
-                .or_insert_with(StateMachine::new);
+            let machine = map.entry(session.clone()).or_insert_with(StateMachine::new);
 
             if record.kind == RecordKind::AssistantMessage {
                 if let Some(text) = record.text.as_deref() {
@@ -600,14 +610,17 @@ impl Core {
     }
 
     /// Announce a finished turn's resulting state.
-    fn settle(&self, session: &SessionKey, facts: &agi_layout::Facts, verdict: Option<agi_layout::State>) {
+    fn settle(
+        &self,
+        session: &SessionKey,
+        facts: &agi_layout::Facts,
+        verdict: Option<agi_layout::State>,
+    ) {
         let frames = {
             let Ok(mut map) = self.states.lock() else {
                 return;
             };
-            let machine = map
-                .entry(session.clone())
-                .or_insert_with(StateMachine::new);
+            let machine = map.entry(session.clone()).or_insert_with(StateMachine::new);
             machine.on_turn_end(facts, verdict)
         };
         self.emit(session, frames);
@@ -1193,10 +1206,12 @@ impl Core {
             }
             Command::ModelState => CommandResponse::ok(self.model_service.state()),
             Command::ModelCheck => CommandResponse::ok(self.model_service.check().await),
-            Command::ModelDownload { version } => match self.model_service.start_download(Some(version)) {
-                Ok(started) => CommandResponse::ok(started),
-                Err(error) => CommandResponse::error("MODEL_DOWNLOAD_REFUSED", error),
-            },
+            Command::ModelDownload { version } => {
+                match self.model_service.start_download(Some(version)) {
+                    Ok(started) => CommandResponse::ok(started),
+                    Err(error) => CommandResponse::error("MODEL_DOWNLOAD_REFUSED", error),
+                }
+            }
             Command::ModelCancel => CommandResponse::ok(self.model_service.cancel()),
             Command::ModelActivate { id } => match self.activate_model(&id) {
                 Ok(manifest) => CommandResponse::ok(manifest.id),
@@ -1212,16 +1227,16 @@ impl Core {
             },
             Command::EngineRescan => CommandResponse::ok(self.rescan_engines()),
             Command::EngineConfigure { engine, enabled } => {
-                self.set_engine_configured(engine, enabled);
+                // The dependency first, the flag second: a flag that says
+                // "configured" while the hooks failed turns the agent page's
+                // one-click fix into a lie.
                 if enabled && engine == EngineId::Claude {
-                    match self.install_claude_hooks() {
-                        Ok(()) => {}
-                        Err(error) => {
-                            tracing::warn!("hooks: {error}");
-                            return CommandResponse::error("HOOKS_NOT_INSTALLED", error);
-                        }
+                    if let Err(error) = self.install_claude_hooks() {
+                        tracing::warn!("hooks: {error}");
+                        return CommandResponse::error("HOOKS_NOT_INSTALLED", error);
                     }
                 }
+                self.set_engine_configured(engine, enabled);
                 CommandResponse::ok(self.engine_configured(engine))
             }
             Command::OnboardingComplete => CommandResponse::ok(self.set_onboarding_done(true)),
@@ -1570,9 +1585,7 @@ mod tests {
 /// Order: an activated manifest (`MIZAR_MODEL`, or the only manifest present),
 /// then `MIZAR_LAYOUT_URL` as a one-off escape hatch for development. Nothing
 /// here knows what "Mizarllm" is — the manifest does.
-fn layout_from(
-    service: &Arc<ModelService>,
-) -> (Option<Arc<LayoutService>>, Option<ModelManifest>) {
+fn layout_from(service: &Arc<ModelService>) -> (Option<Arc<LayoutService>>, Option<ModelManifest>) {
     // An explicit URL still wins: it is how a sidecar started by hand, or a
     // remote one, gets used without being installed through the app.
     if let Some(manifest) = env_manifest() {

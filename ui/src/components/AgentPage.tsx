@@ -27,7 +27,9 @@ interface AgentPageProps {
  */
 export function AgentPage({ engine, name, status, kernel, onReconnect }: AgentPageProps) {
   const connected = status?.connected ?? false
-  const installed = status?.available ?? true
+  // A hosted engine with no CLI can still read transcripts; only a silent
+  // engine is genuinely missing. `available` alone would hide that history.
+  const installed = (status?.available ?? true) || connected
   const configured = status?.configured ?? true
   const [balance, setBalance] = useState<Balance | null>(null)
   const [busy, setBusy] = useState(false)

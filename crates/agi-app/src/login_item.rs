@@ -95,6 +95,7 @@ fn plist(executable: &std::path::Path) -> String {
     <key>ProgramArguments</key>
     <array>
         <string>{executable}</string>
+        <string>--background</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

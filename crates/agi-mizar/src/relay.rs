@@ -756,9 +756,10 @@ fn provision_for_phone(
     // leave the previous scope alive.
     let stale = format!("account:{account}:{phone}");
     for device in store.devices() {
-        let is_this_phone = device.model.as_deref().is_some_and(|model| {
-            model == stale || model.starts_with(&format!("{stale}:"))
-        });
+        let is_this_phone = device
+            .model
+            .as_deref()
+            .is_some_and(|model| model == stale || model.starts_with(&format!("{stale}:")));
         if device.is_live() && is_this_phone {
             let _ = store.revoke(&device.id);
         }

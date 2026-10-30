@@ -63,7 +63,7 @@ pub enum ModelEvent {
     /// A download moved.
     Progress(DownloadView),
     /// The installed set, the active model, or the sidecar changed.
-    Changed(ModelView),
+    Changed(Box<ModelView>),
 }
 
 /// What the repository's manifest says, plus the bits only the downloader needs.
@@ -128,7 +128,6 @@ impl Download {
 /// The model directory, the downloader, and the sidecar.
 pub struct ModelService {
     dir: PathBuf,
-    registry: ModelRegistry,
     active: RwLock<Option<ModelManifest>>,
     download: Mutex<Option<Arc<Download>>>,
     runtime: Arc<Runtime>,
@@ -155,13 +154,16 @@ impl ModelService {
         let (events, _) = broadcast::channel(64);
         Arc::new(Self {
             dir,
-            registry,
             active: RwLock::new(active),
             download: Mutex::new(None),
             runtime: Arc::new(Runtime::new()),
             events,
+            // `timeout` is the whole request, body included: on a 1 GB download
+            // it fires at 60 s and the stream dies a third of the way through.
+            // `read_timeout` is the silence between bytes, which is the thing
+            // worth failing on.
             http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(60))
+                .read_timeout(Duration::from_secs(60))
                 .build()
                 .unwrap_or_default(),
         })
@@ -191,16 +193,27 @@ impl ModelService {
 
     /// One model's weights, by the convention that keeps the directory readable:
     /// `<id>.gguf` beside `<id>.json`.
-    pub fn weights_of(&self, id: &str, previous: bool) -> PathBuf {
-        if previous {
-            self.dir.join(".previous").join(format!("{id}.gguf"))
-        } else {
-            self.dir.join(format!("{id}.gguf"))
-        }
+    pub fn weights_of(&self, id: &str, _previous: bool) -> PathBuf {
+        self.dir.join(format!("{id}.gguf"))
+    }
+
+    /// Where a model that is not the active one keeps its weights.
+    ///
+    /// The version is part of the name so that "replace the current model" and
+    /// "keep the old one aside" can never be the same path: a rename whose
+    /// source and target are equal is how a rollback silently became a no-op.
+    fn previous_weights(&self, manifest: &ModelManifest) -> PathBuf {
+        self.dir
+            .join(".previous")
+            .join(format!("{}-{}.gguf", manifest.id, manifest.version))
     }
 
     fn installed_from(&self, manifest: &ModelManifest, previous: bool) -> Option<InstalledModel> {
-        let path = self.weights_of(&manifest.id, previous);
+        let path = if previous {
+            self.previous_weights(manifest)
+        } else {
+            self.weights_of(&manifest.id, false)
+        };
         let size_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         path.exists().then(|| InstalledModel {
             id: manifest.id.clone(),
@@ -306,6 +319,17 @@ impl ModelService {
     /// event channel. A second call while one is running is refused, not queued:
     /// two writers to one file is how a download gets corrupted.
     pub fn start_download(self: &Arc<Self>, want: Option<String>) -> Result<String, String> {
+        let claimed = Arc::new(Download {
+            view: Mutex::new(DownloadView {
+                version: want.clone().unwrap_or_else(|| "latest".to_string()),
+                done: 0,
+                total: 0,
+                state: "starting".to_string(),
+                error: None,
+            }),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        });
+
         {
             let mut slot = self
                 .download
@@ -313,31 +337,50 @@ impl ModelService {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             match slot.as_ref() {
                 // A failure is kept on screen until the next attempt; a failure
-                // that vanishes before it is read is a failure nobody can act on.
-                Some(previous) if previous.snapshot().state == "failed" => *slot = None,
+                // that vanishes before it is read is one nobody can act on.
+                Some(previous) if previous.snapshot().state == "failed" => {}
                 Some(_) => return Err("a download is already running".to_string()),
                 None => {}
             }
+            // Claimed here, not inside the task: two tasks writing one `.part`
+            // is how a resume corrupts itself.
+            *slot = Some(Arc::clone(&claimed));
         }
 
         let service = Arc::clone(self);
         let wanted = want.clone();
         tokio::spawn(async move {
-            if let Err(error) = service.download(&wanted).await {
+            if let Err(error) = service.download(&wanted, claimed.clone()).await {
                 tracing::warn!("model download failed: {error}");
             }
         });
         Ok(want.unwrap_or_else(|| "latest".to_string()))
     }
 
-    async fn download(self: Arc<Self>, want: &Option<String>) -> Result<(), String> {
-        let remote = self.fetch_remote().await?;
+    async fn download(
+        self: Arc<Self>,
+        want: &Option<String>,
+        download: Arc<Download>,
+    ) -> Result<(), String> {
+        let remote = match self.fetch_remote().await {
+            Ok(remote) => remote,
+            Err(error) => {
+                // The frame already exists, so the window sees the reason
+                // instead of a button that appears to do nothing.
+                download.fail(&error);
+                self.publish(ModelEvent::Progress(download.snapshot()));
+                return Err(error);
+            }
+        };
         if let Some(want) = want.as_deref() {
             if want != remote.manifest.version {
-                return Err(format!(
+                let error = format!(
                     "the repository offers {} and this build asked for {want}",
                     remote.manifest.version
-                ));
+                );
+                download.fail(&error);
+                self.publish(ModelEvent::Progress(download.snapshot()));
+                return Err(error);
             }
         }
 
@@ -347,27 +390,23 @@ impl ModelService {
             .replace("{file}", &remote.file);
 
         let temp_dir = self.dir.join(".download");
-        std::fs::create_dir_all(&temp_dir)
-            .map_err(|error| format!("could not create {}: {error}", temp_dir.display()))?;
+        std::fs::create_dir_all(&temp_dir).map_err(|error| {
+            let message = format!("could not create {}: {error}", temp_dir.display());
+            download.fail(&message);
+            self.publish(ModelEvent::Progress(download.snapshot()));
+            message
+        })?;
         let part_path = temp_dir.join(format!("{}.part", remote.file));
 
         let total = remote.size_bytes.unwrap_or(0);
-        let download = Arc::new(Download {
-            view: Mutex::new(DownloadView {
-                version: version.clone(),
-                done: 0,
-                total,
-                state: "running".to_string(),
-                error: None,
-            }),
-            cancelled: Arc::new(AtomicBool::new(false)),
-        });
         {
-            let mut slot = self
-                .download
+            let mut view = download
+                .view
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            *slot = Some(Arc::clone(&download));
+            view.version = version.clone();
+            view.total = total;
+            view.state = "running".to_string();
         }
         self.publish(ModelEvent::Progress(download.snapshot()));
 
@@ -384,11 +423,10 @@ impl ModelService {
 
         download.phase("verifying");
         self.publish(ModelEvent::Progress(download.snapshot()));
-        let installed = self.install(&remote, &download, &part_path).await;
-        match installed {
+        match self.install(&remote, &download, &part_path).await {
             Ok(()) => {
                 self.clear_download();
-                self.publish(ModelEvent::Changed(self.state()));
+                self.publish(ModelEvent::Changed(Box::new(self.state())));
                 Ok(())
             }
             Err(error) => {
@@ -415,7 +453,7 @@ impl ModelService {
         part_path: &Path,
         total: u64,
     ) -> Result<(), String> {
-        let mut done = std::fs::metadata(part_path).map(|m| m.len()).unwrap_or(0);
+        let done = std::fs::metadata(part_path).map(|m| m.len()).unwrap_or(0);
         if done > 0 && total > 0 && done >= total {
             // A finished `.part` from a previous run: nothing to fetch.
             return Ok(());
@@ -499,17 +537,32 @@ impl ModelService {
         let current_manifest = self.dir.join(format!("{id}.json"));
         if current.exists() {
             let previous_dir = self.dir.join(".previous");
-            std::fs::create_dir_all(&previous_dir).map_err(|error| {
-                format!("could not create {}: {error}", previous_dir.display())
-            })?;
-            let _ = std::fs::rename(&current, self.weights_of(id, true));
-            if let Ok(text) = std::fs::read(&current_manifest) {
-                let _ = std::fs::write(self.previous_manifest_path(), text);
+            std::fs::create_dir_all(&previous_dir)
+                .map_err(|error| format!("could not create {}: {error}", previous_dir.display()))?;
+            // Name the outgoing weights after the version they *are*, not the
+            // one they are about to be replaced by.
+            match std::fs::read(&current_manifest)
+                .ok()
+                .and_then(|text| serde_json::from_slice::<ModelManifest>(&text).ok())
+            {
+                Some(outgoing) => {
+                    let _ = std::fs::rename(&current, self.previous_weights(&outgoing));
+                    let _ = std::fs::write(
+                        self.previous_manifest_path(),
+                        serde_json::to_vec_pretty(&outgoing).unwrap_or_default(),
+                    );
+                }
+                None => {
+                    let _ = std::fs::remove_file(&current);
+                }
             }
         }
 
         std::fs::rename(part_path, &current).map_err(|error| {
-            format!("could not move the download into {}: {error}", current.display())
+            format!(
+                "could not move the download into {}: {error}",
+                current.display()
+            )
         })?;
 
         // The manifest goes in last: a half-written model must never look
@@ -552,7 +605,10 @@ impl ModelService {
             .manifest_of(id)
             .ok_or_else(|| format!("no installed model has id {id}"))?;
         if !self.weights_of(&manifest.id, false).exists() {
-            return Err(format!("{} names weights that are not installed", manifest.id));
+            return Err(format!(
+                "{} names weights that are not installed",
+                manifest.id
+            ));
         }
         {
             let mut active = self
@@ -561,7 +617,11 @@ impl ModelService {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             *active = Some(manifest.clone());
         }
-        self.publish(ModelEvent::Changed(self.state()));
+        // The process holds the old weights; a switch that keeps it running
+        // judges the next turn with the model it just replaced.
+        let runtime = Arc::clone(&self.runtime);
+        tokio::spawn(async move { runtime.stop().await });
+        self.publish(ModelEvent::Changed(Box::new(self.state())));
         Ok(manifest)
     }
 
@@ -590,27 +650,42 @@ impl ModelService {
         let previous = self
             .read_previous_manifest()
             .ok_or_else(|| "there is no previous model to go back to".to_string())?;
-        let id = &previous.id;
-        let previous_weights = self.weights_of(id, true);
+        let current = self
+            .manifest()
+            .ok_or_else(|| "no model is active".to_string())?;
+
+        let previous_dir = self.dir.join(".previous");
+        std::fs::create_dir_all(&previous_dir)
+            .map_err(|error| format!("could not create {}: {error}", previous_dir.display()))?;
+
+        let previous_weights = self.previous_weights(&previous);
         if !previous_weights.exists() {
             return Err("the previous model's weights are gone".to_string());
         }
-        let current = self.weights_of(id, false);
-        let current_manifest = self.dir.join(format!("{id}.json"));
-        if current.exists() {
-            let _ = std::fs::rename(&current, self.weights_of(id, true));
+        let current_weights = self.weights_of(&current.id, false);
+        let stash = previous_dir.join(format!("{}-{}.restore", previous.id, previous.version));
+
+        // Out of the way first: a rename whose target is a live file destroys it.
+        std::fs::rename(&previous_weights, &stash)
+            .map_err(|error| format!("could not move the previous weights: {error}"))?;
+        if current_weights.exists() {
+            std::fs::rename(&current_weights, self.previous_weights(&current))
+                .map_err(|error| format!("could not set the current weights aside: {error}"))?;
         }
-        if let Ok(text) = std::fs::read(&current_manifest) {
-            let _ = std::fs::write(self.previous_manifest_path(), text);
-        }
-        std::fs::rename(self.weights_of(id, true), &current).map_err(|error| {
-            format!("could not restore the previous weights: {error}")
-        })?;
-        // `weights_of(id, true)` moved; rewrite the previous manifest from what is
-        // left, if anything.
-        let text = serde_json::to_vec_pretty(&previous)
-            .map_err(|error| format!("could not serialise the manifest: {error}"))?;
-        write_atomic(&current_manifest, &text)?;
+        std::fs::rename(&stash, &current_weights)
+            .map_err(|error| format!("could not restore the previous weights: {error}"))?;
+
+        write_atomic(
+            &self.dir.join(format!("{}.json", previous.id)),
+            &serde_json::to_vec_pretty(&previous)
+                .map_err(|error| format!("could not serialise the manifest: {error}"))?,
+        )?;
+        write_atomic(
+            &self.previous_manifest_path(),
+            &serde_json::to_vec_pretty(&current)
+                .map_err(|error| format!("could not serialise the manifest: {error}"))?,
+        )?;
+
         {
             let mut active = self
                 .active
@@ -618,7 +693,10 @@ impl ModelService {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             *active = Some(previous.clone());
         }
-        self.publish(ModelEvent::Changed(self.state()));
+        // The sidecar holds the model that was just replaced.
+        let runtime = Arc::clone(&self.runtime);
+        tokio::spawn(async move { runtime.stop().await });
+        self.publish(ModelEvent::Changed(Box::new(self.state())));
         Ok(previous)
     }
 
@@ -627,9 +705,9 @@ impl ModelService {
         let previous = self
             .read_previous_manifest()
             .ok_or_else(|| "there is no previous model".to_string())?;
-        let _ = std::fs::remove_file(self.weights_of(&previous.id, true));
+        let _ = std::fs::remove_file(self.previous_weights(&previous));
         let _ = std::fs::remove_file(self.previous_manifest_path());
-        self.publish(ModelEvent::Changed(self.state()));
+        self.publish(ModelEvent::Changed(Box::new(self.state())));
         Ok(())
     }
 
@@ -640,7 +718,9 @@ impl ModelService {
     /// manifest shipped by somebody else cannot point the kernel somewhere
     /// unplanned.
     pub async fn ensure_endpoint(self: &Arc<Self>) -> Result<String, String> {
-        let manifest = self.manifest().ok_or_else(|| "no model is active".to_string())?;
+        let manifest = self
+            .manifest()
+            .ok_or_else(|| "no model is active".to_string())?;
         let weights = self.weights_of(&manifest.id, false);
         if !weights.exists() {
             return Err(format!("{} has no weights on disk", manifest.id));
@@ -710,7 +790,6 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
     candidate > current
 }
 
-
 /// The judge the kernel actually runs: ask the service where the sidecar is,
 /// then ask the sidecar.
 ///
@@ -736,12 +815,11 @@ impl agi_layout::Judge for SidecarJudge {
             endpoint,
             api_key: None,
         };
-        match tokio::time::timeout(JUDGE_TIMEOUT, judge.judge(facts)).await {
-            Ok(verdict) => verdict,
-            // A sidecar that accepted the request and then hung is worse than
-            // one that is down: without this the turn waits forever.
-            Err(_) => None,
-        }
+        // A sidecar that accepted the request and then hung is worse than one
+        // that is down: without the timeout the turn waits forever.
+        tokio::time::timeout(JUDGE_TIMEOUT, judge.judge(facts))
+            .await
+            .unwrap_or_default()
     }
 }
 
@@ -749,6 +827,9 @@ impl agi_layout::Judge for SidecarJudge {
 pub struct Runtime {
     process: tokio::sync::Mutex<Option<tokio::process::Child>>,
     view: RwLock<RuntimeView>,
+    /// One start at a time: two turns ending together must not race two
+    /// `llama-server` processes into the same port.
+    starting: tokio::sync::Mutex<()>,
 }
 
 impl Runtime {
@@ -756,6 +837,7 @@ impl Runtime {
         Self {
             process: tokio::sync::Mutex::new(None),
             view: RwLock::new(RuntimeView::default()),
+            starting: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -800,13 +882,23 @@ impl Runtime {
 
     /// Start the sidecar if it is not already answering, and hand back its port.
     pub async fn ensure(&self, weights: &Path) -> Result<u16, String> {
-        {
-            let view = self.view();
-            if view.state == "ready" {
-                if let Some(port) = view.port {
+        let _one_at_a_time = self.starting.lock().await;
+
+        // Ready means "a child is still running and answering". A crashed
+        // sidecar must not leave the kernel believing it is warm.
+        if self.view().state == "ready" {
+            let mut process = self.process.lock().await;
+            let alive = match process.as_mut() {
+                Some(child) => matches!(child.try_wait(), Ok(None)),
+                None => false,
+            };
+            if alive {
+                if let Some(port) = self.view().port {
                     return Ok(port);
                 }
             }
+            let _ = process.take();
+            self.set(RuntimeView::default());
         }
 
         let binary = self

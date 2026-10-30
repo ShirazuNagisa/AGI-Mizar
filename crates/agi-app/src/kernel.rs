@@ -34,8 +34,8 @@ fn ureq_post(port: u16, token: &str, body: serde_json::Value) -> Result<(), Stri
     use std::net::TcpStream;
 
     let payload = body.to_string();
-    let mut stream = TcpStream::connect(("127.0.0.1", port))
-        .map_err(|error| format!("connect: {error}"))?;
+    let mut stream =
+        TcpStream::connect(("127.0.0.1", port)).map_err(|error| format!("connect: {error}"))?;
     let request = format!(
         "POST /api/v1/command HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
         payload.len()

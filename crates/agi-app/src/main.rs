@@ -21,10 +21,10 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-#[cfg(target_os = "macos")]
-mod login_item;
 mod ipc;
 mod kernel;
+#[cfg(target_os = "macos")]
+mod login_item;
 #[cfg(target_os = "macos")]
 mod shell;
 #[cfg(target_os = "macos")]
@@ -135,6 +135,9 @@ fn main() {
         .expect("the kernel failed to start");
 
     kernel::remember(booted.api_port, booted.api_token.clone());
+    // The run loop owns the shutdown: `kill_on_drop` does not fire when the
+    // process exits, and the model runner is a gigabyte of resident weights.
+    let core_for_exit = std::sync::Arc::clone(&booted.core);
     // Started by the login item: the point is the kernel behind the window, so
     // the window waits in the menu bar instead of stealing focus at login.
     let background = std::env::args().any(|argument| argument == "--background");
@@ -265,6 +268,16 @@ fn main() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("the window failed to start");
+        .build(tauri::generate_context!())
+        .expect("the window failed to start")
+        .run(move |_app, event| {
+            // `kill_on_drop` does not run when the process exits, so a quit has
+            // to stop the model runner explicitly or it stays resident with a
+            // gigabyte of weights loaded.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                tauri::async_runtime::block_on(async {
+                    core_for_exit.models().shutdown().await;
+                });
+            }
+        });
 }

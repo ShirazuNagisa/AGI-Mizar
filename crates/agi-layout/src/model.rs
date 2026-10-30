@@ -140,7 +140,11 @@ impl ModelManifest {
     /// release can name a state this build predates, and the honest answer is to
     /// refuse the model rather than draw the wrong thing on the phone.
     pub fn validate(&self) -> Result<(), ManifestError> {
-        if self.id.is_empty() || !self.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        if self.id.is_empty()
+            || !self
+                .id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         {
             return Err(ManifestError::BadId(self.id.clone()));
         }
@@ -321,7 +325,10 @@ mod tests {
     fn a_manifest_maps_labels_onto_state_codes() {
         let m = ModelManifest::parse(manifest_json()).unwrap();
         assert_eq!(m.state_code(State::Done), Some(SessionState::Completed));
-        assert_eq!(m.state_code(State::NeedsUser), Some(SessionState::AwaitingUser));
+        assert_eq!(
+            m.state_code(State::NeedsUser),
+            Some(SessionState::AwaitingUser)
+        );
         assert_eq!(m.state_code(State::Stalled), Some(SessionState::Failed));
         assert_eq!(m.state_code(State::Waiting), Some(SessionState::Background));
     }

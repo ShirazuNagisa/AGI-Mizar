@@ -324,7 +324,7 @@ async fn pump_events(
                         payload.push(session.id.len().min(255) as u8);
                         payload.extend_from_slice(session.id.as_bytes());
                         payload.extend_from_slice(&bytes);
-                        if sink.send(Message::Binary(payload.into())).await.is_err() {
+                        if sink.send(Message::Binary(payload)).await.is_err() {
                             return;
                         }
                     }
@@ -548,7 +548,9 @@ mod tests {
 /// relay host only; a build without the variable behaves exactly as before, so a
 /// client cannot discover a channel that is not meant to be there.
 fn state_channel_enabled() -> bool {
-    std::env::var("MIZAR_STATE_CHANNEL").map(|v| v == "1").unwrap_or(false)
+    std::env::var("MIZAR_STATE_CHANNEL")
+        .map(|v| v == "1")
+        .unwrap_or(false)
 }
 
 /// Whether a client frame asks for the state channel.

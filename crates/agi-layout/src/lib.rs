@@ -31,13 +31,13 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use agi_protocol::SessionState;
+use async_trait::async_trait;
 
 pub mod model;
 pub mod states;
-pub use states::StateMachine;
 pub use model::{Backend, LabelMap, ManifestError, ManifestJudge, ModelManifest, ModelRegistry};
+pub use states::StateMachine;
 
 use serde::{Deserialize, Serialize};
 
@@ -203,7 +203,11 @@ pub fn render_prompt(f: &Facts) -> String {
     parts.push(String::new());
     parts.push(format!(
         "本轮工具：{}",
-        if f.tools.is_empty() { "（无）" } else { &f.tools }
+        if f.tools.is_empty() {
+            "（无）"
+        } else {
+            &f.tools
+        }
     ));
 
     if !f.failures.is_empty() {
@@ -234,10 +238,7 @@ pub fn render_prompt(f: &Facts) -> String {
         f.reply_count
     ));
     parts.push(String::new());
-    parts.push(format!(
-        "模型最后的话（按顺序，共 {} 条）：",
-        f.texts.len()
-    ));
+    parts.push(format!("模型最后的话（按顺序，共 {} 条）：", f.texts.len()));
     for (i, t) in f.texts.iter().enumerate() {
         let mut head = String::new();
         let _ = write!(head, "--- 第 {} 条 ---", i + 1);
@@ -257,8 +258,6 @@ pub fn render_prompt(f: &Facts) -> String {
 /// cost the whole turn.
 pub fn parse_state(text: &str) -> Option<State> {
     for st in State::ALL {
-        let quoted = format!("\"state\"");
-        let _ = quoted;
         let needle = format!("\"{}\"", st.as_str());
         if text.contains(&needle) {
             return Some(st);
@@ -497,7 +496,10 @@ impl Judge for LlamaServerJudge {
         });
         let client = reqwest::Client::new();
         let mut req = client
-            .post(format!("{}/completion", self.endpoint.trim_end_matches('/')))
+            .post(format!(
+                "{}/completion",
+                self.endpoint.trim_end_matches('/')
+            ))
             .json(&body);
         if let Some(key) = &self.api_key {
             req = req.bearer_auth(key);
@@ -688,17 +690,26 @@ mod state_machine_tests {
 
         let mut f = facts();
         f.jobs = vec!["build".into()];
-        assert_eq!(state_of_turn(&f, Some(State::Done)), SessionState::Background);
+        assert_eq!(
+            state_of_turn(&f, Some(State::Done)),
+            SessionState::Background
+        );
     }
 
     #[test]
     fn the_model_decides_the_semantic_case() {
-        assert_eq!(state_of_turn(&facts(), Some(State::Done)), SessionState::Completed);
+        assert_eq!(
+            state_of_turn(&facts(), Some(State::Done)),
+            SessionState::Completed
+        );
         assert_eq!(
             state_of_turn(&facts(), Some(State::NeedsUser)),
             SessionState::AwaitingUser
         );
-        assert_eq!(state_of_turn(&facts(), Some(State::Stalled)), SessionState::Failed);
+        assert_eq!(
+            state_of_turn(&facts(), Some(State::Stalled)),
+            SessionState::Failed
+        );
     }
 
     #[test]
