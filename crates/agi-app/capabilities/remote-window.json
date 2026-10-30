@@ -1,0 +1,19 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "remote-shell",
+  "description": "The handful of shell actions the kernel's page is allowed to call: update checks, the three process switches, and quitting. Everything else the page needs comes from the kernel's own HTTP API.",
+  "remote": {
+    "urls": ["http://127.0.0.1:*"]
+  },
+  "local": false,
+  "windows": ["main"],
+  "permissions": [
+    "allow-app-update-check",
+    "allow-app-update-state",
+    "allow-app-update-install",
+    "allow-shell-settings-get",
+    "allow-shell-settings-set",
+    "allow-shell-login-item",
+    "allow-app-quit"
+  ]
+}

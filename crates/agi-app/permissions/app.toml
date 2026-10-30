@@ -1,0 +1,41 @@
+# What the window may ask the shell to do.
+#
+# The page is served by the kernel over loopback, so these are the only calls
+# that cross into the process itself. Each command gets its own permission so the
+# list is readable: a command that is not here is denied, and the denial is the
+# intended failure rather than a bug.
+
+[[permission]]
+identifier = "allow-app-update-check"
+description = "Ask GitHub whether a newer build exists."
+commands.allow = ["app_update_check"]
+
+[[permission]]
+identifier = "allow-app-update-state"
+description = "Read the last update answer without touching the network."
+commands.allow = ["app_update_state"]
+
+[[permission]]
+identifier = "allow-app-update-install"
+description = "Download and install the newer build, then restart into it."
+commands.allow = ["app_update_install"]
+
+[[permission]]
+identifier = "allow-shell-settings-get"
+description = "Read the three shell switches."
+commands.allow = ["shell_settings_get"]
+
+[[permission]]
+identifier = "allow-shell-settings-set"
+description = "Change the three shell switches."
+commands.allow = ["shell_settings_set"]
+
+[[permission]]
+identifier = "allow-shell-login-item"
+description = "Toggle the login item directly."
+commands.allow = ["shell_login_item"]
+
+[[permission]]
+identifier = "allow-app-quit"
+description = "Quit the app; closing the window only hides it."
+commands.allow = ["app_quit"]

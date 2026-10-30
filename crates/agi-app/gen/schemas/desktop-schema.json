@@ -177,6 +177,48 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Quit the app; closing the window only hides it.",
+          "type": "string",
+          "const": "allow-app-quit",
+          "markdownDescription": "Quit the app; closing the window only hides it."
+        },
+        {
+          "description": "Ask GitHub whether a newer build exists.",
+          "type": "string",
+          "const": "allow-app-update-check",
+          "markdownDescription": "Ask GitHub whether a newer build exists."
+        },
+        {
+          "description": "Download and install the newer build, then restart into it.",
+          "type": "string",
+          "const": "allow-app-update-install",
+          "markdownDescription": "Download and install the newer build, then restart into it."
+        },
+        {
+          "description": "Read the last update answer without touching the network.",
+          "type": "string",
+          "const": "allow-app-update-state",
+          "markdownDescription": "Read the last update answer without touching the network."
+        },
+        {
+          "description": "Toggle the login item directly.",
+          "type": "string",
+          "const": "allow-shell-login-item",
+          "markdownDescription": "Toggle the login item directly."
+        },
+        {
+          "description": "Read the three shell switches.",
+          "type": "string",
+          "const": "allow-shell-settings-get",
+          "markdownDescription": "Read the three shell switches."
+        },
+        {
+          "description": "Change the three shell switches.",
+          "type": "string",
+          "const": "allow-shell-settings-set",
+          "markdownDescription": "Change the three shell switches."
+        },
+        {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
           "type": "string",
           "const": "core:default",

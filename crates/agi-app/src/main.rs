@@ -23,6 +23,10 @@
 
 #[cfg(target_os = "macos")]
 mod login_item;
+mod ipc;
+mod kernel;
+#[cfg(target_os = "macos")]
+mod shell;
 #[cfg(target_os = "macos")]
 mod tray;
 mod updates;
@@ -119,12 +123,21 @@ fn main() {
             // backed up and reversible, so the app installs them by default and
             // an operator who wants to manage the file themselves passes
             // `--no-install-claude-hooks`.
-            install_claude_hooks: !std::env::args()
-                .any(|argument| argument == "--no-install-claude-hooks"),
+            // Installed by the guide, where the person can see it happen. A
+            // launch that silently rewrites ~/.claude/settings.json is a
+            // surprise, not a feature; `--install-claude-hooks` is the escape
+            // hatch for a scripted setup.
+            install_claude_hooks: std::env::args()
+                .any(|argument| argument == "--install-claude-hooks"),
             relay_url: std::env::var("AGI_RELAY_URL").ok(),
             relay_token: std::env::var("AGI_RELAY_TOKEN").ok(),
         }))
         .expect("the kernel failed to start");
+
+    kernel::remember(booted.api_port, booted.api_token.clone());
+    // Started by the login item: the point is the kernel behind the window, so
+    // the window waits in the menu bar instead of stealing focus at login.
+    let background = std::env::args().any(|argument| argument == "--background");
 
     let url = booted.window_url();
     println!("AGI Mizar — window at {url}");
@@ -144,6 +157,15 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![
+            ipc::app_update_check,
+            ipc::app_update_state,
+            ipc::app_update_install,
+            ipc::shell_settings_get,
+            ipc::shell_settings_set,
+            ipc::shell_login_item,
+            ipc::app_quit,
+        ])
         // A menu bar of File/Edit/View is the default, and it is not what this
         // window is: it has one screen for each agent and nothing to open. macOS
         // still needs an application menu for About and Quit.
@@ -191,7 +213,8 @@ fn main() {
                 tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::External(parsed))
                     .title("AGI Mizar")
                     .inner_size(1100.0, 720.0)
-                    .min_inner_size(720.0, 480.0);
+                    .min_inner_size(720.0, 480.0)
+                    .visible(!background);
 
             // The window draws its own chrome: the page reserves a strip for the
             // traffic lights, and everything below it is the app's. Windows has no
@@ -205,6 +228,18 @@ fn main() {
             }
 
             let window = builder.build()?;
+
+            // The three process switches, as stored. Applied after the window
+            // exists so the Dock icon is present for the first frame and then
+            // removed, which is less jarring than a window with no Dock icon
+            // that appears late.
+            #[cfg(target_os = "macos")]
+            {
+                let settings = shell::current();
+                if let Err(error) = shell::apply(app.handle(), &settings) {
+                    tracing::warn!("shell settings: {error}");
+                }
+            }
 
             // The window is the product; the status item is what keeps it
             // reachable after it is closed.
