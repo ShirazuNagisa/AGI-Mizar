@@ -150,7 +150,7 @@ export function Onboarding({
               <span
                 key={title}
                 className={cn(
- 'h-2 flex-1 border border-ink',
+                  'h-2 flex-1 border border-ink',
                   index <= step ? 'bg-ink' : 'bg-transparent',
                 )}
               />
@@ -511,7 +511,7 @@ function AgentStep({ kernel, engines, selected, onToggle, onRefreshState }: Agen
               disabled={!available}
               onClick={() => onToggle(engine)}
               className={cn(
- 'flex flex-col gap-2 border p-3 text-left outline-none',
+                'flex flex-col gap-2 border p-3 text-left outline-none',
                 available
                   ? chosen
                     ? 'border-ink bg-ink text-bg'

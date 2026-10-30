@@ -208,7 +208,7 @@ function StatusLamp({ connected, installed }: { connected: boolean; installed: b
     <span className="flex items-center gap-1.5 text-[12px] text-muted">
       <span
         className={cn(
- 'size-2',
+          'size-2',
           connected ? 'bg-ink' : installed ? 'border border-ink' : 'border border-ink dither-50',
         )}
       />

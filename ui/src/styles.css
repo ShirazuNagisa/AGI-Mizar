@@ -151,3 +151,62 @@ body {
     background-size: 4px 4px;
   }
 }
+
+/* ── The hover sweep ──────────────────────────────────────────────────────
+ *
+ * A button that fills on hover paints its content twice: once in the resting
+ * colours, and once in the inverted ones on top of the incoming fill. The
+ * second copy is clipped to exactly where the fill has arrived, so a glyph
+ * flips colour the moment the edge crosses it — which is the only way to keep
+ * the label readable while the background is half filled.
+ *
+ * The fill and the clip share one duration and one curve, so the two edges
+ * stay together. Leaving the button runs the same transition backwards.
+ */
+.wipe {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+.wipe-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform var(--wipe-ms, 240ms) var(--wipe-ease, cubic-bezier(0.4, 0, 0.2, 1));
+}
+
+.wipe-content {
+  position: relative;
+  z-index: 1;
+}
+
+.wipe-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  pointer-events: none;
+  clip-path: inset(0 100% 0 0);
+  transition: clip-path var(--wipe-ms, 240ms) var(--wipe-ease, cubic-bezier(0.4, 0, 0.2, 1));
+}
+
+.wipe:hover > .wipe-layer,
+.wipe:focus-visible > .wipe-layer {
+  transform: scaleX(1);
+}
+
+.wipe:hover > .wipe-overlay,
+.wipe:focus-visible > .wipe-overlay {
+  clip-path: inset(0 0 0 0);
+}
+
+
+@media (prefers-reduced-motion: reduce) {
+  .wipe-layer,
+  .wipe-overlay {
+    transition-duration: 1ms;
+  }
+}

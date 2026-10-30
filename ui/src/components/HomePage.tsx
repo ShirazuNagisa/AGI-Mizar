@@ -4,6 +4,7 @@ import { formatCount } from '../format'
 import { hourLabel, heatmapWindow, RANGES, type Range, daysInRange, summarize } from '../usage'
 import { Toolbar } from './Toolbar'
 import { Panel } from './ui/panel'
+import { WipeButton } from './ui/wipe'
 import { cn } from '../lib/utils'
 
 interface HomePageProps {
@@ -39,19 +40,19 @@ export function HomePage({ overview, loading, error }: HomePageProps) {
       <Toolbar title="主页">
         <div className="flex">
           {RANGES.map((entry, index) => (
-            <button
+            <WipeButton
               key={entry.id}
-              type="button"
               onClick={() => setRange(entry.id)}
               aria-pressed={range === entry.id}
               className={cn(
- 'h-7 border border-ink px-2.5 text-[12px]',
+                'flex h-7 items-stretch border border-ink text-[12px]',
                 index === 0 ? '' : '-ml-px',
-                range === entry.id ? 'bg-ink text-bg' : 'hover:bg-ink hover:text-bg',
+                range === entry.id && 'bg-ink text-bg',
               )}
+              contentClassName="flex items-center justify-center px-2.5"
             >
               {entry.label}
-            </button>
+            </WipeButton>
           ))}
         </div>
       </Toolbar>
@@ -59,19 +60,19 @@ export function HomePage({ overview, loading, error }: HomePageProps) {
         <div className="mx-auto w-full max-w-[1180px] px-6 py-5">
           <div className="flex">
             {TABS.map((entry, index) => (
-              <button
+              <WipeButton
                 key={entry.id}
-                type="button"
                 onClick={() => setTab(entry.id)}
                 aria-pressed={tab === entry.id}
                 className={cn(
- 'h-7 border border-ink px-3 text-[12px]',
+                  'flex h-7 items-stretch border border-ink text-[12px]',
                   index === 0 ? '' : '-ml-px',
-                  tab === entry.id ? 'bg-ink text-bg' : 'hover:bg-ink hover:text-bg',
+                  tab === entry.id && 'bg-ink text-bg',
                 )}
+                contentClassName="flex items-center justify-center px-3"
               >
                 {entry.label}
-              </button>
+              </WipeButton>
             ))}
           </div>
 
@@ -127,7 +128,7 @@ function Metric({
       <div className="text-[12px] tracking-[1px]">{label}</div>
       <div
         className={cn(
- 'mt-1 truncate text-[24px] leading-8 tabular',
+          'mt-1 truncate text-[24px] leading-8 tabular',
           text && 'tracking-[-0.5px]',
           loading && value === '—' && 'text-muted',
         )}
@@ -233,7 +234,7 @@ function ModelTable({
           <div
             key={model.model}
             className={cn(
- 'grid grid-cols-[1fr_80px_100px_120px] items-center gap-3 px-3 py-2.5 text-[12px]',
+              'grid grid-cols-[1fr_80px_100px_120px] items-center gap-3 px-3 py-2.5 text-[12px]',
               index === 0 ? '' : 'border-t border-ink',
             )}
           >

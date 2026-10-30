@@ -21,7 +21,7 @@ export function SelectTrigger({
  return (
     <SelectPrimitive.Trigger
       className={cn(
- 'inline-flex h-8 min-w-[7.5rem] items-center justify-between gap-2 border border-ink bg-transparent px-2.5 text-[12px] text-ink outline-none hover:bg-ink hover:text-bg data-[placeholder]:text-ink',
+        'inline-flex h-8 min-w-[7.5rem] items-center justify-between gap-2 border border-ink bg-transparent px-2.5 text-[12px] text-ink outline-none hover:bg-ink hover:text-bg data-[placeholder]:text-ink',
         className,
       )}
       {...props}
@@ -61,7 +61,7 @@ export function SelectItem({
  return (
     <SelectPrimitive.Item
       className={cn(
- 'relative flex h-7 cursor-default select-none items-center gap-2 pl-7 pr-2 text-[12px] text-ink outline-none data-[highlighted]:bg-ink data-[highlighted]:text-bg',
+        'relative flex h-7 cursor-default select-none items-center gap-2 pl-7 pr-2 text-[12px] text-ink outline-none data-[highlighted]:bg-ink data-[highlighted]:text-bg',
         className,
       )}
       {...props}

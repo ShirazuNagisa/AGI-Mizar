@@ -85,7 +85,7 @@ export function SettingsPage({
               <span className="flex items-center gap-2 text-[12px] text-fg">
                 <span
                   className={cn(
- 'size-2',
+                    'size-2',
                     serverConnected ? 'bg-ink' : 'border border-ink',
                   )}
                 />
