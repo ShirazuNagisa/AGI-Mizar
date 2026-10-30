@@ -92,6 +92,49 @@ fn start_at_login_flag() -> Option<bool> {
     wanted
 }
 
+/// The tunnel token, kept between launches.
+///
+/// The relay derives the room from this token, so a fresh one every launch
+/// moves the computer to a new room and every address a phone stored last time
+/// is dead — the phone has to go back through the account to find it again.
+/// A token on disk keeps the room, and the phone's record, valid across
+/// restarts.
+fn stable_relay_token() -> String {
+    let dir = std::env::var("MIZAR_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".agi-mizar")
+        });
+    let path = dir.join("relay-token");
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        let token = text.trim();
+        if token.len() >= 32 {
+            return token.to_string();
+        }
+    }
+    let token = agi_boot::random_token();
+    if std::fs::create_dir_all(&dir).is_ok() {
+        let _ = write_private(&path, &token);
+    }
+    token
+}
+
+/// Write a file only this user can read, without a window where it is wider.
+fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let temporary = path.with_extension("tmp");
+    {
+        let mut file = std::fs::File::create(&temporary)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        file.write_all(text.as_bytes())?;
+    }
+    std::fs::rename(&temporary, path)
+}
+
 fn main() {
     // Start at login is also a thing an operator scripts: an MDM image, a
     // headless setup, a test. The tray checkbox and these flags are the same
@@ -141,7 +184,12 @@ fn main() {
                     .filter(|url| !url.trim().is_empty())
                     .unwrap_or_else(|| agi_core::account::OFFICIAL_ACCOUNT_URL.to_string()),
             ),
-            relay_token: std::env::var("AGI_RELAY_TOKEN").ok(),
+            relay_token: Some(
+                std::env::var("AGI_RELAY_TOKEN")
+                    .ok()
+                    .filter(|token| !token.trim().is_empty())
+                    .unwrap_or_else(stable_relay_token),
+            ),
         }))
         .expect("the kernel failed to start");
 

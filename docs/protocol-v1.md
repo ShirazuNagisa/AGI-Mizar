@@ -150,10 +150,10 @@ mizar://pair?h=100.64.0.1:19390&c=K7QP-3M2X&n=Mac-mini&v=1
 
 | 方法 | payload | 返回 |
 |---|---|---|
-| `host.info` | — | 主机身份与绑定情况，含可选的 `addresses`、`relay` 与 `desktop`（见下） |
+| `host.info` | — | 主机身份与绑定情况，含可选的 `addresses`、`relay`、`desktop`、`engines` 与 `engine`（见下「连接作用域」） |
 | `relay.set` | `url` | `{url, room, baseURL}` —— 把电脑的隧道移到免费或付费中继。`url` 只接受两个公共中继（见下），否则 `MALFORMED_FRAME`；**token 不变，room 不变**，已配对关系不受影响。老宿主回 `NOT_IMPLEMENTED`。 |
 | `session.list` | `{}` | `{items: [SessionRow]}` —— DSH 会列出的会话，**不含已归档的**：归档集在工作区注册表里，DSH 自己的 `session/list` 不知道它，所以插件在出口处过滤。 |
-| `workspace.list` | `{}` | `{items: [WorkspaceRow], complete}` —— DSH **当前**拥有的工作区，按 DSH 自己的显示顺序（插件直接读 `ctx.workspaceRegistry.list()`，和电脑侧边栏同源），每个工作区带 `sessionIds`：DSH 认可的归属关系，只有主机知道，手机不该自己拿目录去猜；**已归档的会话不在其中**（DSH 的归档保留归属槽位，以便取消归档回到原位，所以过滤在插件出口做）。会话比工作区长命：删掉工作区只移除注册表条目，会话日志还在磁盘上，所以 `session.list` 仍会返回那些目录的会话，手机再按目录分组就会一直留着它们。<br>`sessionIds` **缺省**和 `[]` 是两回事：`[]` 是「DSH 说这里没有会话」，缺省是「主机没说」，只有后者才允许退回按目录匹配。<br>`complete` 说这份清单**是不是完整读到了**：只有 `true` 才允许丢弃已经不在清单里的工作区，因为「主机答不上来」和「主机一个都没有」都是空数组。任何一条读不出来的记录都按「没答」处理（返回 `{items: [], complete: false}`）——主机还可以用 `workspace/follow` 的 baseline 兜底；两条路都不行时手机退回按目录分组。 |
+| `workspace.list` | `{}` | `{items: [WorkspaceRow], complete}` —— DSH **当前**拥有的工作区（作用域生效时**只有一个 agent 的**，见「连接作用域」），按 DSH 自己的显示顺序（插件直接读 `ctx.workspaceRegistry.list()`，和电脑侧边栏同源），每个工作区带 `sessionIds`：DSH 认可的归属关系，只有主机知道，手机不该自己拿目录去猜；**已归档的会话不在其中**（DSH 的归档保留归属槽位，以便取消归档回到原位，所以过滤在插件出口做）。会话比工作区长命：删掉工作区只移除注册表条目，会话日志还在磁盘上，所以 `session.list` 仍会返回那些目录的会话，手机再按目录分组就会一直留着它们。<br>`sessionIds` **缺省**和 `[]` 是两回事：`[]` 是「DSH 说这里没有会话」，缺省是「主机没说」，只有后者才允许退回按目录匹配。<br>`complete` 说这份清单**是不是完整读到了**：只有 `true` 才允许丢弃已经不在清单里的工作区，因为「主机答不上来」和「主机一个都没有」都是空数组。任何一条读不出来的记录都按「没答」处理（返回 `{items: [], complete: false}`）——主机还可以用 `workspace/follow` 的 baseline 兜底；两条路都不行时手机退回按目录分组。 |
 | `session.messages` | `sessionId`, `parentSessionId?`, `maxMessages?`, `beforeSeq?`, `afterSeq?`（见下） | `{sessionId, asOfSeq, records[], hasMore, context}` —— **只发总结，不发过程**。一页里只保留：`turn/start`、`turn/end`、每个 `step/start`（只用来数步骤，约 100 字节）、人写的 `user/message`，以及**每一轮里模型最后那条有正文的 `assistant/message`**。逐步叙述、工具调用/结果、流式 attempt，以及**还没结束的那一轮的中间回复**，全部不发 —— 后两项正是最大的一块。原因：手机端只按「总结 + 状态」渲染，全量历史经中继太吃服务器带宽。`asOfSeq`（分页切点）取自 `session/follow` 首帧的 `cursor`，这是 DSH 自己对 `throughSeq` 的定义（"Inclusive log cut obtained from the corresponding follow opening frame"），原来用 `session/projections` 的 `asOfSeq` 会滞后于日志头，导致刚发出的那一轮不在页里、手机上就没有「AI 正在工作」那一行。<br>`parentSessionId` 只在读**子代理的页**时传（见下「子代理的页」）。<br>**`context` 是每次刷新都必须带的字段**：上下文窗口占用及其明细（`{window, pressureTokens, projectedTokens, percent, breakdown}`，与 `session.stats` 的 `context` 使用同一套推导），**全量页和增量页都带**，这样屏幕上方那一圈占用和展开页的明细随任何一次刷新一起更新，不再依赖一次增量刷新不会发的 `session.stats`。没有 `contextPressure` projection 的部署回 `null`（未知，不是 0）；老宿主不答这个键、老客户端忽略它。 |
 | `session.activity` | `sessionId`, `maxEntries?`（默认 200，最多 300）, `beforeSeq?`, `turn?`（见下） | `{sessionId, asOfSeq, turn, entries[], hasMore, oldestSeq}` —— **只返回正在跑的那一轮的紧凑过程**，付费账户的「全量细节」来源：`entries` 里每行是 `{id, seq, at, kind, title, text}`，`kind` 为 `thinking` / `command` / `output` / `tool`，`text` 一行、最多 240 字符；没有正在跑的轮次时 `turn: null, entries: [], hasMore: false`。详细语义见下。 |
 | `session.stats` | `sessionId` | `{sessionId, asOfSeq, stats}` —— `stats` 里的每个字段来自主机各自的 projection，**谁有就答谁**：agent 还没跑过的会话没有 `context`（上下文占用）也没有 `title`（标题要等模型读完对话才有），只有 `tokenUsage` 一类。所以「这次的帧比上一帧少几个字段」是**正常回答**，不是失败——实测一台真主机上 12 个会话里有 4 个是这样（缺 `context, title`）。手机必须把新帧**合并**进旧帧（有新值用新值，没有的保留），直接替换会把屏幕上已经画出来的标题、模型、上下文用量抹掉。 |
@@ -162,6 +162,14 @@ mizar://pair?h=100.64.0.1:19390&c=K7QP-3M2X&n=Mac-mini&v=1
 | `session.prompt` | `sessionId`, `text?`, `attachmentIds?`, `requestId?`, `clientTimeZone?`, `mode?` | `{accepted, requestId}` —— `text` **在有附件时可省**;两者不能同时缺。`attachmentIds` 是 `upload.finish` 返回的 id,顺序就是 content 的顺序(文本在最前);附件怎么来见「附件上传」。 |
 | `session.cancel` | `sessionId` | `{accepted}` |
 | `session.archive` | `sessionId`, `stopActivity?` | `{archived: true}` |
+
+**一台电脑三个 Agent：连接作用域（`engine`）。** 一个桌面端同时托管 DSH、Claude Code、Codex 三个适配器，三者不共享会话、工作目录和工具面。手机一次只连**其中一个**，否则侧栏里会出现「不属于 dsh 的工作区」——正是这条规则缺失时的报告。
+
+- 两处声明，优先级分明：**账户流程把选择写进令牌**（`account:<账户>:<手机>:<engine>`，由中继 provision，重连也带着），**扫码配对的令牌没有这层**，所以由 `hello` 顶层的 `engine` 字段按连接声明。令牌里的作用域**永远优先**：拿着 dsh 作用域的令牌在 `hello` 里写 `claude` 也只会看到 dsh —— 这是「只让这台手机的所选 agent 的内容离开这台机器」的承诺，不能由客户端放宽。
+- 不带任何作用域的老连接照旧看到三份合并列表（向后兼容，不是错误）。
+- 作用域生效时，主机侧统一过滤：`session.list`、`workspace.list`（**行里带 `engine` 字段**，`workspaceId` 前缀也是它）、`model.catalog`、`permissions.catalog`、`session.create`、`interactions.pending`、状态通道与 `approval.request` 事件；**按 sessionId 直呼**的每个方法（`session.messages`/`stats`/`activity`/`archive`/`fork`/`prompt`/`cancel`/`model.set`/`permission.set`/`file.*`）也会拒绝别的 agent 的 id，而且**与「没有这个会话」回答得一模一样**，否则手机可以靠试探枚举出机器上还跑着哪些 agent。`approval.answer`/`question.answer` 同理：不在作用域里的 requestId 回 `REMOTE_ERROR`。
+- `host.info` 因此多了两个字段：`engines`（这台电脑托管的 agent，`[{id,label,connected,detail}]`，**不随作用域收窄**——手机要能据此提供切换）和 `engine`（**这条连接实际绑定的 agent**，`null` 表示没有作用域）。免鉴权的 `GET /mizar/v1/hello` 也带 `engines`，供配对后立刻选择。
+- 全是**新增可选字段**，老宿主不答、老客户端忽略，**不需要升 `PROTOCOL_VERSION`**。
 
 **`host.info` 的 `addresses` 是可选字段，老宿主不答。** 它是插件监听器**实际绑定**的每个 `host:port`（如 `192.168.1.10:19390`、`127.0.0.1:19390`），回答的是「这台电脑现在能从哪些地址拨到」。手机在中继连接上拿不到局域网地址，正是靠它才知道该往哪直连。**缺省不等于空数组**：缺省是「这台电脑的插件太旧，答不上来」，手机必须退回配对时已知的那个地址；`[]` 才是「现在没有任何可拨地址」。这是新增的可选字段，老客户端解码时忽略不认识的键，**不需要升 `PROTOCOL_VERSION`**。
 

@@ -43,8 +43,8 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
 use crate::frames::{
-    record_to_event, ClientFrame, ErrorCode, ServerFrame, SessionRow, WelcomeInput, HTTP_PREFIX,
-    PROTOCOL_VERSION, WS_PATH,
+    record_to_event, ClientFrame, ErrorCode, Hello, ServerFrame, SessionRow, WelcomeInput,
+    HTTP_PREFIX, PROTOCOL_VERSION, WS_PATH,
 };
 use crate::pairing::{self, PairingCode};
 use crate::relay::RelayClient;
@@ -365,13 +365,76 @@ impl MizarServer {
         agi_protocol::engine::EngineId::parse(engine)
     }
 
+    /// The agent one connection is bound to, if any.
+    ///
+    /// Two ways to have chosen one, and the order matters. A token minted by the
+    /// relay carries the choice because it has to survive the reconnect the relay
+    /// brokers; it wins, always, or a phone holding a DSH-scoped token could ask
+    /// for Claude at `hello` and read another agent's conversations. A phone that
+    /// paired by scanning a code has an unscoped token, so the choice rides on
+    /// the socket instead.
+    ///
+    /// `None` means "all three", which is what every phone did before choosing
+    /// was possible; an unscoped connection is not an error, it is the older
+    /// contract, and this file keeps honouring it.
+    fn connection_scope(
+        device: &crate::store::Device,
+        hello: Option<&Hello>,
+    ) -> Option<agi_protocol::engine::EngineId> {
+        let asked = hello
+            .and_then(|hello| hello.engine.as_deref())
+            .and_then(agi_protocol::engine::EngineId::parse);
+        Self::engine_scope(device).or(asked)
+    }
+
+    /// The engines this connection may see, in the order the host tries them.
+    ///
+    /// One for a phone that chose an agent, all three for the older contract.
+    /// Every per-engine answer is built from this rather than from the literal
+    /// list, which is how `workspace.list` came to draw the other two agents'
+    /// folders on a phone that had asked for one.
+    fn visible_engines(
+        scope: Option<agi_protocol::engine::EngineId>,
+    ) -> Vec<agi_protocol::engine::EngineId> {
+        match scope {
+            Some(engine) => vec![engine],
+            None => agi_protocol::engine::EngineId::all().to_vec(),
+        }
+    }
+
+    /// Whether a session is one this connection may read.
+    fn in_scope(scope: Option<agi_protocol::engine::EngineId>, session: &SessionKey) -> bool {
+        scope.is_none_or(|engine| session.engine == engine)
+    }
+
     /// One Mizar method call.
-    async fn call(&self, device: &crate::store::Device, frame: &ClientFrame) -> ServerFrame {
+    async fn call(
+        &self,
+        device: &crate::store::Device,
+        scope: Option<agi_protocol::engine::EngineId>,
+        frame: &ClientFrame,
+    ) -> ServerFrame {
         let id = frame.id.clone().unwrap_or_default();
 
         match frame.kind.as_str() {
             "host.info" => {
                 let addresses = self.addresses();
+                // Which agents this computer serves, so the phone can ask which
+                // one to open instead of having to guess from a merged list. The
+                // keys are the wire names `EngineId::parse` accepts.
+                let engines: Vec<Value> = agi_protocol::engine::EngineId::all()
+                    .into_iter()
+                    .filter_map(|engine_id| {
+                        let engine = self.core.engine(engine_id)?;
+                        let (connected, detail) = engine.status();
+                        Some(json!({
+                            "id": engine_id.as_str(),
+                            "label": engine_id.label(),
+                            "connected": connected,
+                            "detail": detail,
+                        }))
+                    })
+                    .collect();
                 ServerFrame::ok(
                     id,
                     json!({
@@ -381,13 +444,23 @@ impl MizarServer {
                         "protocolVersion": PROTOCOL_VERSION,
                         "addresses": addresses,
                         "desktop": { "os": os_name(), "client": "AGI Mizar" },
+                        "engines": engines,
+                        // What this connection is bound to. Absent on a phone
+                        // that did not choose, which is also what an older host
+                        // says -- so the phone reads "no answer" and "no choice"
+                        // as the same thing and does not invent a filter.
+                        "engine": scope.map(|engine| engine.as_str()),
                         // What this host can do beyond the base protocol. The
                         // app gates the balance card on the capability rather
                         // than on a probe: without it, the card says the host
                         // does not support balance and never asks.
                         "plugin": {
                             "id": "dsh-mizar",
-                            "capabilities": if self.core.engine(EngineId::Dsh).is_some() {
+                            // The wallet belongs to DSH, so a phone scoped to
+                            // another agent is not offered it: a card that can
+                            // only say "unsupported" is worse than no card.
+                            "capabilities": if self.core.engine(EngineId::Dsh).is_some()
+                                && scope.is_none_or(|engine| engine == EngineId::Dsh) {
                                 json!(["deepseek.balance.v1"])
                             } else {
                                 json!([])
@@ -402,11 +475,10 @@ impl MizarServer {
 
             "session.list" => {
                 let snapshot = self.core.snapshot();
-                let scope = Self::engine_scope(device);
                 let items: Vec<SessionRow> = snapshot
                     .sessions
                     .iter()
-                    .filter(|session| scope.is_none_or(|engine| session.key.engine == engine))
+                    .filter(|session| Self::in_scope(scope, &session.key))
                     .map(|session| SessionRow {
                         session_id: session.key.to_string(),
                         updated_at: session.updated_at,
@@ -423,7 +495,7 @@ impl MizarServer {
             }
 
             "session.messages" => {
-                let Some(key) = self.session_of(frame) else {
+                let Some(key) = self.scoped_session_of(scope, frame) else {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
@@ -495,7 +567,7 @@ impl MizarServer {
             // come from this one frame; the old plugin answered it straight from
             // `session/projections`, and this does the same through the engine.
             "session.stats" => {
-                let Some(key) = self.session_of(frame) else {
+                let Some(key) = self.scoped_session_of(scope, frame) else {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
@@ -562,10 +634,17 @@ impl MizarServer {
             // host's, not something the phone can derive: a session started in a
             // bare directory belongs to no workspace, and two spellings of one
             // directory are one workspace only because DSH says so.
+            //
+            // One engine's list, not three: this is the answer that was merged
+            // for every phone, so a phone that had picked DSH was shown Claude's
+            // and Codex's folders as empty headings under its own workspaces —
+            // "手机上有许多不属于 dsh 的工作区". The scope is the same one
+            // `session.list` uses, so the two halves of one screen cannot
+            // disagree about which agent is being looked at.
             "workspace.list" => {
                 let mut items = Vec::new();
                 let mut complete = true;
-                for engine_id in [EngineId::Dsh, EngineId::Claude, EngineId::Codex] {
+                for engine_id in Self::visible_engines(scope) {
                     let Some(engine) = self.core.engine(engine_id) else {
                         continue;
                     };
@@ -599,6 +678,12 @@ impl MizarServer {
                                     "workspaceId": format!("{}:{local}", engine_id.as_str()),
                                     "path": space.path,
                                     "title": title,
+                                    // Which agent this folder belongs to. The id
+                                    // already says so, but a phone that wants to
+                                    // label a row (or an unscoped connection
+                                    // that draws all three) should not have to
+                                    // parse an id to find out.
+                                    "engine": engine_id.as_str(),
                                 });
                                 if let Some(ids) = membership(engine_id, space.session_ids) {
                                     row["sessionIds"] = json!(ids);
@@ -618,8 +703,9 @@ impl MizarServer {
             }
 
             // What the model picker draws. The phone's catalog is per host, and
-            // this host may front three engines, so the groups are merged; the
-            // default route comes from the first engine that names one.
+            // an unscoped connection on a host that fronts three engines gets
+            // the merged list; the default route comes from the first engine
+            // that names one.
             "model.catalog" => {
                 let mut catalog = agi_protocol::catalog::ModelCatalog::default();
                 // An engine with no catalog concept is not a failure; one that
@@ -627,7 +713,7 @@ impl MizarServer {
                 // next connection, while an error is retried when the picker
                 // opens.
                 let mut broken = false;
-                for engine_id in [EngineId::Dsh, EngineId::Claude, EngineId::Codex] {
+                for engine_id in Self::visible_engines(scope) {
                     let Some(engine) = self.core.engine(engine_id) else {
                         continue;
                     };
@@ -741,7 +827,7 @@ impl MizarServer {
             // the switch goes to the session's engine, so the first engine that
             // answers wins rather than merging two vocabularies.
             "permissions.catalog" => {
-                for engine_id in [EngineId::Dsh, EngineId::Claude, EngineId::Codex] {
+                for engine_id in Self::visible_engines(scope) {
                     let Some(engine) = self.core.engine(engine_id) else {
                         continue;
                     };
@@ -764,7 +850,7 @@ impl MizarServer {
             "session.create" => {
                 let cwd = frame.payload.get("cwd").and_then(Value::as_str);
                 let mut last: Option<ServerFrame> = None;
-                for engine_id in [EngineId::Dsh, EngineId::Claude, EngineId::Codex] {
+                for engine_id in Self::visible_engines(scope) {
                     let Some(engine) = self.core.engine(engine_id) else {
                         continue;
                     };
@@ -791,7 +877,7 @@ impl MizarServer {
             }
 
             "session.archive" => {
-                let Some(key) = self.session_of(frame) else {
+                let Some(key) = self.scoped_session_of(scope, frame) else {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
@@ -824,7 +910,7 @@ impl MizarServer {
             // couple of times a second while a turn runs, and clears the feed
             // when the host says no turn is running.
             "session.activity" => {
-                let Some(key) = self.session_of(frame) else {
+                let Some(key) = self.scoped_session_of(scope, frame) else {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
@@ -907,7 +993,7 @@ impl MizarServer {
             // adapters, and the code it refuses with is passed through so the
             // app can tell "not yours" from "not there".
             "file.stat" => {
-                let Some(key) = self.session_of(frame) else {
+                let Some(key) = self.scoped_session_of(scope, frame) else {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
@@ -949,7 +1035,7 @@ impl MizarServer {
             }
 
             "file.read" => {
-                let Some(key) = self.session_of(frame) else {
+                let Some(key) = self.scoped_session_of(scope, frame) else {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
@@ -1012,7 +1098,7 @@ impl MizarServer {
             // only offers boundaries it read from the transcript; the host still
             // refuses anything that is not a turn end.
             "session.fork" => {
-                let Some(key) = self.session_of(frame) else {
+                let Some(key) = self.scoped_session_of(scope, frame) else {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
@@ -1219,7 +1305,7 @@ impl MizarServer {
             ),
 
             "session.prompt" => {
-                let Some(key) = self.session_of(frame) else {
+                let Some(key) = self.scoped_session_of(scope, frame) else {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
@@ -1297,7 +1383,7 @@ impl MizarServer {
             }
 
             "session.cancel" => {
-                let Some(key) = self.session_of(frame) else {
+                let Some(key) = self.scoped_session_of(scope, frame) else {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
@@ -1319,9 +1405,21 @@ impl MizarServer {
 
             "interactions.pending" => {
                 let snapshot = self.core.snapshot();
+                // Only the approvals and questions of the agent this phone
+                // asked for. An approval it cannot act on is not harmless: it
+                // is a decision waiting for somebody who is looking at a
+                // different agent's work, and this was the second thing that
+                // leaked after the session list was filtered.
+                let visible = |interaction: &agi_protocol::domain::Interaction| {
+                    interaction
+                        .session
+                        .as_ref()
+                        .is_none_or(|key| Self::in_scope(scope, key))
+                };
                 let approvals: Vec<Value> = snapshot
                     .interactions
                     .iter()
+                    .filter(|interaction| visible(interaction))
                     .filter(|interaction| interaction.kind == InteractionKind::Approval)
                     .map(|interaction| {
                         json!({
@@ -1338,6 +1436,7 @@ impl MizarServer {
                 let questions: Vec<Value> = snapshot
                     .interactions
                     .iter()
+                    .filter(|interaction| visible(interaction))
                     .filter(|interaction| interaction.kind == InteractionKind::Question)
                     .map(|interaction| {
                         json!({
@@ -1385,6 +1484,14 @@ impl MizarServer {
                     .unwrap_or("rejected")
                     .to_string();
 
+                if self.answers_another_agent(scope, request_id) {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::RemoteError,
+                        "no such approval on this connection",
+                    );
+                }
+
                 // The kernel already maps an interaction id to the engine that
                 // asked; resolving it here would be a second copy of that table.
                 let command = agi_protocol::api::Command::Answer {
@@ -1418,6 +1525,13 @@ impl MizarServer {
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default();
+                if self.answers_another_agent(scope, call_id) {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::RemoteError,
+                        "no such question on this connection",
+                    );
+                }
                 let command = agi_protocol::api::Command::Answer {
                     id: call_id.to_string(),
                     outcome: None,
@@ -1436,7 +1550,7 @@ impl MizarServer {
             }
 
             "session.model.set" => {
-                let Some(key) = self.session_of(frame) else {
+                let Some(key) = self.scoped_session_of(scope, frame) else {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
@@ -1485,7 +1599,7 @@ impl MizarServer {
             }
 
             "session.permission.set" => {
-                let Some(key) = self.session_of(frame) else {
+                let Some(key) = self.scoped_session_of(scope, frame) else {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
@@ -1699,6 +1813,51 @@ impl MizarServer {
             .and_then(Value::as_str)
             .and_then(|text| text.parse().ok())
     }
+
+    /// Whether an interaction belongs to an agent this connection cannot see.
+    ///
+    /// An id this host does not know answers `false`: it may be one the phone
+    /// is answering late, and the kernel's own "no such request" is the right
+    /// answer for it. Only a request that exists *and* is another agent's is
+    /// refused here.
+    fn answers_another_agent(
+        &self,
+        scope: Option<agi_protocol::engine::EngineId>,
+        id: &str,
+    ) -> bool {
+        let Some(scope) = scope else { return false };
+        self.core
+            .snapshot()
+            .interactions
+            .iter()
+            .find(|interaction| interaction.id == id)
+            .is_some_and(|interaction| {
+                interaction
+                    .session
+                    .as_ref()
+                    .is_some_and(|key| !Self::in_scope(Some(scope), key))
+            })
+    }
+
+    /// The session this frame names, when this connection may see it.
+    ///
+    /// The scope is checked here rather than in each arm because it has to hold
+    /// for all of them: a phone that asked for DSH must not reach a Claude
+    /// transcript by naming its id, and the id is guessable enough (a date and a
+    /// slug) that "the list did not show it" is not a boundary.
+    ///
+    /// Out of scope answers exactly like a session that does not exist. A
+    /// refusal that distinguishes the two would let a phone enumerate the other
+    /// agents this machine is running, which is the half of the promise the
+    /// filter is for.
+    fn scoped_session_of(
+        &self,
+        scope: Option<agi_protocol::engine::EngineId>,
+        frame: &ClientFrame,
+    ) -> Option<SessionKey> {
+        let key = self.session_of(frame)?;
+        Self::in_scope(scope, &key).then_some(key)
+    }
 }
 
 /// Membership spelled the way the session list spells ids.
@@ -1838,6 +1997,24 @@ async fn hello(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
 ) -> Response {
     tracing::info!("mizar: hello from {peer}");
+    // Which agents this computer serves. Asked before a token exists, because
+    // the choice is made before pairing: a phone that has just scanned a code
+    // should be able to ask "which agent?" without opening a socket first, and
+    // one that paired long ago can ask the same question while the computer is
+    // reachable but its token is not being used yet.
+    let engines: Vec<Value> = EngineId::all()
+        .into_iter()
+        .filter_map(|engine_id| {
+            let engine = server.core.engine(engine_id)?;
+            let (connected, detail) = engine.status();
+            Some(json!({
+                "id": engine_id.as_str(),
+                "label": engine_id.label(),
+                "connected": connected,
+                "detail": detail,
+            }))
+        })
+        .collect();
     Json(json!({
         "hostId": server.store.host_id(),
         "hostName": server.store.host_name(),
@@ -1847,6 +2024,7 @@ async fn hello(
         // them reads as unreachable to its route planner.
         "pairingOpen": server.code().is_some(),
         "paired": !server.store.devices().is_empty(),
+        "engines": engines,
     }))
     .into_response()
 }
@@ -2055,13 +2233,16 @@ async fn serve_socket(server: Arc<MizarServer>, peer: SocketAddr, socket: WebSoc
     )
     .await;
 
+    // The agent this socket is bound to, from the token or from the hello that
+    // opened it. Every per-agent answer below is filtered by it.
+    let scope = MizarServer::connection_scope(&device, Some(&hello));
+
     // The state channel: one byte per session-state change, plus a heartbeat
     // every few seconds, scoped to the agent this phone asked for. This is what
     // turns the phone's status pill and stream bar on at all -- before this,
     // the channel only reached the desktop's own window.
     {
         let out = out.clone();
-        let scope = MizarServer::engine_scope(&device);
         let mut states = server.core.subscribe_states();
         tokio::spawn(async move {
             loop {
@@ -2094,6 +2275,9 @@ async fn serve_socket(server: Arc<MizarServer>, peer: SocketAddr, socket: WebSoc
             loop {
                 match events.recv().await {
                     Ok(event) => {
+                        if !interaction_in_scope(&event, scope) {
+                            continue;
+                        }
                         if let Some(frame) = interaction_event(&event) {
                             if send(&out, frame).await.is_err() {
                                 return;
@@ -2141,7 +2325,7 @@ async fn serve_socket(server: Arc<MizarServer>, peer: SocketAddr, socket: WebSoc
         if frame.kind == "hello" {
             continue;
         }
-        let answer = server.call(&device, &frame).await;
+        let answer = server.call(&device, scope, &frame).await;
         if send(&out, answer).await.is_err() {
             break;
         }
@@ -2161,6 +2345,29 @@ async fn send(
 ) -> Result<(), tokio::sync::mpsc::error::SendError<Message>> {
     let text = serde_json::to_string(&frame).unwrap_or_else(|_| "{}".to_string());
     out.send(Message::Text(text)).await
+}
+
+/// Whether an event is one this connection should hear about.
+///
+/// Only interactions are filtered here, because they are the only events this
+/// socket forwards and the only ones that carry another agent's work. A
+/// question from an agent the phone is not driving would draw a prompt it
+/// cannot answer usefully, and an approval it answers lands on the wrong
+/// agent's turn.
+fn interaction_in_scope(
+    event: &agi_protocol::api::ApiEvent,
+    scope: Option<agi_protocol::engine::EngineId>,
+) -> bool {
+    use agi_protocol::api::ApiEvent;
+    let Some(scope) = scope else { return true };
+    let key = match event {
+        ApiEvent::InteractionRequested { interaction } => interaction.session.as_ref(),
+        // A resolution carries no session: the phone only ever hears about
+        // requests it was told about, and dropping it would leave a sheet open
+        // over a request that is gone.
+        _ => return true,
+    };
+    key.is_none_or(|key| key.engine == scope)
 }
 
 /// Translate one kernel event into the frame the phone understands.

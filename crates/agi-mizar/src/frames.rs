@@ -275,6 +275,7 @@ impl ClientFrame {
             token: field("token")?,
             app_version: field("appVersion"),
             device_model: field("deviceModel"),
+            engine: field("engine"),
         })
     }
 }
@@ -285,6 +286,15 @@ pub struct Hello {
     pub token: String,
     pub app_version: Option<String>,
     pub device_model: Option<String>,
+    /// Which agent this connection is for, when the phone chose one.
+    ///
+    /// The account flow puts the choice in the token instead, because there it
+    /// has to survive a reconnect the relay brokers. A phone that paired by
+    /// scanning a code has no such broker: its token is the plain "this phone
+    /// may talk to this computer" one, and the agent is asked for per socket.
+    /// A token that already carries a choice wins over this — a scoped token
+    /// must not be talked out of its scope by the client.
+    pub engine: Option<String>,
 }
 
 /// Rebuild the DSH event shape the phone decodes from one shared record.
