@@ -6,6 +6,7 @@ import { Toolbar } from './Toolbar'
 import { Panel } from './ui/panel'
 import { WipeButton } from './ui/wipe'
 import { cn } from '../lib/utils'
+import { useIsOled } from '../lib/oled'
 
 interface HomePageProps {
   overview: UsageOverview | null
@@ -45,7 +46,7 @@ export function HomePage({ overview, loading, error }: HomePageProps) {
               onClick={() => setRange(entry.id)}
               aria-pressed={range === entry.id}
               className={cn(
-                'flex h-7 items-stretch border border-ink text-[12px]',
+                'flex h-7 items-stretch mz-border text-[12px]',
                 index === 0 ? '' : '-ml-px',
                 range === entry.id && 'bg-ink text-bg',
               )}
@@ -65,7 +66,7 @@ export function HomePage({ overview, loading, error }: HomePageProps) {
                 onClick={() => setTab(entry.id)}
                 aria-pressed={tab === entry.id}
                 className={cn(
-                  'flex h-7 items-stretch border border-ink text-[12px]',
+                  'flex h-7 items-stretch mz-border text-[12px]',
                   index === 0 ? '' : '-ml-px',
                   tab === entry.id && 'bg-ink text-bg',
                 )}
@@ -142,6 +143,7 @@ function Metric({
 
 /** The year at a glance: one square per day, shaded by how much happened. */
 function Heatmap({ days }: { days: UsageDay[] }) {
+  const oled = useIsOled()
   const max = Math.max(1, ...days.map((day) => day.messages))
   const columns = useMemo(() => {
     const firstDay = days[0]
@@ -165,7 +167,7 @@ function Heatmap({ days }: { days: UsageDay[] }) {
         <div className="flex items-center gap-1.5 text-[12px]">
           <span>少</span>
           {[0, 1, 2, 3, 4].map((level) => (
-            <span key={level} className={cn('size-3', heatClass(level))} />
+            <span key={level} className={cn('size-3', heatClass(level, oled))} />
           ))}
           <span>多</span>
         </div>
@@ -180,7 +182,11 @@ function Heatmap({ days }: { days: UsageDay[] }) {
             {week.map((day, row) => (
               <span
                 key={row}
-                className={cn('size-3', day !== null && heatClass(level(day.messages, max)))}
+                className={cn(
+                  'size-3',
+                  oled ? '' : 'rounded-[2px]',
+                  day !== null && heatClass(level(day.messages, max), oled),
+                )}
                 title={
                   day === null ? undefined : `${day.date} · ${formatCount(day.messages)} 条消息`
                 }
@@ -204,7 +210,15 @@ function level(messages: number, max: number): number {
  * shades of one colour. A cell with nothing at all would be invisible on both
  * the white and the black background, so "empty" is still a dot.
  */
-function heatClass(level: number): string {
+function heatClass(level: number, oled: boolean): string {
+  if (!oled) {
+    // The classic window has shades to spend: the same four steps in the accent
+    // colour, on a quiet empty cell.
+    return (
+      ['bg-surface-2', 'bg-accent/20', 'bg-accent/45', 'bg-accent/70', 'bg-accent'][level] ??
+      'bg-surface-2'
+    )
+  }
   return ['dither-dot', 'dither-25', 'dither-50', 'dither-75', 'bg-ink'][level] ?? 'dither-dot'
 }
 
@@ -219,7 +233,7 @@ function ModelTable({
   const top = Math.max(1, ...summary.models.map((model) => model.messages))
   return (
     <Panel className="mt-4">
-      <div className="grid grid-cols-[1fr_80px_100px_120px] items-center gap-3 border-b border-ink px-3 py-2 text-[12px] tracking-[1px]">
+      <div className="grid grid-cols-[1fr_80px_100px_120px] items-center gap-3 mz-divide-b px-3 py-2 text-[12px] tracking-[1px]">
         <span>模型</span>
         <span className="text-right">消息</span>
         <span className="text-right">token</span>
@@ -235,7 +249,7 @@ function ModelTable({
             key={model.model}
             className={cn(
               'grid grid-cols-[1fr_80px_100px_120px] items-center gap-3 px-3 py-2.5 text-[12px]',
-              index === 0 ? '' : 'border-t border-ink',
+              index === 0 ? '' : 'mz-divide-t',
             )}
           >
             <span className="truncate">{model.model}</span>
@@ -243,7 +257,7 @@ function ModelTable({
             <span className="text-right tabular">
               {formatCount(model.inputTokens + model.outputTokens)}
             </span>
-            <span className="h-2 border border-ink">
+            <span className="h-2 mz-border">
               <span
                 className="block h-full bg-ink"
                 style={{ width: `${Math.max(2, (model.messages / top) * 100)}%` }}

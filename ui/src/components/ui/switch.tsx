@@ -58,13 +58,13 @@ export function Switch({ checked, onCheckedChange, disabled, label, id, classNam
       disabled={disabled}
       onClick={() => onCheckedChange(!checked)}
       className={cn(
-        'relative inline-flex h-5 w-9 shrink-0 items-center border border-ink outline-none disabled:pointer-events-none disabled:border-dashed',
+        'relative inline-flex h-5 w-9 shrink-0 items-center mz-border outline-none disabled:pointer-events-none disabled:border-dashed',
         className,
       )}
     >
       <span
         className={cn(
-          'size-3 border border-ink',
+          'size-3 mz-border',
           checked ? 'translate-x-[18px] bg-ink' : 'translate-x-[2px] bg-transparent',
         )}
       />

@@ -15,7 +15,7 @@ export function Panel({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
  return (
     <div
       className={cn(
-        oled ? 'border border-ink' : 'rounded-xl border border-border bg-surface',
+        oled ? 'mz-border' : 'rounded-xl border border-border bg-surface',
         className,
       )}
       {...props}
@@ -31,11 +31,11 @@ export function PanelGroup({
 }: HTMLAttributes<HTMLDivElement> & { title: string }) {
  const oled = useIsOled()
  return (
-    <div className={cn(oled ? 'border border-ink' : 'rounded-xl border border-border bg-surface', className)}>
+    <div className={cn(oled ? 'mz-border' : 'rounded-xl border border-border bg-surface', className)}>
       <div
         className={cn(
           'px-3.5 py-1.5',
-          oled ? 'border-b border-ink' : 'border-b border-border text-muted',
+          oled ? 'mz-divide-b' : 'border-b border-border text-muted',
         )}
       >
         {title}

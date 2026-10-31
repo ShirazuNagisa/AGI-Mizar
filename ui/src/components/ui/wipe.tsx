@@ -1,5 +1,6 @@
 import type { ButtonHTMLAttributes, ReactNode } from 'react'
 import { cn } from '../../lib/utils'
+import { useIsOled } from '../../lib/oled'
 
 /**
  * Which colour the sweep arrives in.
@@ -62,6 +63,20 @@ export function WipeButton({
   type = 'button',
   ...props
 }: WipeButtonProps) {
+  const oled = useIsOled()
+  // The classic window has fills to hover with, so there is nothing for a sweep
+  // to reveal: the row simply takes a soft background.
+  if (!oled) {
+    return (
+      <button
+        type={type}
+        className={cn('rounded-lg outline-none transition-colors hover:bg-surface-2', className)}
+        {...props}
+      >
+        <span className={cn('flex items-center', contentClassName)}>{children}</span>
+      </button>
+    )
+  }
   return (
     <button type={type} className={cn('wipe', className)} {...props}>
       <WipeLayers tone={tone} contentClassName={contentClassName}>

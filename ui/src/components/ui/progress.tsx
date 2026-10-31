@@ -30,7 +30,7 @@ export function Progress({ value, label, className }: ProgressProps) {
       aria-valuenow={percent}
       className={cn(
         'h-2 w-full overflow-hidden',
-        oled ? 'border border-ink' : 'rounded-full bg-surface-2',
+        oled ? 'mz-border' : 'rounded-full bg-surface-2',
         className,
       )}
     >

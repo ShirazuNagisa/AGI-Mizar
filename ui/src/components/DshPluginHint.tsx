@@ -21,11 +21,11 @@ export function DshPluginHint({ className }: { className?: string }) {
   }
 
   return (
-    <div className={cn('border border-ink p-3', className)}>
+    <div className={cn('mz-border p-3', className)}>
       <p className="text-[12px] leading-5 text-muted">
         DSH 需要在 agent 中安装 dsh-mizar 插件（≥ {DSH_PLUGIN_VERSION}）。
       </p>
-      <code className="selectable mt-2 block break-all border border-ink px-2.5 py-1.5 text-[12px] leading-5 text-fg">
+      <code className="selectable mt-2 block break-all mz-border px-2.5 py-1.5 text-[12px] leading-5 text-fg">
         {DSH_PLUGIN_COMMAND}
       </code>
       <div className="mt-2 flex items-center gap-2">

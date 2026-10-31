@@ -3,6 +3,7 @@ import { AGENTS, type Page, samePage } from '../navigation'
 import { ENGINE_MARKS, GearIcon, PersonIcon } from '../icons'
 import { cn } from '../lib/utils'
 import { WipeButton } from './ui/wipe'
+import { useIsOled } from '../lib/oled'
 
 interface SidebarProps {
   engines: EngineStatus[]
@@ -17,6 +18,17 @@ interface SidebarProps {
  * colour to spend on "not installed", so the third state is a pattern.
  */
 function Lamp({ state, label }: { state: 'on' | 'off' | 'absent'; label?: string }) {
+  const oled = useIsOled()
+  if (!oled) {
+    // The classic window has colour and opacity, so presence is a dot.
+    const tone =
+      state === 'on'
+        ? 'bg-emerald-500'
+        : state === 'off'
+          ? 'bg-transparent ring-1 ring-inset ring-muted/60'
+          : 'bg-muted/35'
+    return <span role="img" aria-label={label} title={label} className={cn('size-2 shrink-0 rounded-full', tone)} />
+  }
   if (state === 'on') {
     return <span role="img" aria-label={label} title={label} className="size-2 shrink-0 bg-current" />
   }
@@ -60,8 +72,14 @@ const ROW_LABEL = 'flex w-full items-center gap-2.5 px-2'
  * navigation items into eight boxes.
  */
 export function Sidebar({ engines, page, serverConnected, loggedIn, onNavigate }: SidebarProps) {
+  const oled = useIsOled()
   return (
-    <aside className="flex h-full w-[240px] shrink-0 flex-col border-r border-ink bg-bg">
+    <aside
+      className={cn(
+        'flex h-full w-[240px] shrink-0 flex-col border-r bg-bg',
+        oled ? 'border-ink' : 'border-border',
+      )}
+    >
       {/* The window's title bar is gone; the first row is the traffic lights'
           room, and the system draws them over this strip. */}
       <div data-tauri-drag-region className="h-8 shrink-0" />

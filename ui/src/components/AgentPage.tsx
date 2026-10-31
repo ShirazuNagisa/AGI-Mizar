@@ -185,7 +185,7 @@ export function AgentPage({ engine, name, status, kernel, onReconnect }: AgentPa
                 <span className="h-0.5 w-3 shrink-0 bg-ink" aria-hidden />
                 账户余额
               </h2>
-              <div className="mt-2 border border-ink px-4 py-3">
+              <div className="mt-2 mz-border px-4 py-3">
                 <BalanceRows balance={balance} connected={connected} />
               </div>
             </section>
@@ -209,7 +209,7 @@ function StatusLamp({ connected, installed }: { connected: boolean; installed: b
       <span
         className={cn(
           'size-2',
-          connected ? 'bg-ink' : installed ? 'border border-ink' : 'border border-ink dither-50',
+          connected ? 'bg-ink' : installed ? 'mz-border' : 'mz-border dither-50',
         )}
       />
       {connected ? '已连接' : installed ? '未连接' : '未安装'}

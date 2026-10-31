@@ -25,7 +25,7 @@ export function SelectTrigger({
       className={cn(
         'inline-flex h-8 min-w-[7.5rem] items-center justify-between gap-2 px-2.5 outline-none',
         oled
-          ? 'border border-ink bg-transparent text-[12px] text-ink hover:bg-ink hover:text-bg data-[placeholder]:text-ink'
+          ? 'mz-border bg-transparent text-[12px] text-ink hover:bg-ink hover:text-bg data-[placeholder]:text-ink'
           : 'rounded-md border border-border bg-surface text-[13px] text-fg hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-accent/60',
         className,
       )}
@@ -52,7 +52,7 @@ export function SelectContent({
         sideOffset={4}
         className={cn(
           'z-50 min-w-[8rem] p-1',
-          oled ? 'border border-ink bg-bg' : 'rounded-lg border border-border bg-surface shadow-lg',
+          oled ? 'mz-border bg-bg' : 'rounded-lg border border-border bg-surface shadow-lg',
           className,
         )}
         {...props}

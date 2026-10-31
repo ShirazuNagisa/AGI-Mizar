@@ -150,7 +150,7 @@ export function Onboarding({
               <span
                 key={title}
                 className={cn(
-                  'h-2 flex-1 border border-ink',
+                  'h-2 flex-1 mz-border',
                   index <= step ? 'bg-ink' : 'bg-transparent',
                 )}
               />
@@ -210,7 +210,7 @@ export function Onboarding({
             <p className="mt-4 text-[12px] leading-5 bg-ink px-1.5 text-bg">{error}</p>
           )}
 
-          <footer className="mt-8 flex shrink-0 items-center gap-2 border-t border-ink pt-4">
+          <footer className="mt-8 flex shrink-0 items-center gap-2 mz-divide-t pt-4">
             <Button variant="ghost" onClick={back} disabled={step === WELCOME || busy}>
               上一步
             </Button>
@@ -324,7 +324,7 @@ function LoginStep({
               autoComplete="username"
               autoCapitalize="off"
               spellCheck={false}
-              className="h-9 border border-ink bg-transparent px-3 text-[12px] text-fg outline-none"
+              className="h-9 mz-border bg-transparent px-3 text-[12px] text-fg outline-none"
             />
             <label className="mt-2 text-[12px] text-muted" htmlFor="onboarding-password">
               密码
@@ -335,7 +335,7 @@ function LoginStep({
               value={password}
               onChange={(event) => setPassword(event.target.value)}
               autoComplete="current-password"
-              className="h-9 border border-ink bg-transparent px-3 text-[12px] text-fg outline-none"
+              className="h-9 mz-border bg-transparent px-3 text-[12px] text-fg outline-none"
             />
           </div>
 
@@ -387,7 +387,7 @@ function LoginStep({
           </div>
 
           {codeStarted === null ? null : (
-            <div className="mt-3 border border-ink p-4">
+            <div className="mt-3 mz-border p-4">
               <p className="text-[12px] leading-5 text-muted">
                 浏览器里完成 {codeStarted === 'apple' ? 'Apple' : 'GitHub'} 授权后，页面会给出一个
                 <code>MZ-XXXX-XXXX</code> 代码，粘贴到这里完成登录。
@@ -398,7 +398,7 @@ function LoginStep({
                   onChange={(event) => setHandoff(event.target.value.toUpperCase())}
                   placeholder="MZ-XXXX-XXXX"
                   spellCheck={false}
-                  className="h-9 flex-1 border border-ink bg-transparent px-3 font-mono text-[12px] tracking-wider text-fg outline-none"
+                  className="h-9 flex-1 mz-border bg-transparent px-3 font-mono text-[12px] tracking-wider text-fg outline-none"
                 />
                 <Button
                   variant="primary"
@@ -416,7 +416,7 @@ function LoginStep({
           )}
         </form>
       ) : (
-        <div className="mt-4 border border-ink px-4 py-3">
+        <div className="mt-4 mz-border px-4 py-3">
           <div className="flex items-center gap-2 text-[12px] text-fg">
             <CheckIcon size={14} />
             已登录 {account.username}
@@ -626,7 +626,7 @@ function ModelStep({ kernel, model, onLater }: ModelStepProps) {
         Mizarllm 是判断「这一轮做完没有」的本地模型，由这台电脑运行，约 1 GB，只需要下载一次。
       </p>
 
-      <div className="mt-4 divide-y divide-ink border border-ink">
+      <div className="mt-4 divide-y divide-ink mz-border">
         <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[12px]">
           <span className="shrink-0 text-muted">当前版本</span>
           <span className="selectable truncate text-fg">
@@ -801,7 +801,7 @@ function DoneStep({ account, engines, selected, model, shell }: DoneStepProps) {
       <p className="mt-1.5 text-[12px] leading-5 text-muted">
         下面这些已经就绪；没准备好的，进主页后也能补。
       </p>
-      <div className="mt-4 divide-y divide-ink border border-ink">
+      <div className="mt-4 divide-y divide-ink mz-border">
         <DoneRow label="登录账户" value={account?.username ?? '未登录'} />
         <DoneRow
           label="Agent"

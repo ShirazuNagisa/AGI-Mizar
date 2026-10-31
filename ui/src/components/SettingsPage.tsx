@@ -81,12 +81,12 @@ export function SettingsPage({
           </Section>
 
           <Section title="连接状态">
-            <div className="flex items-center justify-between border border-ink px-4 py-3">
+            <div className="flex items-center justify-between mz-border px-4 py-3">
               <span className="flex items-center gap-2 text-[12px] text-fg">
                 <span
                   className={cn(
                     'size-2',
-                    serverConnected ? 'bg-ink' : 'border border-ink',
+                    serverConnected ? 'bg-ink' : 'mz-border',
                   )}
                 />
                 {serverConnected ? '已连接' : '未连接'}
@@ -102,7 +102,7 @@ export function SettingsPage({
           </Section>
 
           <Section title="外观">
-            <div className="flex items-center justify-between border border-ink px-4 py-2.5">
+            <div className="flex items-center justify-between mz-border px-4 py-2.5">
               <span className="text-[12px] text-fg">主题</span>
               <Select
                 value={theme}
@@ -153,8 +153,8 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 
 function Group({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="border border-ink">
-      <div className="border-b border-ink px-4 py-2 text-[12px] text-muted">{title}</div>
+    <div className="mz-border">
+      <div className="mz-divide-b px-4 py-2 text-[12px] text-muted">{title}</div>
       <div className="px-4 py-3">{children}</div>
     </div>
   )
@@ -185,12 +185,12 @@ function DeviceList({
                 className={
                   online.has(device.id)
                     ? 'size-2 shrink-0 bg-ink'
-                    : 'size-2 shrink-0 border border-ink'
+                    : 'size-2 shrink-0 mz-border'
                 }
               />
               <span className="truncate">{device.name}</span>
               {device.current ? (
-                <span className="border border-ink px-1 text-[12px]">本机</span>
+                <span className="mz-border px-1 text-[12px]">本机</span>
               ) : null}
             </div>
             <div className="truncate text-[12px] text-muted">
@@ -229,8 +229,8 @@ const RUNTIME_LABELS: Record<ModelRuntime['state'], string> = {
 }
 
 const RUNTIME_DOTS: Record<ModelRuntime['state'], string> = {
-  stopped: 'border border-ink',
-  starting: 'border border-ink dither-50',
+  stopped: 'mz-border',
+  starting: 'mz-border dither-50',
   ready: 'bg-ink',
   failed: 'bg-ink',
 }
@@ -309,7 +309,7 @@ function ModelSection({ kernel, model }: { kernel: Kernel; model: ModelState | n
   }
 
   return (
-    <div className="border border-ink">
+    <div className="mz-border">
       <div className="divide-y divide-ink">
         <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[12px]">
           <span className="shrink-0 text-muted">模型</span>
@@ -327,7 +327,7 @@ function ModelSection({ kernel, model }: { kernel: Kernel; model: ModelState | n
         </div>
 
         {runtime.state === 'failed' && runtime.detail !== null ? (
-          <p className="border-t border-ink bg-ink px-4 py-1.5 text-[12px] leading-5 text-bg">{runtime.detail}</p>
+          <p className="mz-divide-t bg-ink px-4 py-1.5 text-[12px] leading-5 text-bg">{runtime.detail}</p>
         ) : null}
 
         <div className="flex items-start justify-between gap-4 px-4 py-2.5">
@@ -428,7 +428,7 @@ function ModelSection({ kernel, model }: { kernel: Kernel; model: ModelState | n
       </div>
 
       {error === null ? null : (
-        <p className="border-t border-ink bg-ink px-4 py-1.5 text-[12px] leading-5 text-bg">{error}</p>
+        <p className="mz-divide-t bg-ink px-4 py-1.5 text-[12px] leading-5 text-bg">{error}</p>
       )}
     </div>
   )
@@ -543,7 +543,7 @@ function AboutSection({ version }: { version: string }) {
   const newer = status !== null && status.available && status.latest !== null
 
   return (
-    <div className="border border-ink">
+    <div className="mz-border">
       <div className="divide-y divide-ink">
         <AboutRow label="版本" value={version === '' ? '—' : version} />
         <AboutRow label="构建" value={status === null || status.current === '' ? '—' : status.current} />
@@ -576,7 +576,7 @@ function AboutSection({ version }: { version: string }) {
         </div>
       </div>
       {available ? null : (
-        <p className="border-t border-ink px-4 py-2 text-[12px] leading-5 text-muted">
+        <p className="mz-divide-t px-4 py-2 text-[12px] leading-5 text-muted">
           检查更新由桌面窗口负责（仅桌面窗口可用）。
         </p>
       )}
@@ -637,7 +637,7 @@ function DeveloperPairing({ kernel }: { kernel: Kernel }) {
         开发者
       </button>
       {open ? (
-        <div className="mt-2 border border-ink p-4">
+        <div className="mt-2 mz-border p-4">
           <p className="text-[12px] leading-5 text-muted">
             账户体系上线前的临时入口：手机扫码配对这台电脑。上线后删除。
           </p>
@@ -646,7 +646,7 @@ function DeveloperPairing({ kernel }: { kernel: Kernel }) {
             <div className="mt-3 flex items-center gap-4">
               {view.svg === null ? null : (
                 <div
-                  className="size-[132px] border border-ink bg-white p-2"
+                  className="size-[132px] mz-border bg-white p-2"
                   dangerouslySetInnerHTML={{ __html: view.svg }}
                 />
               )}
@@ -686,7 +686,7 @@ function RerunGuide({ onRerun }: { onRerun: () => Promise<void> }) {
   }
 
   return (
-    <section className="border-t border-ink pt-5">
+    <section className="mz-divide-t pt-5">
       <div className="flex items-start justify-between gap-6">
         <div className="min-w-0">
           <div className="text-[12px] text-fg">重新运行新手引导</div>

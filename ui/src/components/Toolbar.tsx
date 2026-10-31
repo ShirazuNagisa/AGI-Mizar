@@ -19,7 +19,7 @@ export function Toolbar({ title, badge, children }: ToolbarProps) {
  return (
     <header
       data-tauri-drag-region="deep"
-      className="flex h-12 shrink-0 items-center gap-2 border-b border-ink px-6"
+      className="flex h-12 shrink-0 items-center gap-2 mz-divide-b px-6"
     >
       <span className="size-2 shrink-0 bg-ink" aria-hidden />
       <h1 className="text-[12px] tracking-[1px]">{title}</h1>

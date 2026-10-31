@@ -265,3 +265,30 @@ html[data-theme="oled"] ::-webkit-scrollbar-thumb {
     transition-duration: 1ms;
   }
 }
+
+/* ── The outlined box, per theme ──────────────────────────────────────────
+ *
+ * The 1-bit window draws every container, input and row as a one-pixel outline
+ * with nothing inside. The classic window wants a soft surface, a rounded
+ * corner and a quieter line. Components say `mz-border` and get whichever the
+ * current appearance means, instead of spelling `border border-ink` out again.
+ */
+.mz-border {
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface);
+}
+
+html[data-theme="oled"] .mz-border {
+  border-color: var(--ink);
+  border-radius: 0;
+  background: transparent;
+}
+
+.mz-divide-b { border-bottom: 1px solid var(--border); }
+.mz-divide-t { border-top: 1px solid var(--border); }
+.mz-divide-r { border-right: 1px solid var(--border); }
+
+html[data-theme="oled"] .mz-divide-b { border-bottom-color: var(--ink); }
+html[data-theme="oled"] .mz-divide-t { border-top-color: var(--ink); }
+html[data-theme="oled"] .mz-divide-r { border-right-color: var(--ink); }

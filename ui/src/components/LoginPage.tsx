@@ -73,7 +73,7 @@ export function LoginPage({
                   autoComplete="username"
                   autoCapitalize="off"
                   spellCheck={false}
-                  className="h-9 border border-ink bg-transparent px-3 text-[12px] text-fg outline-none"
+                  className="h-9 mz-border bg-transparent px-3 text-[12px] text-fg outline-none"
                 />
                 <label className="mt-2 text-[12px] text-muted" htmlFor="account-password">
                   密码
@@ -84,7 +84,7 @@ export function LoginPage({
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
                   autoComplete="current-password"
-                  className="h-9 border border-ink bg-transparent px-3 text-[12px] text-fg outline-none"
+                  className="h-9 mz-border bg-transparent px-3 text-[12px] text-fg outline-none"
                 />
               </div>
 
@@ -142,7 +142,7 @@ export function LoginPage({
               </div>
 
               {codeStarted !== null ? (
-                <div className="mt-4 border border-ink p-4">
+                <div className="mt-4 mz-border p-4">
                   <p className="text-[12px] leading-5 text-muted">
                     浏览器里完成 {codeStarted === 'apple' ? 'Apple' : 'GitHub'} 授权后，页面会给出一个
                     <code>MZ-XXXX-XXXX</code> 代码，粘贴到这里完成登录。
@@ -153,7 +153,7 @@ export function LoginPage({
                       onChange={(event) => setHandoff(event.target.value.toUpperCase())}
                       placeholder="MZ-XXXX-XXXX"
                       spellCheck={false}
-                      className="h-9 flex-1 border border-ink bg-transparent px-3 text-[12px] tracking-wider text-fg outline-none"
+                      className="h-9 flex-1 mz-border bg-transparent px-3 text-[12px] tracking-wider text-fg outline-none"
                     />
                     <Button
                       variant="primary"
@@ -173,7 +173,7 @@ export function LoginPage({
           ) : (
             <section>
               <p className="text-[12px] text-muted">已登录</p>
-              <div className="mt-3 flex flex-col divide-y divide-ink border border-ink">
+              <div className="mt-3 flex flex-col divide-y divide-ink mz-border">
                 <Row label="账户" value={account.username} />
                 <Row label="邮箱" value={account.email ?? '—'} />
                 <Row
