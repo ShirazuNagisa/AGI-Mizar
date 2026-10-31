@@ -626,7 +626,9 @@ impl MizarServer {
                                     if !is_end {
                                         continue;
                                     }
-                                    let Some(data) = event.get_mut("data") else { continue };
+                                    let Some(data) = event.get_mut("data") else {
+                                        continue;
+                                    };
                                     let turn = data.get("turn").and_then(Value::as_u64);
                                     let Some(turn) = turn else { continue };
                                     if let Some(total) = totals.get(&(turn as u32)) {

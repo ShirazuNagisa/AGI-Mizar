@@ -197,6 +197,25 @@ fn main() {
     // The run loop owns the shutdown: `kill_on_drop` does not fire when the
     // process exits, and the model runner is a gigabyte of resident weights.
     let core_for_exit = std::sync::Arc::clone(&booted.core);
+
+    // `kill` and Ctrl-C are how a development machine ends this app; neither
+    // runs the exit event, and both would leave the model runner behind.
+    #[cfg(unix)]
+    {
+        let core_for_signal = std::sync::Arc::clone(&core_for_exit);
+        tauri::async_runtime::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let Ok(mut terminate) = signal(SignalKind::terminate()) else {
+                return;
+            };
+            tokio::select! {
+                _ = terminate.recv() => {}
+                _ = tokio::signal::ctrl_c() => {}
+            }
+            core_for_signal.models().shutdown().await;
+            std::process::exit(0);
+        });
+    }
     // Started by the login item: the point is the kernel behind the window, so
     // the window waits in the menu bar instead of stealing focus at login.
     let background = std::env::args().any(|argument| argument == "--background");

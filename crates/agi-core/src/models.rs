@@ -154,11 +154,12 @@ impl ModelService {
             }
         }
         let (events, _) = broadcast::channel(64);
-        Arc::new(Self {
+        let pid_file = dir.join(".runtime.pid");
+        let service = Arc::new(Self {
             dir,
             active: RwLock::new(active),
             download: Mutex::new(None),
-            runtime: Arc::new(Runtime::new()),
+            runtime: Arc::new(Runtime::new(pid_file)),
             events,
             // `timeout` is the whole request, body included: on a 1 GB download
             // it fires at 60 s and the stream dies a third of the way through.
@@ -169,7 +170,10 @@ impl ModelService {
                 .build()
                 .unwrap_or_default(),
             repo: RwLock::new(None),
-        })
+        });
+        // Before anything can start a new one: stop the one a dead launch left.
+        service.sweep_stale_runtime();
+        service
     }
 
     /// The directory models are installed into.
@@ -227,6 +231,39 @@ impl ModelService {
     }
 
     /// Everything the window needs to draw the model block.
+    /// Stop a sidecar left behind by a launch that died without cleaning up.
+    ///
+    /// `kill_on_drop` runs when the process ends normally. A force quit, a
+    /// crash or `kill -9` leaves the child reparented to launchd, holding a port
+    /// and a mapped gigabyte — one per abandoned launch.
+    pub fn sweep_stale_runtime(&self) {
+        let path = self.dir.join(".runtime.pid");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let Ok(pid) = text.trim().parse::<u32>() else {
+            let _ = std::fs::remove_file(&path);
+            return;
+        };
+        // Only a process that still calls itself llama-server: pids are reused,
+        // and killing a stranger because it inherited a number is worse than
+        // leaking a child.
+        let listing = std::process::Command::new("/bin/ps")
+            .args(["-p", &pid.to_string(), "-o", "command="])
+            .output()
+            .ok();
+        let command = listing
+            .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
+            .unwrap_or_default();
+        if command.contains("llama-server") {
+            let _ = std::process::Command::new("/bin/kill")
+                .args(["-9", &pid.to_string()])
+                .status();
+            tracing::info!("model: stopped a sidecar left over from a previous launch ({pid})");
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// Where releases come from this run.
     fn repo_base(&self) -> String {
         self.repo
@@ -847,6 +884,9 @@ impl agi_layout::Judge for SidecarJudge {
 /// The `llama-server` process, and where it is.
 pub struct Runtime {
     process: tokio::sync::Mutex<Option<tokio::process::Child>>,
+    /// Where the running sidecar's pid is written, so a launch that follows a
+    /// crash can find and stop it.
+    pid_file: PathBuf,
     view: RwLock<RuntimeView>,
     /// One start at a time: two turns ending together must not race two
     /// `llama-server` processes into the same port.
@@ -854,9 +894,10 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    fn new() -> Self {
+    fn new(pid_file: PathBuf) -> Self {
         Self {
             process: tokio::sync::Mutex::new(None),
+            pid_file,
             view: RwLock::new(RuntimeView::default()),
             starting: tokio::sync::Mutex::new(()),
         }
@@ -947,6 +988,9 @@ impl Runtime {
             .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|error| format!("could not start {}: {error}", binary.to_string_lossy()))?;
+        if let Some(pid) = child.id() {
+            let _ = std::fs::write(&self.pid_file, pid.to_string());
+        }
         *self.process.lock().await = Some(child);
 
         match wait_for_health(port).await {
@@ -975,6 +1019,7 @@ impl Runtime {
         if let Some(mut child) = self.process.lock().await.take() {
             let _ = child.kill().await;
         }
+        let _ = std::fs::remove_file(&self.pid_file);
         let mut view = self.view();
         view.state = "stopped".to_string();
         view.port = None;
