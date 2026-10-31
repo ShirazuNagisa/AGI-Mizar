@@ -341,6 +341,11 @@ fn main() {
             .visible(false)
             .build()?;
             panel.hide()?;
+            // Looking at the tray page without a click is the only way to check
+            // it on a machine that cannot script the menu bar.
+            if std::env::var("MIZAR_SHOW_PANEL").is_ok() {
+                let _ = panel.show();
+            }
 
             // The three process switches, as stored. Applied after the window
             // exists so the Dock icon is present for the first frame and then

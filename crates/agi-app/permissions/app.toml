@@ -39,3 +39,13 @@ commands.allow = ["shell_login_item"]
 identifier = "allow-app-quit"
 description = "Quit the app; closing the window only hides it."
 commands.allow = ["app_quit"]
+
+[[permission]]
+identifier = "allow-tray-panel-resize"
+description = "Size the tray page to its rows."
+commands.allow = ["tray_panel_resize"]
+
+[[permission]]
+identifier = "allow-tray-panel-open-settings"
+description = "Hide the tray page and show the window on its settings."
+commands.allow = ["tray_panel_open_settings"]

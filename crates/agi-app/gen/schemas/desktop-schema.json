@@ -219,6 +219,18 @@
           "markdownDescription": "Change the three shell switches."
         },
         {
+          "description": "Hide the tray page and show the window on its settings.",
+          "type": "string",
+          "const": "allow-tray-panel-open-settings",
+          "markdownDescription": "Hide the tray page and show the window on its settings."
+        },
+        {
+          "description": "Size the tray page to its rows.",
+          "type": "string",
+          "const": "allow-tray-panel-resize",
+          "markdownDescription": "Size the tray page to its rows."
+        },
+        {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
           "type": "string",
           "const": "core:default",
