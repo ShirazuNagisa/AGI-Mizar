@@ -318,3 +318,57 @@ html:not([data-theme="oled"]) .text-\[12px\] {
   font-size: 13px;
   line-height: 18px;
 }
+
+/* ── Changing the appearance ──────────────────────────────────────────────
+ *
+ * The cross-fade is the browser's own View Transition where it exists: the old
+ * window is a snapshot that dissolves into the new one, which is the only way to
+ * move between two typefaces and two corner radii in one gesture.
+ *
+ * Where it does not exist, `.themeFade` fades the colours instead and the type
+ * snaps. It is removed as soon as the change lands, so hover and focus keep
+ * their own timing.
+ */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 200ms;
+  animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+::view-transition-old(root) {
+  animation-name: theme-fade-out;
+}
+
+::view-transition-new(root) {
+  animation-name: theme-fade-in;
+}
+
+@keyframes theme-fade-out {
+  to { opacity: 0; }
+}
+
+@keyframes theme-fade-in {
+  from { opacity: 0; }
+}
+
+html[data-theme-fade] *,
+html[data-theme-fade] *::before,
+html[data-theme-fade] *::after {
+  transition:
+    background-color 180ms cubic-bezier(0.4, 0, 0.2, 1),
+    border-color 180ms cubic-bezier(0.4, 0, 0.2, 1),
+    color 180ms cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation: none;
+  }
+
+  html[data-theme-fade] *,
+  html[data-theme-fade] *::before,
+  html[data-theme-fade] *::after {
+    transition: none !important;
+  }
+}

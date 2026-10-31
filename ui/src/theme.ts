@@ -30,15 +30,51 @@ export function resolvedTheme(preference: ThemePreference): 'light' | 'dark' {
   return window.matchMedia(DARK_QUERY).matches ? 'dark' : 'light'
 }
 
-/** Paint the window for this preference. */
-export function applyTheme(preference: ThemePreference): void {
-  const root = document.documentElement
-  root.classList.toggle('dark', resolvedTheme(preference) === 'dark')
-  // The 1-bit styles are an attribute rather than a class so they can sit beside
-  // `.dark` instead of replacing it: the theme still needs a light/dark answer.
-  if (preference === 'oled') root.dataset.theme = 'oled'
-  else delete root.dataset.theme
-  root.style.colorScheme = resolvedTheme(preference)
+/** Whether the person asked the system to keep motion down. */
+function motionAllowed(): boolean {
+  return !window.matchMedia('(prefers-reduced-motion: reduce)').matches
+}
+
+/**
+ * Paint the window for this preference.
+ *
+ * With `animate`, the change is a cross-fade: the old appearance is snapshotted
+ * and dissolved into the new one. Two reasons for that over transitional CSS —
+ * the font and the corner radius cannot be tweened at all, and a theme swap that
+ * animates only the colours looks like the window is being repainted in the
+ * wrong order.
+ */
+export function applyTheme(preference: ThemePreference, { animate = false } = {}): void {
+  const paint = () => {
+    const root = document.documentElement
+    root.classList.toggle('dark', resolvedTheme(preference) === 'dark')
+    // The 1-bit styles are an attribute rather than a class so they can sit beside
+    // `.dark` instead of replacing it: the theme still needs a light/dark answer.
+    if (preference === 'oled') root.dataset.theme = 'oled'
+    else delete root.dataset.theme
+    root.style.colorScheme = resolvedTheme(preference)
+  }
+
+  if (!animate || !motionAllowed()) {
+    paint()
+    return
+  }
+
+  // View Transitions dissolve the old snapshot into the new state, which is the
+  // only mechanism here that can move between two different typefaces.
+  const withTransition = document as Document & {
+    startViewTransition?: (update: () => void) => { finished: Promise<void> }
+  }
+  if (typeof withTransition.startViewTransition === 'function') {
+    withTransition.startViewTransition(paint)
+    return
+  }
+
+  // Older WebKit: fade the colours, and accept that the font snaps. The class is
+  // removed afterwards so it never slows down hover or focus transitions.
+  document.documentElement.dataset.themeFade = ''
+  paint()
+  window.setTimeout(() => delete document.documentElement.dataset.themeFade, 220)
 }
 
 /** Read the stored preference; `system` when nothing was chosen. */

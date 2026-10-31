@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Kernel,
   type AccountUser,
@@ -29,6 +29,9 @@ export function App() {
   const [usageLoading, setUsageLoading] = useState(true)
   const [usageError, setUsageError] = useState<string | null>(null)
   const [theme, setTheme] = useState<ThemePreference>(() => storedTheme())
+  // What is painted right now, so the first render does not animate and a real
+  // change does.
+  const painted = useRef<ThemePreference | null>(null)
   const [account, setAccount] = useState<AccountUser | null>(null)
   const [accountBusy, setAccountBusy] = useState(false)
   const [accountError, setAccountError] = useState<string | null>(null)
@@ -39,9 +42,13 @@ export function App() {
   // The window's appearance is a class; following the system means listening for
   // macOS changing its mind while this window stays open.
   useEffect(() => {
-    applyTheme(theme)
+    const animate = painted.current !== null && painted.current !== theme
+    painted.current = theme
+    applyTheme(theme, { animate })
     storeTheme(theme)
     if (theme !== 'system') return
+    // The system changing under the window is not a choice being made here, so
+    // it is not animated: the desktop around the window changes instantly too.
     return onSystemThemeChange(() => applyTheme(theme))
   }, [theme])
 
