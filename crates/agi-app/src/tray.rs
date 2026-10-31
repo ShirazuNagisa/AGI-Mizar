@@ -17,9 +17,7 @@
 
 use std::sync::Mutex;
 
-use tauri::menu::{
-    CheckMenuItem, IsMenuItem, Menu, MenuBuilder, MenuItem, MenuItemBuilder, SubmenuBuilder,
-};
+use tauri::menu::{IsMenuItem, Menu, MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, WebviewWindow, Wry};
 
@@ -144,6 +142,9 @@ fn signature_of(summary: Option<&Summary>, settings: &shell::ShellSettings) -> S
             parts.push(format!("{name}:{online}"));
         }
     }
+    // The menu no longer draws the switches themselves; they are here so a
+    // behaviour change still rebuilds it (the check marks are gone, the tick
+    // still tells the thread whether anything moved).
     parts.push(format!(
         "{}{}{}",
         settings.launch_at_login, settings.show_dock_icon, settings.tray_menu_only
@@ -151,150 +152,94 @@ fn signature_of(summary: Option<&Summary>, settings: &shell::ShellSettings) -> S
     parts.join("|")
 }
 
-fn build(app: &AppHandle, summary: Option<&Summary>) -> tauri::Result<Menu<Wry>> {
-    let title = match summary {
-        Some(summary) => format!("AGI Mizar {}", summary.version),
-        None => "AGI Mizar".to_string(),
+/// One line of the list: a name on the left, its lamp pinned to the right.
+///
+/// A menu item is left-aligned text, so the lamp is positioned by padding the
+/// name to a fixed column count. Names are short and the widest one sets the
+/// menu's width, so the dots line up in practice; a name longer than the column
+/// pushes its own lamp right rather than wrapping.
+fn row(name: &str, on: Option<bool>) -> String {
+    let lamp = match on {
+        Some(true) => "●",
+        Some(false) => "○",
+        None => "",
     };
-    let header = MenuItemBuilder::with_id("header", title)
-        .enabled(false)
-        .build(app)?;
+    // Wide characters take two columns; the padding counts display width, not
+    // bytes, or a Chinese name would sit further left than an English one.
+    let width: usize = name
+        .chars()
+        .map(|c| if c as u32 > 0x2e7f { 2 } else { 1 })
+        .sum();
+    let pad = "\u{2007}".repeat(COLUMN.saturating_sub(width).max(1));
+    format!("{name}{pad}{lamp}")
+}
 
-    // The two answers, above the controls: what is connected to this computer.
-    let agents_label = MenuItemBuilder::with_id("agents", "Agent 状态 · Agents")
-        .enabled(false)
-        .build(app)?;
-    let mut agent_items: Vec<MenuItem<Wry>> = Vec::new();
+/// How many columns a row is padded to, dot included.
+const COLUMN: usize = 26;
+
+fn build(app: &AppHandle, summary: Option<&Summary>) -> tauri::Result<Menu<Wry>> {
+    let mut items: Vec<Box<dyn IsMenuItem<Wry>>> = Vec::new();
+
+    // Agents: one row each, a filled lamp when the engine is connected and a
+    // hollow one when it is installed but silent. An engine that is not
+    // installed has no lamp at all.
     match summary {
         Some(summary) if !summary.agents.is_empty() => {
             for (engine, connected, available) in &summary.agents {
-                let status = if *connected {
-                    "已连接 · Connected"
-                } else if !*available {
-                    "本机未安装 · Not installed"
-                } else {
-                    "未连接 · Not connected"
-                };
-                agent_items.push(
+                let lamp = if *available { Some(*connected) } else { None };
+                items.push(Box::new(
                     MenuItemBuilder::with_id(
                         format!("agent:{engine}"),
-                        format!("{} — {status}", agent_name(engine)),
+                        row(agent_name(engine), lamp),
                     )
                     .enabled(false)
                     .build(app)?,
-                );
+                ));
             }
         }
-        _ => agent_items.push(
-            MenuItemBuilder::with_id("agent:none", "读取中… · Reading…")
+        _ => items.push(Box::new(
+            MenuItemBuilder::with_id("agent:none", row("读取中… · Reading…", None))
                 .enabled(false)
                 .build(app)?,
-        ),
+        )),
     }
 
-    let phones_label = MenuItemBuilder::with_id("phones", "手机 · Phones")
-        .enabled(false)
-        .build(app)?;
-    let mut phone_items: Vec<MenuItem<Wry>> = Vec::new();
+    items.push(Box::new(PredefinedMenuItem::separator(app)?));
+
+    // The phones on the same account, same shape: a filled lamp for one that is
+    // talking to this computer right now.
     match summary {
         Some(summary) if !summary.phones.is_empty() => {
-            let rows = phone_rows(&summary.phones);
-            for (name, online) in &rows.shown {
-                let status = if *online {
-                    "在线 · Online"
-                } else {
-                    "离线 · Offline"
-                };
-                phone_items.push(
-                    MenuItemBuilder::with_id(format!("phone:{name}"), format!("{name} — {status}"))
+            for (name, online) in phone_rows(&summary.phones).shown {
+                items.push(Box::new(
+                    MenuItemBuilder::with_id(format!("phone:{name}"), row(&name, Some(online)))
                         .enabled(false)
                         .build(app)?,
-                );
-            }
-            if rows.hidden > 0 {
-                phone_items.push(
-                    MenuItemBuilder::with_id(
-                        "phone:more",
-                        format!(
-                            "另有 {} 台已配对 · {} more paired",
-                            rows.hidden, rows.hidden
-                        ),
-                    )
-                    .enabled(false)
-                    .build(app)?,
-                );
+                ));
             }
         }
-        _ => phone_items.push(
-            MenuItemBuilder::with_id("phone:none", "尚无已配对设备 · No phones paired")
+        _ => items.push(Box::new(
+            MenuItemBuilder::with_id("phone:none", row("没有同账户的设备 · No devices", None))
                 .enabled(false)
                 .build(app)?,
-        ),
+        )),
     }
 
-    let show = MenuItemBuilder::with_id("show", "显示窗口 · Show Window").build(app)?;
-    let settings = shell::load();
-    let at_login = CheckMenuItem::with_id(
-        app,
-        "login",
-        "开机启动 · Start at Login",
-        true,
-        login_item::is_enabled(),
-        None::<&str>,
-    )?;
-    let dock = CheckMenuItem::with_id(
-        app,
-        "dock",
-        "显示程序坞图标 · Show Dock Icon",
-        true,
-        settings.show_dock_icon,
-        None::<&str>,
-    )?;
-    let menu_only = CheckMenuItem::with_id(
-        app,
-        "menu_only",
-        "左键打开菜单 · Menu on Left Click",
-        true,
-        settings.tray_menu_only,
-        None::<&str>,
-    )?;
+    items.push(Box::new(PredefinedMenuItem::separator(app)?));
+    items.push(Box::new(
+        MenuItemBuilder::with_id("settings", "设置 · Settings").build(app)?,
+    ));
+    items.push(Box::new(
+        MenuItemBuilder::with_id("quit", "退出 AGI Mizar · Quit").build(app)?,
+    ));
 
-    // The window's theme belongs to the kernel, and the menu has no window to
-    // ask. The kernel's address and token are remembered at launch for exactly
-    // this kind of call.
-    let system = MenuItemBuilder::with_id("theme:system", "跟随系统 · System").build(app)?;
-    let light = MenuItemBuilder::with_id("theme:light", "浅色 · Light").build(app)?;
-    let dark = MenuItemBuilder::with_id("theme:dark", "深色 · Dark").build(app)?;
-    let theme = SubmenuBuilder::new(app, "主题 · Theme")
-        .items(&[&system, &light, &dark])
-        .build()?;
-
-    let update = MenuItemBuilder::with_id("update", "检查更新 · Check for Updates…").build(app)?;
-    let quit = MenuItemBuilder::with_id("quit", "退出 AGI Mizar · Quit").build(app)?;
-
-    let mut items: Vec<&dyn IsMenuItem<Wry>> = vec![&header, &agents_label];
-    for item in &agent_items {
-        items.push(item);
-    }
-    items.push(&phones_label);
-    for item in &phone_items {
-        items.push(item);
-    }
-    items.push(&show);
-    items.push(&at_login);
-    items.push(&dock);
-    items.push(&menu_only);
-    items.push(&theme);
-    items.push(&update);
-    items.push(&quit);
-
-    MenuBuilder::new(app).items(&items).build()
+    let refs: Vec<&dyn IsMenuItem<Wry>> = items.iter().map(|item| item.as_ref()).collect();
+    MenuBuilder::new(app).items(&refs).build()
 }
 
 /// The rows the menu shows for the roster.
 struct PhoneRows {
     shown: Vec<(String, bool)>,
-    hidden: usize,
 }
 
 /// What a person can act on: connected first, then most recently seen, one row
@@ -316,10 +261,7 @@ fn phone_rows(phones: &[(String, bool, i64)]) -> PhoneRows {
         }
         shown.push((name.clone(), *online));
     }
-    PhoneRows {
-        hidden: phones.len().saturating_sub(shown.len()),
-        shown,
-    }
+    PhoneRows { shown }
 }
 
 /// The agent's product name, which is the same word in both languages.
@@ -335,6 +277,7 @@ fn agent_name(engine: &str) -> &str {
 fn on_menu(app: &AppHandle, id: &str) {
     match id {
         "show" => show_window(app),
+        "settings" => open_settings(app),
         "update" => crate::updates::spawn_check(app.clone()),
         "quit" => app.exit(0),
         "login" => {
@@ -376,6 +319,19 @@ fn on_menu(app: &AppHandle, id: &str) {
     let _ = refresh(app);
 }
 
+/// Show the window on its settings page.
+///
+/// The page is React state, not a route, so the tray cannot navigate it from
+/// outside; it asks the window instead, and the window decides.
+fn open_settings(app: &AppHandle) {
+    show_window(app);
+    if let Some(window) = app.get_webview_window(WINDOW) {
+        let _ = window.eval(
+            "window.dispatchEvent(new CustomEvent('mizar:navigate', { detail: 'settings' }))",
+        );
+    }
+}
+
 /// Bring the window back, from the tray or from a second launch.
 pub fn show_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(WINDOW) {
@@ -407,11 +363,10 @@ mod tests {
                 ("old".to_string(), false)
             ]
         );
-        assert_eq!(rows.hidden, 0);
     }
 
     #[test]
-    fn one_row_per_name_and_a_count_for_the_rest() {
+    fn one_row_per_name_with_the_cap() {
         let phones: Vec<_> = (0..9)
             .map(|index| phone("iPhone", index == 0, index as i64))
             .chain([phone("iPad", false, 1), phone("node-sim", false, 2)])
@@ -423,16 +378,14 @@ mod tests {
         // The rest by recency: node-sim was seen later than the iPad.
         assert_eq!(rows.shown[1].0, "node-sim");
         assert_eq!(rows.shown[2].0, "iPad");
-        // Eleven entries, three names shown: the count is what is left over.
-        assert_eq!(rows.hidden, phones.len() - rows.shown.len());
-        assert!(rows.hidden > 0);
+        // Eleven entries, three names: under the cap, so all three are rows.
+        assert_eq!(rows.shown.len(), PHONES_SHOWN.min(3));
     }
 
     #[test]
     fn an_empty_roster_has_nothing_to_show() {
         let rows = phone_rows(&[]);
         assert!(rows.shown.is_empty());
-        assert_eq!(rows.hidden, 0);
     }
 
     #[test]

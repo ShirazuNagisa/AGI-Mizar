@@ -52,6 +52,18 @@ export function App() {
     return onSystemThemeChange(() => applyTheme(theme))
   }, [theme])
 
+  // The tray cannot navigate a React page from outside the window, so it asks:
+  // it shows the window and dispatches this event.
+  useEffect(() => {
+    const onNavigate = (event: Event) => {
+      const detail = (event as CustomEvent<string>).detail
+      if (detail === 'settings') setPage({ kind: 'settings' })
+      if (detail === 'home') setPage({ kind: 'home' })
+    }
+    window.addEventListener('mizar:navigate', onNavigate)
+    return () => window.removeEventListener('mizar:navigate', onNavigate)
+  }, [])
+
   const refreshAccount = useCallback(async () => {
     try {
       const answer = await kernel.send<{ user: AccountUser | null } | null>({ op: 'account' })
