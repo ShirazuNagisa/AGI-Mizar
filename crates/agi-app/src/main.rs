@@ -100,6 +100,10 @@ fn start_at_login_flag() -> Option<bool> {
 /// is dead — the phone has to go back through the account to find it again.
 /// A token on disk keeps the room, and the phone's record, valid across
 /// restarts.
+/// The window's fixed width: the heat map's 53 columns plus the sidebar, which
+/// is the narrowest the window can be without hiding a week of the year.
+const WINDOW_WIDTH: f64 = 1034.0;
+
 fn stable_relay_token() -> String {
     let dir = std::env::var("MIZAR_DATA_DIR")
         .map(std::path::PathBuf::from)
@@ -294,8 +298,13 @@ fn main() {
             let mut builder =
                 tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::External(parsed))
                     .title("AGI Mizar")
-                    .inner_size(1100.0, 720.0)
-                    .min_inner_size(720.0, 480.0)
+                    .inner_size(WINDOW_WIDTH, 802.0)
+                    // The dashboard's year of squares is the widest thing the
+                    // window ever draws; at any narrower size the last weeks are
+                    // cut off. The width is therefore not a preference — the
+                    // height still is, and keeps its own floor.
+                    .min_inner_size(WINDOW_WIDTH, 480.0)
+                    .max_inner_size(WINDOW_WIDTH, f64::INFINITY)
                     .visible(!background);
 
             // The window draws its own chrome: the page reserves a strip for the
