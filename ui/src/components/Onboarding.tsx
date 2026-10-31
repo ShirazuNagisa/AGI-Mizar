@@ -9,6 +9,7 @@ import { Button } from './ui/button'
 import { Progress } from './ui/progress'
 import { CheckIcon, ENGINE_MARKS, Spinner, StarMark } from '../icons'
 import { DshPluginHint } from './DshPluginHint'
+import { useIsOled } from '../lib/oled'
 import { ShellSettingsList } from './ShellSettingsList'
 import { cn, failureMessage } from '../lib/utils'
 
@@ -455,6 +456,7 @@ interface AgentStepProps {
 
 /** Which agents this computer can actually reach, and the install for the rest. */
 function AgentStep({ kernel, engines, selected, onToggle, onRefreshState }: AgentStepProps) {
+  const oled = useIsOled()
   const [rescanning, setRescanning] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -512,11 +514,21 @@ function AgentStep({ kernel, engines, selected, onToggle, onRefreshState }: Agen
               onClick={() => onToggle(engine)}
               className={cn(
                 'flex flex-col gap-2 border p-3 text-left outline-none',
+                // The one-bit card is an outline that thickens on hover and goes
+                // dashed when the agent is not installed. The classic card is a
+                // surface that lifts instead — there is a border width to spare.
+                oled ? 'rounded-none' : 'rounded-xl transition-colors',
                 available
                   ? chosen
-                    ? 'border-ink bg-ink text-bg'
-                    : 'border-ink hover:border-2'
-                  : 'cursor-not-allowed border-dashed border-ink',
+                    ? oled
+                      ? 'border-ink bg-ink text-bg'
+                      : 'border-accent bg-accent/10 text-fg ring-1 ring-accent'
+                    : oled
+                      ? 'border-ink hover:border-2'
+                      : 'border-border bg-surface hover:bg-surface-2'
+                  : oled
+                    ? 'cursor-not-allowed border-dashed border-ink'
+                    : 'cursor-not-allowed border-dashed border-border bg-surface-2/50 opacity-60',
               )}
             >
               <span className="flex w-full items-center justify-between">
