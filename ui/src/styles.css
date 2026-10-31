@@ -292,3 +292,29 @@ html[data-theme="oled"] .mz-border {
 html[data-theme="oled"] .mz-divide-b { border-bottom-color: var(--ink); }
 html[data-theme="oled"] .mz-divide-t { border-top-color: var(--ink); }
 html[data-theme="oled"] .mz-divide-r { border-right-color: var(--ink); }
+
+/* ── The selected pill, per theme ─────────────────────────────────────────
+ *
+ * `bg-ink text-bg` is an inversion: the one-bit theme has only the two colours
+ * to swap. The classic window has a filled accent instead, because accent-on-
+ * background is the pairing its palette was built around.
+ */
+html:not([data-theme="oled"]) .bg-ink {
+  background-color: var(--accent);
+}
+
+html:not([data-theme="oled"]) .text-bg {
+  color: #08161c;
+}
+
+/* ── Type size, per theme ─────────────────────────────────────────────────
+ *
+ * The one-bit window is set at 12px because that is where the pixel font reads
+ * as pixels; the classic one was 13px. Components name the 12px size directly,
+ * so the size is remapped here rather than in two dozen class strings — and
+ * only in the appearance that wants the larger type.
+ */
+html:not([data-theme="oled"]) .text-\[12px\] {
+  font-size: 13px;
+  line-height: 18px;
+}
