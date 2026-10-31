@@ -7,7 +7,7 @@ import type {
   ModelState,
   PairingView,
 } from '../api'
-import type { ThemePreference } from '../theme'
+import { THEMES, type ThemePreference } from '../theme'
 import { formatGigabytes, formatModelVersion } from '../format'
 import { ChevronIcon, Spinner } from '../icons'
 import { Button } from './ui/button'
@@ -112,9 +112,11 @@ export function SettingsPage({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="system">跟随系统</SelectItem>
-                  <SelectItem value="light">浅色</SelectItem>
-                  <SelectItem value="dark">深色</SelectItem>
+                  {THEMES.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>

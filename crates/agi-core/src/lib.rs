@@ -135,7 +135,9 @@ impl Default for Preferences {
 
 /// Whether a theme name is one this window can paint.
 pub fn valid_theme(theme: &str) -> bool {
-    matches!(theme, "system" | "light" | "dark")
+    // `oled` is a window theme, not a system one: the kernel only stores it so
+    // the next launch paints the same window.
+    matches!(theme, "system" | "light" | "dark" | "oled")
 }
 
 /// Installs the Claude Code hooks, from whatever knows where the shim is.

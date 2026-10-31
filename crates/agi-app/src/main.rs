@@ -63,7 +63,8 @@ mod dock_icon {
             return;
         };
         let dark = match theme {
-            "dark" => true,
+            // The 1-bit palette is drawn on the dark tile whatever the system is.
+            "dark" | "oled" => true,
             "light" => false,
             _ => system_is_dark(mtm),
         };

@@ -4,14 +4,50 @@
    system means the class is rewritten when macOS changes appearance. */
 @custom-variant dark (&:where(.dark, .dark *));
 
-/* 1-bit OLED.
+/* Two appearances, one stylesheet.
  *
- * Two colours per theme and nothing in between: no grey, no alpha, no gradient.
- * The old token names are kept so existing utilities (`bg-surface`, `text-fg`,
- * `border-border`) keep compiling — they now all resolve to the same two
- * values, and "surface" is simply the background.
+ * "Classic" is the default and the one that was here first: soft surfaces, a
+ * system font, rounded corners. `1-Bit OLED` is opt-in (`data-theme="oled"` on
+ * <html>, set by src/theme.ts) and is two colours per mode, a pixel font, and
+ * nothing rounded or shadowed.
+ *
+ * The tokens are named the same in both, so every utility (`bg-surface`,
+ * `border-ink`, `text-muted`) keeps compiling and resolves per theme.
  */
 :root {
+  --bg: #f6f6f7;
+  --surface: #ffffff;
+  --surface-2: #f0f0f2;
+  --border: #e2e2e6;
+  --fg: #16171a;
+  --muted: #6b6f76;
+  --accent: #0a78ae;
+  --accent-soft: rgb(10 120 174 / 0.12);
+  --heat-0: #ececef;
+  /* The 1-bit token name, mapped onto the classic palette so a component that
+     says `border-ink` is outlined in the accent colour here. */
+  --ink: var(--accent);
+  --ui-font:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue",
+    "PingFang SC", "Hiragino Sans GB", sans-serif;
+}
+
+.dark {
+  --bg: #0f1012;
+  --surface: #17181a;
+  --surface-2: #1d1f22;
+  --border: #2a2c30;
+  --fg: #f2f3f5;
+  --muted: #9aa0a8;
+  --accent: #3ccbf4;
+  --accent-soft: rgb(60 203 244 / 0.14);
+  --heat-0: #1c1e21;
+  --ink: var(--accent);
+}
+
+/* 1-Bit OLED: two colours and nothing in between — no grey, no alpha, no
+   gradient. "surface" is simply the background. */
+html[data-theme="oled"] {
   --bg: #ffffff;
   --ink: #0a78ae;
 
@@ -23,9 +59,10 @@
   --accent: var(--ink);
   --accent-soft: transparent;
   --heat-0: transparent;
+  --ui-font: "Fusion Pixel", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-.dark {
+html[data-theme="oled"].dark {
   --bg: #000000;
   --ink: #ffffff;
 }
@@ -41,7 +78,7 @@
   --color-accent-soft: var(--accent-soft);
   --color-heat-0: var(--heat-0);
   --color-ink: var(--ink);
-  --font-sans: "Fusion Pixel", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-sans: var(--ui-font);
 }
 
 /* Fusion Pixel 12px — the font only reads as pixels at 12px and its integer
@@ -56,9 +93,9 @@
 
 /* The two rules that make it 1-bit: square everything, and never cast a shadow.
    `ring-*` is a box-shadow in Tailwind, so focus is drawn as an outline below. */
-*,
-*::before,
-*::after {
+html[data-theme="oled"] *,
+html[data-theme="oled"] *::before,
+html[data-theme="oled"] *::after {
   border-radius: 0 !important;
   box-shadow: none !important;
 }
@@ -74,14 +111,18 @@ body {
   background: var(--bg);
   color: var(--fg);
   font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  font-synthesis: none;
+  overflow: hidden;
+  user-select: none;
+}
+
+html[data-theme="oled"] body {
   font-size: 12px;
   line-height: 16px;
   /* No anti-aliasing is the point: 12px text is drawn as 2×2 blocks. */
   -webkit-font-smoothing: none;
-  font-synthesis: none;
   font-variant-ligatures: none;
-  overflow: hidden;
-  user-select: none;
 }
 
 /* Text that a person may want to copy keeps the normal selection behaviour. */
@@ -89,12 +130,12 @@ body {
   user-select: text;
 }
 
-::selection {
+html[data-theme="oled"] ::selection {
   background: var(--ink);
   color: var(--bg);
 }
 
-:focus-visible {
+html[data-theme="oled"] :focus-visible {
   outline: 2px dotted var(--ink);
   outline-offset: 2px;
 }
@@ -109,12 +150,26 @@ body {
    old Electron `-webkit-app-region`, which WKWebView ignores. */
 
 ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: color-mix(in oklab, var(--muted) 35%, transparent);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+html[data-theme="oled"] ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 
-::-webkit-scrollbar-thumb {
+html[data-theme="oled"] ::-webkit-scrollbar-thumb {
   background: var(--ink);
+  border-radius: 0;
+  border: 0;
 }
 
 ::-webkit-scrollbar-track {

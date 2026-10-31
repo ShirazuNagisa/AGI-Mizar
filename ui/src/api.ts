@@ -323,7 +323,7 @@ export type Command =
   | { op: 'reconnect'; engine: EngineId }
   | { op: 'pairing'; refresh: boolean }
   | { op: 'usage_overview' }
-  | { op: 'set_theme'; theme: 'system' | 'light' | 'dark' }
+  | { op: 'set_theme'; theme: 'system' | 'light' | 'dark' | 'oled' }
   | { op: 'relay_status' }
   | { op: 'account' }
   | { op: 'account_login'; identifier: string; password: string }
