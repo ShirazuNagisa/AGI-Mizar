@@ -198,6 +198,17 @@ impl ModelService {
             .clone()
     }
 
+    /// Stop the sidecar but keep the installed model.
+    ///
+    /// The kernel calls this when nobody is listening any more: a phone that
+    /// went away is the only reason to have the judge at all, and a
+    /// `llama-server` holding several hundred megabytes for a desktop nobody is
+    /// watching is the memory the lease exists to give back. The next verdict,
+    /// if one is ever asked for, restarts it through `ensure_endpoint`.
+    pub async fn stop_sidecar(&self) {
+        self.runtime.stop().await;
+    }
+
     /// One model's weights, by the convention that keeps the directory readable:
     /// `<id>.gguf` beside `<id>.json`.
     pub fn weights_of(&self, id: &str, _previous: bool) -> PathBuf {

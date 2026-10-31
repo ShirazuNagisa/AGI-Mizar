@@ -32,6 +32,7 @@ pub mod server;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use agi_engine::{Engine, EngineError, EngineEvent};
 use agi_layout::model::{Backend, LabelMap, ModelManifest};
@@ -200,7 +201,28 @@ pub struct Core {
     /// never spawns. The first emitted frame comes from the engine's async loop,
     /// which is a runtime, and that is where it starts.
     heartbeat_started: Arc<std::sync::atomic::AtomicBool>,
+    /// How many phone sockets are open right now.
+    ///
+    /// Not "how many phones are paired": a phone in a pocket has a token and no
+    /// socket, and the judge is bought with sockets. The count is what the lease
+    /// in [`Core::phone_attached`] is made of.
+    phone_sockets: Arc<std::sync::atomic::AtomicUsize>,
+    /// When the phone count last moved.
+    ///
+    /// The clock the idle release measures from. Read only while the count is
+    /// zero, so a phone that never arrives costs one comparison.
+    phone_last_seen: Mutex<Instant>,
+    /// Whether the task that watches for an idle desktop is already running.
+    lease_guard: std::sync::atomic::AtomicBool,
 }
+
+/// How long a desktop may sit with no phone attached before the judge is let go.
+///
+/// Five minutes: long enough that a phone switching networks or a laptop lid
+/// closing and opening does not throw the model away and reload several hundred
+/// megabytes, short enough that a machine somebody walked away from is not
+/// holding a sidecar all night.
+pub const PHONE_IDLE_RELEASE: Duration = Duration::from_secs(300);
 
 impl Core {
     /// Build a kernel over the given engines.
@@ -208,7 +230,11 @@ impl Core {
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         let (frame_tx, _) = broadcast::channel(EVENT_BUFFER);
         let model_service = ModelService::open(models_dir());
-        let layout = layout_from(&model_service);
+        // The judge is **not** built here. A launch with nobody listening has no
+        // reason to hold a model, and the sidecar it starts is the largest thing
+        // this process owns. `phone_attached` installs it, `release_judge_if_idle`
+        // lets it go.
+        let manifest = layout_from(&model_service);
         Arc::new(Self {
             engines,
             store: RwLock::new(Store::default()),
@@ -220,10 +246,10 @@ impl Core {
             preferences_path: RwLock::new(None),
             account: account::AccountService::new(account_base()),
             relay_status: RwLock::new(None),
-            layout: RwLock::new(layout.0.clone()),
+            layout: RwLock::new(None),
             layouts: Arc::new(Mutex::new(HashMap::new())),
             model_service: Arc::clone(&model_service),
-            manifest: RwLock::new(model_service.manifest()),
+            manifest: RwLock::new(manifest),
             states: Arc::new(Mutex::new(HashMap::new())),
             frames: frame_tx.clone(),
             unavailable: RwLock::new(HashMap::new()),
@@ -231,7 +257,168 @@ impl Core {
             claude_hooks: RwLock::new(None),
             rescan: RwLock::new(None),
             heartbeat_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            phone_sockets: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            phone_last_seen: Mutex::new(Instant::now()),
+            lease_guard: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// A phone opened a socket: install the judge and hold it.
+    ///
+    /// The only moment the judge is built. Called from the phone server's socket
+    /// lifecycle, which is the one place that knows a device is actually
+    /// listening rather than merely paired.
+    pub fn phone_attached(self: &Arc<Self>) {
+        self.phone_sockets
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        *self
+            .phone_last_seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Instant::now();
+        self.install_judge();
+        self.start_lease_guard();
+    }
+
+    /// A phone's socket closed. The judge stays until the lease runs out.
+    pub fn phone_detached(&self) {
+        let mut count = self
+            .phone_sockets
+            .load(std::sync::atomic::Ordering::Acquire);
+        while count > 0 {
+            match self.phone_sockets.compare_exchange(
+                count,
+                count - 1,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => count = actual,
+            }
+        }
+        *self
+            .phone_last_seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Instant::now();
+    }
+
+    /// How many phone sockets are open, for diagnostics and tests.
+    pub fn phones_attached(&self) -> usize {
+        self.phone_sockets
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Whether a judge is installed right now.
+    pub fn has_judge(&self) -> bool {
+        self.layout
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+    }
+
+    /// Install the judge if a model is installed and none is up.
+    ///
+    /// Idempotent, and deliberately does not start the sidecar: that happens on
+    /// the first verdict, so a phone that connects and says nothing costs an
+    /// `Arc` rather than a process.
+    fn install_judge(&self) -> bool {
+        if self.has_judge() {
+            return false;
+        }
+        // An explicit URL still wins over an installed model, exactly as it did
+        // when this was built at launch.
+        if let Some(manifest) = env_manifest() {
+            let judge = manifest.judge();
+            *self
+                .layout
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                Some(Arc::new(LayoutService::new(judge)));
+            tracing::info!(model = %manifest.id, "layout: started from MIZAR_LAYOUT_URL");
+            return true;
+        }
+        let Some(manifest) = self.model_service.manifest() else {
+            return false;
+        };
+        let judge = Arc::new(models::SidecarJudge::new(Arc::clone(&self.model_service)));
+        *self
+            .layout
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(Arc::new(LayoutService::new(judge)));
+        tracing::info!(model = %manifest.id, "layout: started, a phone is attached");
+        true
+    }
+
+    /// Let the judge go when no phone has been attached for `idle_for`.
+    ///
+    /// Returns whether this call released anything, so a caller (or a test) can
+    /// tell "nothing to do" from "the model was dropped". Stopping the sidecar
+    /// only when something was actually released is what keeps a race between
+    /// two callers from killing a sidecar the other one just started.
+    pub async fn release_judge_if_idle(&self, idle_for: Duration) -> bool {
+        if self.phones_attached() != 0 {
+            return false;
+        }
+        let idle = self
+            .phone_last_seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .elapsed();
+        if idle < idle_for {
+            return false;
+        }
+        let released = self
+            .layout
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .is_some();
+        if released {
+            self.model_service.stop_sidecar().await;
+            tracing::info!(
+                idle_seconds = idle.as_secs(),
+                "layout: released, no phone has been attached"
+            );
+        }
+        released
+    }
+
+    /// Watch for an idle desktop, once per process.
+    ///
+    /// Skipped when there is no runtime to spawn on, and the "already started"
+    /// flag is set only after a task exists: a kernel constructed on the Tauri
+    /// main thread (or in a unit test) has no reactor, and a flag set there
+    /// would stop the guard from ever starting on the async side.
+    fn start_lease_guard(self: &Arc<Self>) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        if self
+            .lease_guard
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
+        }
+        let core = Arc::clone(self);
+        handle.spawn(async move {
+            loop {
+                // A quarter of the leash, so the release lands between five and
+                // five and a quarter minutes rather than up to ten.
+                tokio::time::sleep(PHONE_IDLE_RELEASE / 4).await;
+                core.release_judge_if_idle(PHONE_IDLE_RELEASE).await;
+            }
+        });
+    }
+
+    /// Install a judge that needs no model, for the lease tests.
+    #[cfg(test)]
+    fn install_test_judge(&self) {
+        let judge = Arc::new(agi_layout::RuleJudge);
+        *self
+            .layout
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(Arc::new(LayoutService::new(judge)));
     }
 
     /// Attach the tunnel's state, so the window can show whether it is up.
@@ -744,6 +931,13 @@ impl Core {
     /// Shadow mode: the answer lands in `layouts` and in the log, and nothing is
     /// pushed to clients. Promotion to the wire is a deliberate, separate change.
     fn judge_turn(self: &Arc<Self>, session: SessionKey, turn: Option<u32>, records: Vec<Record>) {
+        // Nobody is listening: a verdict nobody will read is the most expensive
+        // thing this process can produce. The structural settle above already
+        // answered the phone's question, and `phone_attached` installs the judge
+        // again the moment somebody is.
+        if self.phones_attached() == 0 {
+            return;
+        }
         let Some(service) = self.layout.read().ok().and_then(|l| l.clone()) else {
             return;
         };
@@ -1419,6 +1613,63 @@ mod tests {
     }
 
     #[test]
+    fn a_launch_with_nobody_listening_holds_no_judge() {
+        let core = Core::new(Vec::new());
+        assert!(
+            !core.has_judge(),
+            "the judge is bought by a phone socket, not by a launch"
+        );
+        assert_eq!(core.phones_attached(), 0);
+    }
+
+    #[test]
+    fn the_phone_count_is_a_count_and_never_goes_negative() {
+        let core = Core::new(Vec::new());
+        core.phone_attached();
+        core.phone_attached();
+        assert_eq!(core.phones_attached(), 2, "two sockets are two leases");
+        core.phone_detached();
+        assert_eq!(core.phones_attached(), 1);
+        core.phone_detached();
+        core.phone_detached();
+        assert_eq!(core.phones_attached(), 0, "an extra detach is not -1");
+    }
+
+    #[tokio::test]
+    async fn an_idle_desktop_lets_the_judge_go() {
+        let core = Core::new(Vec::new());
+        core.install_test_judge();
+        // A phone that is still attached is never idle, whatever the clock says.
+        core.phone_attached();
+        assert!(!core.release_judge_if_idle(Duration::ZERO).await);
+
+        core.phone_detached();
+        assert!(
+            core.release_judge_if_idle(Duration::ZERO).await,
+            "once nothing is attached the model is the desktop's to give back"
+        );
+        assert!(!core.has_judge());
+        assert!(
+            !core.release_judge_if_idle(Duration::ZERO).await,
+            "releasing nothing twice must not kill a sidecar somebody restarted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_phone_that_comes_back_installs_the_judge_again() {
+        let core = Core::new(Vec::new());
+        core.install_test_judge();
+        core.phone_detached();
+        assert!(core.release_judge_if_idle(Duration::ZERO).await);
+        assert!(!core.has_judge());
+
+        // The manifest is what a phone-less desktop kept; on a machine with no
+        // model installed there is nothing to rebuild, and that is not a failure.
+        core.phone_attached();
+        assert_eq!(core.phones_attached(), 1);
+    }
+
+    #[test]
     fn the_theme_is_remembered_between_launches() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("preferences.json");
@@ -1614,23 +1865,25 @@ mod tests {
 /// Order: an activated manifest (`MIZAR_MODEL`, or the only manifest present),
 /// then `MIZAR_LAYOUT_URL` as a one-off escape hatch for development. Nothing
 /// here knows what "Mizarllm" is — the manifest does.
-fn layout_from(service: &Arc<ModelService>) -> (Option<Arc<LayoutService>>, Option<ModelManifest>) {
+///
+/// Returns the manifest only. The service itself is built by `install_judge`,
+/// which runs when a phone attaches: a launch nobody is listening to does not
+/// get a model.
+fn layout_from(service: &Arc<ModelService>) -> Option<ModelManifest> {
     // An explicit URL still wins: it is how a sidecar started by hand, or a
     // remote one, gets used without being installed through the app.
     if let Some(manifest) = env_manifest() {
-        let judge = manifest.judge();
         tracing::info!(model = %manifest.id, version = %manifest.version, "layout: MIZAR_LAYOUT_URL");
-        return (Some(Arc::new(LayoutService::new(judge))), Some(manifest));
+        return Some(manifest);
     }
 
-    let Some(manifest) = service.manifest() else {
-        return (None, None);
-    };
-    // The judge asks the service for the port, so a sidecar started after this
-    // point is still reachable.
-    let judge = Arc::new(models::SidecarJudge::new(Arc::clone(service)));
-    tracing::info!(model = %manifest.id, version = %manifest.version, "layout: model activated");
-    (Some(Arc::new(LayoutService::new(judge))), Some(manifest))
+    let manifest = service.manifest()?;
+    tracing::info!(
+        model = %manifest.id,
+        version = %manifest.version,
+        "layout: model installed, started when a phone attaches"
+    );
+    Some(manifest)
 }
 
 /// A manifest built from `MIZAR_LAYOUT_URL`, for a sidecar started by hand.

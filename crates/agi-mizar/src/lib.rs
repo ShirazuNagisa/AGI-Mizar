@@ -5,7 +5,7 @@
 //! work over a network the operator does not control, so it is the only face with
 //! pairing, tokens and rate limits.
 //!
-//! Four modules:
+//! Six modules:
 //!
 //! - [`frames`] is the wire: five server frames, two client ones, and the
 //!   translation from our flat records back into the DSH event shape the shipped
@@ -13,6 +13,11 @@
 //! - [`pairing`] makes and normalises codes. Crockford base32, because a code is
 //!   read off a screen by a person.
 //! - [`store`] is the device roster. Tokens are stored only as SHA-256.
+//! - [`activity`] is what the phone's Live Activity says while this computer
+//!   works, and when a row has to leave the card.
+//! - [`net`] is the direct path's wire: the derived endpoint identity, the
+//!   packet format and the per-packet seal. Byte-compatible with the phone's
+//!   kernel, pinned by the shared fixture.
 //! - [`server`] binds the three routes and answers the methods this build has.
 //!
 //! ### What is not here yet
@@ -22,7 +27,9 @@
 //! for "this host is older than you", which is a better answer than a stub that
 //! looks like it worked.
 
+pub mod activity;
 pub mod frames;
+pub mod net;
 pub mod pairing;
 pub mod relay;
 pub mod server;

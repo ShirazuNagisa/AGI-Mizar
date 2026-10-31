@@ -98,12 +98,17 @@ impl LiveSocket {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .entry(device.clone())
             .or_insert(0) += 1;
+        // A phone is listening. This is the only signal the kernel has that
+        // anything out there will read a verdict, and it is what buys the judge
+        // its lease -- see `Core::phone_attached`.
+        server.core.phone_attached();
         Self { server, device }
     }
 }
 
 impl Drop for LiveSocket {
     fn drop(&mut self) {
+        self.server.core.phone_detached();
         let mut live = self
             .server
             .live
@@ -380,6 +385,66 @@ impl MizarServer {
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(_) => return,
+                    }
+                }
+            });
+        }
+
+        // The island. Two subscriptions, because a row starts on a session event
+        // and ends on a verdict: the tracker is the only thing that knows both,
+        // and it is also the only thing that knows the card changed, which is
+        // what keeps one turn from becoming a push per record.
+        {
+            let server = Arc::clone(self);
+            let mut events = server.core.subscribe();
+            let mut states = server.core.subscribe_states();
+            tokio::spawn(async move {
+                let mut tracker = crate::activity::Tracker::default();
+                loop {
+                    tokio::select! {
+                        event = events.recv() => match event {
+                            Ok(agi_protocol::api::ApiEvent::SessionUpdated { session }) => {
+                                if !session.running {
+                                    continue;
+                                }
+                                if let Some(card) = tracker.running(&session, activity_now()) {
+                                    server.publish_card(&card).await;
+                                }
+                            }
+                            Ok(agi_protocol::api::ApiEvent::SessionRemoved { session }) => {
+                                // An archived or vanished session: take it off the
+                                // card, but "a turn finished" would be a claim
+                                // nobody made.
+                                server.finish_card(&mut tracker, &session, false).await;
+                            }
+                            Ok(agi_protocol::api::ApiEvent::InteractionRequested { interaction }) => {
+                                if let Some(card) = tracker.approval_requested(&interaction) {
+                                    server.publish_card(&card).await;
+                                }
+                            }
+                            Ok(agi_protocol::api::ApiEvent::InteractionResolved { id }) => {
+                                if let Some(card) = tracker.approval_resolved(&id) {
+                                    server.publish_card(&card).await;
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(_) => return,
+                        },
+                        frame = states.recv() => match frame {
+                            Ok((session, bytes)) => {
+                                let Ok(frame) = agi_protocol::state_frame::StateFrame::decode(&bytes)
+                                else {
+                                    continue;
+                                };
+                                if frame.state.kind() != agi_protocol::session_state::StateKind::Terminal {
+                                    continue;
+                                }
+                                server.finish_card(&mut tracker, &session, true).await;
+                            }
+                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(_) => return,
+                        },
                     }
                 }
             });
@@ -1923,6 +1988,79 @@ impl MizarServer {
         }
     }
 
+    /// Publish what the island should say.
+    ///
+    /// Always `phase: "start"`, which the relay turns into an update on a phone
+    /// that already has a card. That is what lets this computer stay ignorant of
+    /// which phones are showing one -- the relay already knows, because a card
+    /// reports its own token.
+    async fn publish_card(&self, card: &crate::activity::Card) {
+        // An empty card is not "a card with no rows": it is the end of the
+        // activity, and `publish_turn_end` is the call that ends it.
+        if card.is_empty() {
+            return;
+        }
+        let body = crate::activity::activity_body(card, &self.foreground_devices());
+        if let Err(error) = self.relay_post("/push/v1/activity", body).await {
+            // A phone that cannot be reached is a worse app, not a broken host.
+            tracing::debug!("mizar: no live activity update — {error}");
+        }
+    }
+
+    /// Take a session off the card, and say the turn finished.
+    ///
+    /// The two facts are one call when the card is now empty: `endLiveActivity`
+    /// is what brings the island down, and a separate request would be a second
+    /// chance to deliver half of a pair that is only true together.
+    ///
+    /// - Parameters:
+    ///   - tracker: the card being edited.
+    ///   - session: the session whose turn ended.
+    ///   - tell: whether to send the notification at all.
+    async fn finish_card(
+        &self,
+        tracker: &mut crate::activity::Tracker,
+        session: &SessionKey,
+        tell: bool,
+    ) {
+        let title = tracker.title_of(session).unwrap_or_default();
+        let Some(card) = tracker.finished(session) else {
+            return;
+        };
+        if card.is_empty() {
+            if tell {
+                self.publish_turn_end(session, &title, true).await;
+            }
+            return;
+        }
+        self.publish_card(&card).await;
+        if tell {
+            self.publish_turn_end(session, &title, false).await;
+        }
+    }
+
+    /// One turn-end notification, and the end of the card when nothing is left.
+    async fn publish_turn_end(&self, session: &SessionKey, title: &str, end: bool) {
+        let body = crate::activity::turn_end_body(title, session, end, &self.foreground_devices());
+        if let Err(error) = self.relay_post("/push/v1/notify", body).await {
+            tracing::debug!("mizar: no turn-end notification — {error}");
+        }
+    }
+
+    /// The devices whose app is on screen.
+    ///
+    /// They draw their own card from their own state, so a start sent to one of
+    /// them is a second card on the Lock Screen. This is the list that keeps
+    /// that from happening.
+    fn foreground_devices(&self) -> Vec<String> {
+        self.foreground
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
+
     /// The session a frame names, if it names a valid one.
     fn session_of(&self, frame: &ClientFrame) -> Option<SessionKey> {
         frame
@@ -2520,6 +2658,18 @@ fn interaction_event(event: &agi_protocol::api::ApiEvent) -> Option<ServerFrame>
         )),
         _ => None,
     }
+}
+
+/// Epoch milliseconds, for a card row's clock.
+///
+/// The phone ticks from this instant, so it has to be wall-clock and not a
+/// monotonic reading: the two processes are on different clocks and the value
+/// crosses a process boundary.
+fn activity_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis() as i64)
+        .unwrap_or_default()
 }
 
 /// The OS name the phone displays.
