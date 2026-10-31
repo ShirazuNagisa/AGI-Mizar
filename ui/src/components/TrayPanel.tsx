@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { DeviceStatus, EngineStatus, Kernel, StateSnapshot } from '../api'
 import { ENGINE_MARKS, GearIcon, PowerIcon } from '../icons'
 import { AGENTS } from '../navigation'
@@ -34,19 +34,26 @@ export function TrayPanel({ kernel }: { kernel: Kernel }) {
     }
   }, [kernel])
 
-  // The window is sized to the content: a fixed height would show the empty
-  // half of it, which is what the menu did wrong.
+  // The window is sized to what it actually drew. Measuring the DOM rather than
+  // predicting row heights is the only version that cannot drift.
+  const root = useRef<HTMLDivElement | null>(null)
   useEffect(() => {
-    const rows = (snapshot?.engines.length ?? 3) + (snapshot?.devices.length ?? 0)
-    const height = 12 + 34 + rows * 28 + 12 + 1 + 30 + 30 + 8
-    void import('../shell').then(({ panelResize }) => void panelResize(height)).catch(() => {})
+    const element = root.current
+    if (element === null) return
+    const frame = requestAnimationFrame(() => {
+      const height = Math.ceil(element.getBoundingClientRect().height)
+      void import('../shell')
+        .then(({ panelResize }) => panelResize(height))
+        .catch(() => {})
+    })
+    return () => cancelAnimationFrame(frame)
   }, [snapshot])
 
   const engines: EngineStatus[] = snapshot?.engines ?? []
   const devices: DeviceStatus[] = snapshot?.devices ?? []
 
   return (
-    <div className="flex h-full w-full flex-col gap-1.5 bg-surface p-1.5 text-fg">
+    <div ref={root} className="flex w-full flex-col gap-1.5 bg-surface p-1.5 text-fg">
       <div className="flex flex-col">
         {AGENTS.map(({ engine, name }) => {
           const status = engines.find((entry) => entry.engine === engine)

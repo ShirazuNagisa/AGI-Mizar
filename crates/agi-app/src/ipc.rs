@@ -90,9 +90,10 @@ pub fn tray_panel_resize(app: AppHandle, height: u32) -> Result<(), String> {
     let Some(panel) = app.get_webview_window("tray-panel") else {
         return Err("the tray page is not open".to_string());
     };
-    let width = panel.outer_size().map(|size| size.width).unwrap_or(232);
+    // Logical, not physical: the height arrives in CSS pixels, and a Retina
+    // screen would otherwise draw the page at half the height asked for.
     panel
-        .set_size(tauri::PhysicalSize::new(width, height.max(120)))
+        .set_size(tauri::LogicalSize::new(232.0, f64::from(height.max(120))))
         .map_err(|error| error.to_string())
 }
 
