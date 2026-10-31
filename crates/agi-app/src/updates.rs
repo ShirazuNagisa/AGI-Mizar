@@ -146,26 +146,6 @@ pub fn watch(app: AppHandle) {
 /// menu event.
 ///
 /// This one answers out loud: the person just asked.
-pub fn spawn_check(app: AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        let info = check(app.clone()).await;
-        let message = if let Some(error) = info.error {
-            format!("Could not check for updates.\n\n{error}")
-        } else if info.available {
-            format!(
-                "AGI Mizar {} is available.",
-                info.latest.unwrap_or_default()
-            )
-        } else {
-            format!("AGI Mizar {} is the newest version.", info.current)
-        };
-        use tauri_plugin_dialog::DialogExt;
-        app.dialog()
-            .message(message)
-            .title("AGI Mizar Update")
-            .show(|_| {});
-    });
-}
 
 /// Download, verify and install, then come back up as the new version.
 pub async fn install(app: AppHandle) -> Result<(), String> {

@@ -10,7 +10,7 @@
 //! the list of everything the page can reach. Adding a command without adding a
 //! permission means it is denied; that is the intended failure.
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use crate::shell::{self, ShellSettings};
 use crate::{login_item, updates};
@@ -82,4 +82,26 @@ pub fn shell_login_item(enabled: bool) -> Result<bool, String> {
 #[tauri::command]
 pub fn app_quit(app: AppHandle) {
     app.exit(0);
+}
+
+/// The tray page sizes itself to its rows.
+#[tauri::command]
+pub fn tray_panel_resize(app: AppHandle, height: u32) -> Result<(), String> {
+    let Some(panel) = app.get_webview_window("tray-panel") else {
+        return Err("the tray page is not open".to_string());
+    };
+    let width = panel.outer_size().map(|size| size.width).unwrap_or(232);
+    panel
+        .set_size(tauri::PhysicalSize::new(width, height.max(120)))
+        .map_err(|error| error.to_string())
+}
+
+/// Hide the tray page and bring the window up on its settings page.
+#[tauri::command]
+pub fn tray_panel_open_settings(app: AppHandle) -> Result<(), String> {
+    if let Some(panel) = app.get_webview_window("tray-panel") {
+        let _ = panel.hide();
+    }
+    crate::tray::show_settings(&app);
+    Ok(())
 }

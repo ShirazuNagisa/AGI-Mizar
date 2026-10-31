@@ -105,3 +105,16 @@ export function shellSettingsSet(settings: ShellSettingsPatch): Promise<ShellSet
 export function quitApp(): Promise<void> {
   return call<void>('app_quit')
 }
+
+/**
+ * The tray panel's window sizes itself to its rows, because a fixed height
+ * shows the empty half — which is what the native menu did wrong.
+ */
+export function panelResize(height: number): Promise<void> {
+  return call<void>('tray_panel_resize', { height })
+}
+
+/** Hide the panel and bring the window up on its settings page. */
+export function panelOpenSettings(): Promise<void> {
+  return call<void>('tray_panel_open_settings')
+}

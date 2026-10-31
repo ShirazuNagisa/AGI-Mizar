@@ -251,6 +251,8 @@ fn main() {
             ipc::shell_settings_set,
             ipc::shell_login_item,
             ipc::app_quit,
+            ipc::tray_panel_resize,
+            ipc::tray_panel_open_settings,
         ])
         // A menu bar of File/Edit/View is the default, and it is not what this
         // window is: it has one screen for each agent and nothing to open. macOS
@@ -319,6 +321,26 @@ fn main() {
             }
 
             let window = builder.build()?;
+
+            // The tray page: a borderless window that lives under the status
+            // item. A native menu cannot put an icon left of a label, pin a lamp
+            // to the right, or hug the text's width — all three are the spec.
+            let panel_url = format!("{url}&panel=tray");
+            let panel_parsed: tauri::Url = panel_url.parse().expect("the panel URL is not a URL");
+            let panel = tauri::WebviewWindowBuilder::new(
+                app,
+                "tray-panel",
+                tauri::WebviewUrl::External(panel_parsed),
+            )
+            .title("AGI Mizar")
+            .inner_size(232.0, 300.0)
+            .decorations(false)
+            .resizable(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .visible(false)
+            .build()?;
+            panel.hide()?;
 
             // The three process switches, as stored. Applied after the window
             // exists so the Dock icon is present for the first frame and then

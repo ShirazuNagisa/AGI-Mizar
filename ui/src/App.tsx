@@ -16,6 +16,7 @@ import { AgentPage } from './components/AgentPage'
 import { LoginPage } from './components/LoginPage'
 import { Onboarding } from './components/Onboarding'
 import { SettingsPage } from './components/SettingsPage'
+import { TrayPanel } from './components/TrayPanel'
 
 const kernel = new Kernel()
 
@@ -378,6 +379,12 @@ export function App() {
       setAccountBusy(false)
     }
   }, [])
+
+  // The tray page is a window of its own, loading this same bundle. It draws
+  // nothing but the three lists.
+  if (new URLSearchParams(window.location.search).get('panel') === 'tray') {
+    return <TrayPanel kernel={kernel} />
+  }
 
   // The guide owns the whole window while it runs: no sidebar, no toolbar, and
   // no route around it — the snapshot says whether it is still owed.

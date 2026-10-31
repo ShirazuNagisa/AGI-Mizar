@@ -183,3 +183,13 @@ export const ENGINE_MARKS = {
   claude: ClaudeMark,
   codex: CodexMark,
 } as const
+
+/** A power glyph, for the one item that ends the process. */
+export function PowerIcon({ size = 18, className }: MarkProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className={className} aria-hidden>
+      <path d="M8 1.5v5" />
+      <path d="M4.2 3.8a5.2 5.2 0 1 0 7.6 0" />
+    </svg>
+  )
+}

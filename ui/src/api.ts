@@ -218,9 +218,17 @@ export interface AccountUser {
   devices: AccountDevice[]
 }
 
+/** A phone paired to this computer, as the kernel sees it. */
+export interface DeviceStatus {
+  name: string
+  online: boolean
+  lastSeenMs: number
+}
+
 export interface StateSnapshot {
   version: string
   engines: EngineStatus[]
+  devices: DeviceStatus[]
   sessions: Session[]
   interactions: Interaction[]
   /** Whether the first-run guide still has to be shown. */
