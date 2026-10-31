@@ -1,6 +1,7 @@
 import * as SelectPrimitive from '@radix-ui/react-select'
 import { CheckIcon, ChevronIcon } from '../../icons'
 import { cn } from '../../lib/utils'
+import { useIsOled } from '../../lib/oled'
 
 /**
  * A select that reads like a settings row: the chosen value on the right, the
@@ -18,10 +19,14 @@ export function SelectTrigger({
  children,
  ...props
 }: SelectPrimitive.SelectTriggerProps) {
+ const oled = useIsOled()
  return (
     <SelectPrimitive.Trigger
       className={cn(
-        'inline-flex h-8 min-w-[7.5rem] items-center justify-between gap-2 border border-ink bg-transparent px-2.5 text-[12px] text-ink outline-none hover:bg-ink hover:text-bg data-[placeholder]:text-ink',
+        'inline-flex h-8 min-w-[7.5rem] items-center justify-between gap-2 px-2.5 outline-none',
+        oled
+          ? 'border border-ink bg-transparent text-[12px] text-ink hover:bg-ink hover:text-bg data-[placeholder]:text-ink'
+          : 'rounded-md border border-border bg-surface text-[13px] text-fg hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-accent/60',
         className,
       )}
       {...props}
@@ -39,12 +44,17 @@ export function SelectContent({
  children,
  ...props
 }: SelectPrimitive.SelectContentProps) {
+ const oled = useIsOled()
  return (
     <SelectPrimitive.Portal>
       <SelectPrimitive.Content
         position="popper"
         sideOffset={4}
-        className={cn('z-50 min-w-[8rem] border border-ink bg-bg p-1', className)}
+        className={cn(
+          'z-50 min-w-[8rem] p-1',
+          oled ? 'border border-ink bg-bg' : 'rounded-lg border border-border bg-surface shadow-lg',
+          className,
+        )}
         {...props}
       >
         <SelectPrimitive.Viewport>{children}</SelectPrimitive.Viewport>
@@ -58,10 +68,14 @@ export function SelectItem({
  children,
  ...props
 }: SelectPrimitive.SelectItemProps) {
+ const oled = useIsOled()
  return (
     <SelectPrimitive.Item
       className={cn(
-        'relative flex h-7 cursor-default select-none items-center gap-2 pl-7 pr-2 text-[12px] text-ink outline-none data-[highlighted]:bg-ink data-[highlighted]:text-bg',
+        'relative flex h-7 cursor-default select-none items-center gap-2 pl-7 pr-2 outline-none',
+        oled
+          ? 'text-[12px] text-ink data-[highlighted]:bg-ink data-[highlighted]:text-bg'
+          : 'rounded text-[13px] text-fg data-[highlighted]:bg-surface-2',
         className,
       )}
       {...props}

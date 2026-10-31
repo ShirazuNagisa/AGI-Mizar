@@ -1,4 +1,5 @@
 import { cn } from '../../lib/utils'
+import { useIsOled } from '../../lib/oled'
 
 interface SwitchProps {
  checked: boolean
@@ -21,6 +22,32 @@ interface SwitchProps {
  * knob is not a circle because there are no circles in this theme.
  */
 export function Switch({ checked, onCheckedChange, disabled, label, id, className }: SwitchProps) {
+ const oled = useIsOled()
+ if (!oled) {
+   return (
+      <button
+        type="button"
+        id={id}
+        role="switch"
+        aria-checked={checked}
+        aria-label={label}
+        disabled={disabled}
+        onClick={() => onCheckedChange(!checked)}
+        className={cn(
+          'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border border-transparent transition-colors outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:pointer-events-none disabled:opacity-45',
+          checked ? 'bg-accent' : 'bg-border',
+          className,
+        )}
+      >
+        <span
+          className={cn(
+            'size-4 rounded-full bg-white shadow-sm transition-transform',
+            checked ? 'translate-x-[18px]' : 'translate-x-[2px]',
+          )}
+        />
+      </button>
+   )
+ }
  return (
     <button
       type="button"

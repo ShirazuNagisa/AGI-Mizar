@@ -3,6 +3,7 @@ import { cva, type VariantProps } from 'class-variance-authority'
 import type { ButtonHTMLAttributes } from 'react'
 import { cn } from '../../lib/utils'
 import { WipeLayers } from './wipe'
+import { useIsOled } from '../../lib/oled'
 
 /**
  * 1-bit buttons.
@@ -35,6 +36,27 @@ const button = cva(
   },
 )
 
+/** The classic control: soft fills, rounded corners, no sweep. */
+const classic = cva(
+  'inline-flex select-none items-center justify-center gap-1.5 rounded-lg text-[13px] font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:pointer-events-none disabled:opacity-45',
+  {
+    variants: {
+      variant: {
+        primary: 'bg-accent text-[#08161c] hover:opacity-90',
+        outline: 'border border-border bg-transparent text-fg hover:bg-surface-2',
+        subtle: 'bg-surface-2 text-fg hover:bg-border/60',
+        ghost: 'text-fg hover:bg-surface-2',
+      },
+      size: {
+        sm: 'h-7 px-2.5',
+        md: 'h-8 px-3',
+        lg: 'h-9 px-4 text-sm',
+      },
+    },
+    defaultVariants: { variant: 'outline', size: 'md' },
+  },
+)
+
 /** The label's box. The padding lives here so both copies share it exactly. */
 const label = {
   sm: 'gap-1.5 px-2.5',
@@ -56,6 +78,23 @@ export function Button({
   children,
   ...props
 }: ButtonProps) {
+  const oled = useIsOled()
+  if (!oled) {
+    const classes = cn(classic({ variant, size }), className)
+    if (asChild) {
+      return (
+        <Slot className={classes} {...props}>
+          {children}
+        </Slot>
+      )
+    }
+    return (
+      <button className={classes} {...props}>
+        {children}
+      </button>
+    )
+  }
+
   // `asChild` hands the element to the caller, so there is nowhere to put the
   // second copy of the label; that path keeps the plain colour swap.
   if (asChild) {

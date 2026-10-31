@@ -1,4 +1,5 @@
 import { cn } from '../../lib/utils'
+import { useIsOled } from '../../lib/oled'
 
 interface ProgressProps {
  /** 0–100; values outside the range are clamped. */
@@ -18,6 +19,7 @@ interface ProgressProps {
  * animates — colour transitions would invent intermediate shades.
  */
 export function Progress({ value, label, className }: ProgressProps) {
+ const oled = useIsOled()
  const percent = Math.max(0, Math.min(100, Math.round(value)))
  return (
     <div
@@ -26,10 +28,14 @@ export function Progress({ value, label, className }: ProgressProps) {
       aria-valuemin={0}
       aria-valuemax={100}
       aria-valuenow={percent}
-      className={cn('h-2 w-full overflow-hidden border border-ink', className)}
+      className={cn(
+        'h-2 w-full overflow-hidden',
+        oled ? 'border border-ink' : 'rounded-full bg-surface-2',
+        className,
+      )}
     >
       <div
-        className="h-full bg-ink transition-[width] duration-150"
+        className={cn('h-full transition-[width] duration-150', oled ? 'bg-ink' : 'rounded-full bg-accent')}
         style={{ width: `${percent}%` }}
       />
     </div>

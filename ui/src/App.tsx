@@ -9,6 +9,7 @@ import {
 } from './api'
 import { AGENTS, type Page } from './navigation'
 import { applyTheme, onSystemThemeChange, storeTheme, storedTheme, type ThemePreference } from './theme'
+import { OledScope } from './lib/oled'
 import { Sidebar } from './components/Sidebar'
 import { HomePage } from './components/HomePage'
 import { AgentPage } from './components/AgentPage'
@@ -363,6 +364,7 @@ export function App() {
   // no route around it — the snapshot says whether it is still owed.
   if (snapshot !== null && snapshot.onboarding?.done === false) {
     return (
+      <OledScope oled={theme === 'oled'}>
       <Onboarding
         kernel={kernel}
         account={account}
@@ -379,10 +381,12 @@ export function App() {
         onRefreshState={refreshState}
         onFinished={finishOnboarding}
       />
+      </OledScope>
     )
   }
 
   return (
+    <OledScope oled={theme === 'oled'}>
     <div className="flex h-full w-full overflow-hidden bg-bg text-fg">
       <Sidebar
         engines={snapshot?.engines ?? []}
@@ -439,5 +443,6 @@ export function App() {
         ) : null}
       </main>
     </div>
+    </OledScope>
   )
 }
