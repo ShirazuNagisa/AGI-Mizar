@@ -18,11 +18,45 @@
 //! message is re-emitted as `stream_final` with a snapshot, then the terminal
 //! state follows in the same batch. The phone sees: text arrived, it is the
 //! answer, the turn is over.
+//!
+//! The snapshot is the **last stretch of text**, not the whole turn glued
+//! together: a turn that narrated three paragraphs and then answered is answered
+//! by the last one. Re-sending everything turned one answer into four copies on
+//! the phone.
+//!
+//! ### Why every interval is journalled
+//!
+//! The frames above are a live channel: a phone that was disconnected while the
+//! turn ran has nothing to reconstruct from, because the host keeps no history of
+//! what it streamed. So each interval opened in the current turn is also kept in
+//! a [`JournalEntry`], text included, and `session.stream` hands the whole turn
+//! back on request. It is bounded ([`JOURNAL_MAX_BYTES`], oldest first) so a
+//! pathological turn cannot grow the kernel without limit.
 
 use agi_protocol::state_frame::StateFrame;
 use agi_protocol::SessionState;
 
 use crate::{state_of_turn, Facts, Live, State};
+
+/// How much streamed text one turn may keep for replay.
+///
+/// Every entry's text counts towards it; past the cap the oldest entries are
+/// dropped and [`StateMachine::truncated`] says so, so the phone can tell "this
+/// replay starts mid-turn" from "the turn was this short".
+pub const JOURNAL_MAX_BYTES: usize = 256 * 1024;
+
+/// One interval of the current turn, as the phone should see it replayed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalEntry {
+    /// The interval this entry opened.
+    pub interval: u32,
+    /// The state the interval was in.
+    pub state: SessionState,
+    /// Text carried by the interval, in the order it was emitted.
+    pub text: String,
+    /// Whether the interval is the turn's final answer.
+    pub final_: bool,
+}
 
 /// One session's state channel.
 #[derive(Debug)]
@@ -33,8 +67,14 @@ pub struct StateMachine {
     text_seq: u32,
     /// Text emitted in the current interval, for the snapshot on re-entry.
     text: String,
-    /// Text seen since the last interval change, for the final-answer re-send.
-    pending_text: String,
+    /// Every interval of the current turn, oldest first, for replay.
+    journal: Vec<JournalEntry>,
+    /// Bytes of text currently held in `journal`.
+    journal_bytes: usize,
+    /// Whether the oldest journal entries were dropped to stay within budget.
+    truncated: bool,
+    /// The turn the journal belongs to, once a turn has started.
+    turn: Option<u32>,
     started: bool,
 }
 
@@ -51,7 +91,10 @@ impl StateMachine {
             interval: 0,
             text_seq: 0,
             text: String::new(),
-            pending_text: String::new(),
+            journal: Vec::new(),
+            journal_bytes: 0,
+            truncated: false,
+            turn: None,
             started: false,
         }
     }
@@ -66,23 +109,90 @@ impl StateMachine {
         self.interval
     }
 
+    /// Bytes of text the current interval has emitted.
+    pub fn text_seq(&self) -> u32 {
+        self.text_seq
+    }
+
+    /// The turn the journal belongs to, once one has started.
+    pub fn turn(&self) -> Option<u32> {
+        self.turn
+    }
+
+    /// The turn's intervals so far, oldest first, for replay.
+    pub fn journal(&self) -> &[JournalEntry] {
+        &self.journal
+    }
+
+    /// Whether the oldest intervals were dropped to stay within budget.
+    pub fn truncated(&self) -> bool {
+        self.truncated
+    }
+
+    /// The last stretch of text the turn emitted.
+    ///
+    /// This -- not the whole turn concatenated -- is the answer: the engine sends
+    /// one message at a time and only the final one is the answer, so a turn that
+    /// narrated before answering must not have its narration folded into it.
+    pub fn last_text_run(&self) -> Option<&str> {
+        self.last_run_entry().map(|entry| entry.text.as_str())
+    }
+
+    /// The journal entry the last stretch of text is in.
+    fn last_run_entry(&self) -> Option<&JournalEntry> {
+        self.journal
+            .iter()
+            .rev()
+            .find(|entry| entry.state.carries_text() && !entry.text.is_empty())
+    }
+
     /// Move to a state, opening a new interval when it is actually different.
     ///
     /// Re-asserting the same state is not a change: the phone keeps its text and
     /// the heartbeat does the renewing.
     fn enter(&mut self, state: SessionState) -> Option<StateFrame> {
         if self.started && self.state == state {
-            // Same interval: the first frame of a new turn still needs to
-            // announce the text buffer reset, but an unchanged state does not.
             return None;
         }
+        Some(self.open(state))
+    }
+
+    /// Open a new interval, whatever state was on the wire before.
+    ///
+    /// Always journals: the journal is "the intervals of this turn", and a turn
+    /// starts one even when the state code happens to be the same as the previous
+    /// turn's last.
+    fn open(&mut self, state: SessionState) -> StateFrame {
         self.interval = self.interval.wrapping_add(1);
         self.state = state;
         self.text_seq = 0;
         self.text.clear();
         self.started = true;
-        let frame = StateFrame::begin(state, self.interval, &self.text);
-        Some(frame)
+        self.journal.push(JournalEntry {
+            interval: self.interval,
+            state,
+            text: String::new(),
+            final_: false,
+        });
+        StateFrame::begin(state, self.interval, &self.text)
+    }
+
+    /// A turn began. Clears the last turn's journal and announces the new one.
+    ///
+    /// `None` for a repeat of the turn already running: engines re-announce a
+    /// turn they have already started, and nothing has changed.
+    pub fn on_turn_start(&mut self, turn: u32) -> Option<StateFrame> {
+        if self.turn == Some(turn) {
+            return None;
+        }
+        self.turn = Some(turn);
+        self.journal.clear();
+        self.journal_bytes = 0;
+        self.truncated = false;
+        // `open`, not `enter`: a new turn always gets a new interval, because the
+        // phone's text buffer belongs to the interval and it has to be reset even
+        // if the previous turn ended while this state was already on the wire.
+        Some(self.open(SessionState::Thinking))
     }
 
     /// A live signal from the record stream.
@@ -113,7 +223,11 @@ impl StateMachine {
         );
         self.text_seq += chunk.len() as u32;
         self.text.push_str(chunk);
-        self.pending_text.push_str(chunk);
+        if let Some(entry) = self.journal.last_mut() {
+            entry.text.push_str(chunk);
+            self.journal_bytes += chunk.len();
+        }
+        self.trim();
         out.push(frame);
         out
     }
@@ -125,28 +239,53 @@ impl StateMachine {
 
         // A finished answer is worth naming: the text already went out as
         // narration, so re-announce it as the answer before the terminal frame.
-        let is_answer = state == SessionState::Completed && !self.pending_text.is_empty();
-        if is_answer {
-            if let Some(frame) = self.enter(SessionState::StreamFinal) {
-                out.push(frame);
+        // `final_` on the journal is what says it has already happened: a turn is
+        // settled twice (structure first, model verdict second) and only the
+        // first one may re-announce.
+        let announced = self.last_run_entry().is_some_and(|entry| entry.final_);
+        let answer = self.last_text_run().map(str::to_string);
+        if state == SessionState::Completed && !announced {
+            if let Some(text) = answer {
+                // `enter` opens the interval -- it may not *emit* its frame: the
+                // `begin` frame of a text-carrying state is an empty snapshot, and
+                // a phone that watches intervals would open an empty answer block
+                // for it, then fill that block with the same text it already drew
+                // as narration. The snapshot below is the interval's first frame
+                // instead, which is what the protocol asks a first frame to be.
+                if self.enter(SessionState::StreamFinal).is_some() {
+                    // The snapshot *is* this interval's text, so the journal says
+                    // so too: a replay draws the answer from here rather than
+                    // gluing the turn's narration back together.
+                    let added = match self.journal.last_mut() {
+                        Some(entry) => {
+                            entry.text = text.clone();
+                            entry.final_ = true;
+                            entry.text.len()
+                        }
+                        None => 0,
+                    };
+                    self.journal_bytes += added;
+                    self.trim();
+                    self.text = text.clone();
+                    self.text_seq = text.len() as u32;
+                    out.push(StateFrame::snapshot(
+                        SessionState::StreamFinal,
+                        self.interval,
+                        0,
+                        &text,
+                    ));
+                    out.push(StateFrame::finish(
+                        SessionState::StreamFinal,
+                        self.interval,
+                        text.len() as u32,
+                    ));
+                }
             }
-            out.push(StateFrame::snapshot(
-                SessionState::StreamFinal,
-                self.interval,
-                0,
-                &self.pending_text,
-            ));
-            out.push(StateFrame::finish(
-                SessionState::StreamFinal,
-                self.interval,
-                self.pending_text.len() as u32,
-            ));
         }
 
         if let Some(frame) = self.enter(state) {
             out.push(frame);
         }
-        self.pending_text.clear();
         out
     }
 
@@ -161,6 +300,19 @@ impl StateMachine {
     /// The text this machine has emitted in the current interval.
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// Drop the oldest intervals until the journal fits its budget.
+    ///
+    /// The newest entry always survives, even when it alone is over budget: an
+    /// empty replay tells the phone nothing, and the phone still has the last
+    /// interval on the wire.
+    fn trim(&mut self) {
+        while self.journal_bytes > JOURNAL_MAX_BYTES && self.journal.len() > 1 {
+            let dropped = self.journal.remove(0);
+            self.journal_bytes = self.journal_bytes.saturating_sub(dropped.text.len());
+            self.truncated = true;
+        }
     }
 }
 
@@ -219,14 +371,16 @@ mod tests {
         m.on_text("改好了，测试通过。");
         let frames = m.on_turn_end(&facts("completed", "改好了，测试通过。"), Some(State::Done));
 
-        // stream_final begin + snapshot + finish + completed
-        assert_eq!(frames.len(), 4, "{frames:?}");
+        // snapshot + finish + completed. No empty `begin` before the snapshot:
+        // a phone that opens a block per interval would draw the answer twice.
+        assert_eq!(frames.len(), 3, "{frames:?}");
         assert_eq!(frames[0].state, SessionState::StreamFinal);
-        assert_eq!(frames[1].text, "改好了，测试通过。");
-        assert!(frames[1].flags.has(Flags::SNAPSHOT));
-        assert!(frames[2].flags.has(Flags::FINAL));
-        assert_eq!(frames[3].state, SessionState::Completed);
-        assert!(!frames[3].state.needs_heartbeat());
+        assert_eq!(frames[0].text, "改好了，测试通过。");
+        assert!(frames[0].flags.has(Flags::SNAPSHOT));
+        assert_eq!(frames[1].state, SessionState::StreamFinal);
+        assert!(frames[1].flags.has(Flags::FINAL));
+        assert_eq!(frames[2].state, SessionState::Completed);
+        assert!(!frames[2].state.needs_heartbeat());
     }
 
     #[test]
@@ -260,5 +414,148 @@ mod tests {
         m.on_live(Live::Thinking).unwrap();
         m.on_text("第二轮");
         assert_eq!(m.text(), "第二轮", "text must not leak across turns");
+    }
+
+    #[test]
+    fn the_journal_keeps_every_interval_of_the_turn() {
+        let mut m = StateMachine::new();
+        let first = m.on_turn_start(7).unwrap();
+        assert_eq!(first.state, SessionState::Thinking);
+        assert_eq!(m.turn(), Some(7));
+
+        m.on_live(Live::Tool);
+        m.on_text("我先看一下…");
+        m.on_live(Live::Tool);
+        m.on_text("改好了。");
+
+        let journal = m.journal();
+        assert_eq!(journal.len(), 5, "{journal:?}");
+        assert_eq!(journal[0].state, SessionState::Thinking);
+        assert_eq!(journal[1].state, SessionState::Tool);
+        assert_eq!(journal[2].state, SessionState::StreamNarration);
+        assert_eq!(journal[2].text, "我先看一下…");
+        assert_eq!(journal[3].state, SessionState::Tool);
+        assert_eq!(journal[4].text, "改好了。");
+        // Intervals are the ones the frames carry, and none is an answer yet.
+        assert!(journal.iter().all(|entry| !entry.final_));
+        assert!(journal
+            .windows(2)
+            .all(|pair| pair[0].interval < pair[1].interval));
+        assert!(!m.truncated());
+
+        // A second chunk of the same message lands in the same entry.
+        m.on_text("测试也过了。");
+        assert_eq!(m.journal().len(), 5);
+        assert_eq!(m.journal()[4].text, "改好了。测试也过了。");
+    }
+
+    #[test]
+    fn the_journal_starts_over_with_a_new_turn() {
+        let mut m = StateMachine::new();
+        m.on_turn_start(3).unwrap();
+        m.on_text("第一轮的话");
+        m.on_turn_end(&facts("completed", "第一轮的话"), Some(State::Done));
+        assert!(m.journal().len() > 1, "the first turn left a journal");
+
+        let second = m.on_turn_start(4).unwrap();
+        assert_eq!(
+            second.interval,
+            m.interval(),
+            "a new turn opens an interval"
+        );
+        assert_eq!(m.turn(), Some(4));
+        assert_eq!(m.journal().len(), 1, "{:?}", m.journal());
+        assert_eq!(m.journal()[0].interval, m.interval());
+        assert_eq!(m.journal()[0].state, SessionState::Thinking);
+        assert!(m.last_text_run().is_none(), "nothing carried over");
+
+        // Engines re-announce a turn they already started; that is not a new one.
+        assert!(m.on_turn_start(4).is_none());
+        assert_eq!(m.journal().len(), 1);
+    }
+
+    #[test]
+    fn the_answer_snapshot_is_the_last_stretch_of_text() {
+        let mut m = StateMachine::new();
+        m.on_turn_start(1).unwrap();
+        m.on_text("我先看一下…");
+        m.on_live(Live::Tool);
+        m.on_text("改好了。");
+
+        let frames = m.on_turn_end(
+            &facts("completed", "我先看一下…改好了。"),
+            Some(State::Done),
+        );
+        let snapshot = frames
+            .iter()
+            .find(|frame| {
+                frame.state == SessionState::StreamFinal
+                    && frame.flags.has(Flags::SNAPSHOT)
+                    && !frame.text.is_empty()
+            })
+            .expect("the answer is re-announced");
+        assert_eq!(
+            snapshot.text, "改好了。",
+            "the answer is the last message, not the turn glued together"
+        );
+
+        // The journal says the same thing: the final interval holds the answer.
+        let final_entry = m
+            .journal()
+            .iter()
+            .find(|entry| entry.final_)
+            .expect("the answer is marked as the answer");
+        assert_eq!(final_entry.state, SessionState::StreamFinal);
+        assert_eq!(final_entry.text, "改好了。");
+        assert_eq!(m.last_text_run(), Some("改好了。"));
+        assert_eq!(
+            m.journal().last().unwrap().state,
+            SessionState::Completed,
+            "the terminal interval closes the turn after the answer"
+        );
+    }
+
+    #[test]
+    fn a_settled_turn_is_not_announced_twice() {
+        let mut m = StateMachine::new();
+        m.on_turn_start(1).unwrap();
+        m.on_text("改好了。");
+        let facts = facts("completed", "改好了。");
+        assert_eq!(m.on_turn_end(&facts, Some(State::Done)).len(), 3);
+
+        // The model's verdict lands a moment later and agrees with the structure:
+        // the answer must not be re-announced as a second copy.
+        assert!(m.on_turn_end(&facts, Some(State::Done)).is_empty());
+        assert_eq!(
+            m.journal().iter().filter(|entry| entry.final_).count(),
+            1,
+            "{:?}",
+            m.journal()
+        );
+    }
+
+    #[test]
+    fn a_turn_over_budget_keeps_the_newest_text_and_says_so() {
+        let mut m = StateMachine::new();
+        m.on_turn_start(1).unwrap();
+        let chunk = "x".repeat(64 * 1024);
+        for _ in 0..6 {
+            m.on_live(Live::Tool);
+            m.on_text(&chunk);
+        }
+
+        assert!(m.truncated(), "6 x 64 KiB is over the 256 KiB budget");
+        let kept: usize = m.journal().iter().map(|entry| entry.text.len()).sum();
+        assert!(kept <= JOURNAL_MAX_BYTES, "kept {kept} bytes");
+        assert_eq!(
+            m.journal().last().unwrap().text.len(),
+            chunk.len(),
+            "the newest interval always survives"
+        );
+        assert!(
+            m.journal().len() < 12,
+            "the oldest intervals were dropped: {:?}",
+            m.journal().len()
+        );
     }
 }

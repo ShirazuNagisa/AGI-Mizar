@@ -37,7 +37,7 @@ use async_trait::async_trait;
 pub mod model;
 pub mod states;
 pub use model::{Backend, LabelMap, ManifestError, ManifestJudge, ModelManifest, ModelRegistry};
-pub use states::StateMachine;
+pub use states::{JournalEntry, StateMachine, JOURNAL_MAX_BYTES};
 
 use serde::{Deserialize, Serialize};
 

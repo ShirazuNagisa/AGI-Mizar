@@ -144,7 +144,7 @@ mizar://pair?h=100.64.0.1:19390&c=K7QP-3M2X&n=Mac-mini&v=1
 
 ## 方法表
 
-31 个方法（自建中继时没有 `relay.set`，为 30 个）。`payload` 里的键：
+32 个方法（自建中继时没有 `relay.set`，为 31 个）。`payload` 里的键：
 
 ### 主机与会话
 
@@ -156,6 +156,7 @@ mizar://pair?h=100.64.0.1:19390&c=K7QP-3M2X&n=Mac-mini&v=1
 | `workspace.list` | `{}` | `{items: [WorkspaceRow], complete}` —— DSH **当前**拥有的工作区（作用域生效时**只有一个 agent 的**，见「连接作用域」），按 DSH 自己的显示顺序（插件直接读 `ctx.workspaceRegistry.list()`，和电脑侧边栏同源），每个工作区带 `sessionIds`：DSH 认可的归属关系，只有主机知道，手机不该自己拿目录去猜；**已归档的会话不在其中**（DSH 的归档保留归属槽位，以便取消归档回到原位，所以过滤在插件出口做）。会话比工作区长命：删掉工作区只移除注册表条目，会话日志还在磁盘上，所以 `session.list` 仍会返回那些目录的会话，手机再按目录分组就会一直留着它们。<br>`sessionIds` **缺省**和 `[]` 是两回事：`[]` 是「DSH 说这里没有会话」，缺省是「主机没说」，只有后者才允许退回按目录匹配。<br>`complete` 说这份清单**是不是完整读到了**：只有 `true` 才允许丢弃已经不在清单里的工作区，因为「主机答不上来」和「主机一个都没有」都是空数组。任何一条读不出来的记录都按「没答」处理（返回 `{items: [], complete: false}`）——主机还可以用 `workspace/follow` 的 baseline 兜底；两条路都不行时手机退回按目录分组。 |
 | `session.messages` | `sessionId`, `parentSessionId?`, `maxMessages?`, `beforeSeq?`, `afterSeq?`（见下） | `{sessionId, asOfSeq, records[], hasMore, context}` —— **只发总结，不发过程**。一页里只保留：`turn/start`、`turn/end`、每个 `step/start`（只用来数步骤，约 100 字节）、人写的 `user/message`，以及**每一轮里模型最后那条有正文的 `assistant/message`**。逐步叙述、工具调用/结果、流式 attempt，以及**还没结束的那一轮的中间回复**，全部不发 —— 后两项正是最大的一块。原因：手机端只按「总结 + 状态」渲染，全量历史经中继太吃服务器带宽。`asOfSeq`（分页切点）取自 `session/follow` 首帧的 `cursor`，这是 DSH 自己对 `throughSeq` 的定义（"Inclusive log cut obtained from the corresponding follow opening frame"），原来用 `session/projections` 的 `asOfSeq` 会滞后于日志头，导致刚发出的那一轮不在页里、手机上就没有「AI 正在工作」那一行。<br>`parentSessionId` 只在读**子代理的页**时传（见下「子代理的页」）。<br>**`context` 是每次刷新都必须带的字段**：上下文窗口占用及其明细（`{window, pressureTokens, projectedTokens, percent, breakdown}`，与 `session.stats` 的 `context` 使用同一套推导），**全量页和增量页都带**，这样屏幕上方那一圈占用和展开页的明细随任何一次刷新一起更新，不再依赖一次增量刷新不会发的 `session.stats`。没有 `contextPressure` projection 的部署回 `null`（未知，不是 0）；老宿主不答这个键、老客户端忽略它。 |
 | `session.activity` | `sessionId`, `maxEntries?`（默认 200，最多 300）, `beforeSeq?`, `turn?`（见下） | `{sessionId, asOfSeq, turn, entries[], hasMore, oldestSeq}` —— **只返回正在跑的那一轮的紧凑过程**，付费账户的「全量细节」来源：`entries` 里每行是 `{id, seq, at, kind, title, text}`，`kind` 为 `thinking` / `command` / `output` / `tool`，`text` 一行、最多 240 字符；没有正在跑的轮次时 `turn: null, entries: [], hasMore: false`。详细语义见下。 |
+| `session.stream` | `sessionId` | `{sessionId, turn, state, interval, textSeq, truncated, entries[]}` —— 把**本轮已产出的状态区间**整轮重放给手机：`entries` 由旧到新，每项是 `{interval, state, text, final}`；`state`/`interval`/`textSeq` 是此刻线上的那一个区间，`turn` 可为 `null`。只读方法，不唤醒 agent。见下「`session.stream`：断线期间的状态区间」。 |
 | `session.stats` | `sessionId` | `{sessionId, asOfSeq, stats}` —— `stats` 里的每个字段来自主机各自的 projection，**谁有就答谁**：agent 还没跑过的会话没有 `context`（上下文占用）也没有 `title`（标题要等模型读完对话才有），只有 `tokenUsage` 一类。所以「这次的帧比上一帧少几个字段」是**正常回答**，不是失败——实测一台真主机上 12 个会话里有 4 个是这样（缺 `context, title`）。手机必须把新帧**合并**进旧帧（有新值用新值，没有的保留），直接替换会把屏幕上已经画出来的标题、模型、上下文用量抹掉。 |
 | `session.create` | `cwd?` \| `workspaceId?` \| `sessionId?`, `agentPreset?` | `{sessionId, agentPreset}` —— 传 `cwd` 时插件会先把它解析成**工作区**（没有就建一个），再把工作区 id 交给 DSH。原因见下。 |
 | `session.rename` | `sessionId`, `title` | `{renamed: true}` |
@@ -167,7 +168,7 @@ mizar://pair?h=100.64.0.1:19390&c=K7QP-3M2X&n=Mac-mini&v=1
 
 - 两处声明，优先级分明：**账户流程把选择写进令牌**（`account:<账户>:<手机>:<engine>`，由中继 provision，重连也带着），**扫码配对的令牌没有这层**，所以由 `hello` 顶层的 `engine` 字段按连接声明。令牌里的作用域**永远优先**：拿着 dsh 作用域的令牌在 `hello` 里写 `claude` 也只会看到 dsh —— 这是「只让这台手机的所选 agent 的内容离开这台机器」的承诺，不能由客户端放宽。
 - 不带任何作用域的老连接照旧看到三份合并列表（向后兼容，不是错误）。
-- 作用域生效时，主机侧统一过滤：`session.list`、`workspace.list`（**行里带 `engine` 字段**，`workspaceId` 前缀也是它）、`model.catalog`、`permissions.catalog`、`session.create`、`interactions.pending`、状态通道与 `approval.request` 事件；**按 sessionId 直呼**的每个方法（`session.messages`/`stats`/`activity`/`archive`/`fork`/`prompt`/`cancel`/`model.set`/`permission.set`/`file.*`）也会拒绝别的 agent 的 id，而且**与「没有这个会话」回答得一模一样**，否则手机可以靠试探枚举出机器上还跑着哪些 agent。`approval.answer`/`question.answer` 同理：不在作用域里的 requestId 回 `REMOTE_ERROR`。
+- 作用域生效时，主机侧统一过滤：`session.list`、`workspace.list`（**行里带 `engine` 字段**，`workspaceId` 前缀也是它）、`model.catalog`、`permissions.catalog`、`session.create`、`interactions.pending`、状态通道与 `approval.request` 事件；**按 sessionId 直呼**的每个方法（`session.messages`/`stats`/`stream`/`activity`/`archive`/`fork`/`prompt`/`cancel`/`model.set`/`permission.set`/`file.*`）也会拒绝别的 agent 的 id，而且**与「没有这个会话」回答得一模一样**，否则手机可以靠试探枚举出机器上还跑着哪些 agent。`approval.answer`/`question.answer` 同理：不在作用域里的 requestId 回 `REMOTE_ERROR`。
 - `host.info` 因此多了两个字段：`engines`（这台电脑托管的 agent，`[{id,label,connected,detail}]`，**不随作用域收窄**——手机要能据此提供切换）和 `engine`（**这条连接实际绑定的 agent**，`null` 表示没有作用域）。免鉴权的 `GET /mizar/v1/hello` 也带 `engines`，供配对后立刻选择。
 - 全是**新增可选字段**，老宿主不答、老客户端忽略，**不需要升 `PROTOCOL_VERSION`**。
 
@@ -271,6 +272,61 @@ session/agent-busy: subagent Sessions require their durable parent address
 
 这是**新增方法**：老宿主对未知方法回 `NOT_IMPLEMENTED`（客户端据此知道这台电脑的插件太旧），
 老客户端不会调用它，所以**不需要升 `PROTOCOL_VERSION`**。
+
+### `session.stream`：断线期间的状态区间
+
+状态通道（二进制状态帧）**只说「现在」**：每次状态变化开一个新区间（`interval`），正文按
+`stream_narration` 追加，回合结束时最后一段正文再作为 `stream_final` 快照重发一次。手机断线
+期间帧全部丢失，重连后状态通道从空开始——**那一段内容就永久缺了**。`session.stream` 补的就
+是这一段：桌面端为每个会话保留**本轮已产出的区间日志（journal）**，手机一问就整轮回放。
+
+- **journal 是本轮所有 interval 的流水**：每开一个新区间（`thinking` 1、`tool` 2、
+  `stream_narration` 5、`stream_final` 6、终态 11 等）就多一条，`entries` 按**由旧到新**给出。
+  每项 `{interval, state, text, final}`：`state` 是数字状态码；`text` 是该区间累积的正文
+  （非正文状态为空串）；`final: true` 标记这条就是**本轮的最终答复**。
+- **每轮开始清空**：`turn/start` 换了轮次号就把上一条的 journal 丢掉重来（`turn/start` 重复
+  同一轮次没有变化）。所以 `entries` 永远只描述**一轮**，不是整个会话。
+- **上限 256 KiB**：所有 entry 的 `text` 字节和超了就**从最旧的开始丢**，并把 `truncated`
+  置 `true`。最后一条永远保留（哪怕它自己就超了），否则回放等于什么都没说。`truncated: true`
+  的意思是「这份回放从中途开始」，不是「这一轮很短」。
+- **`turn` / `state` / `interval` / `textSeq` 是此刻线上的那一个区间**：`turn` 可为 `null`
+  （这台电脑上还没跑过被记录的一轮），`state` 是状态码（`0` = idle），`interval` 是该区间号，
+  `textSeq` 是该区间已发出的正文字节数。`entries` 最后一条的 `interval` 就是 `interval`：日志记
+  的正是线上开过的区间，裁剪只丢最旧的那一端。
+- **没有 journal 不算错误**：这台电脑上从未跑过（老会话、只存在于引擎侧的会话、刚重启）就回
+  `{turn: null, state: 0, interval: 0, textSeq: 0, truncated: false, entries: []}`，而不是报错。
+  手机据此保持「没有可重放的内容」，不要把它当成失败去重试。
+- **作用域与其它按 `sessionId` 直呼的方法一致**：不属于这条连接所选 agent 的会话被拒绝，而且
+  与「没有这个会话」回答得一模一样。缺 `sessionId` 是 `MALFORMED_FRAME`。
+- 这是**纯读**方法：不唤醒 agent、不改会话状态、不影响状态通道本身（帧格式与 5 秒心跳都没变）。
+
+```jsonc
+// 请求
+{ "v": 1, "type": "session.stream", "id": "m1", "payload": { "sessionId": "dsh:abc" } }
+
+// 回答
+{ "v": 1, "type": "ok", "id": "m1", "result": {
+  "sessionId": "dsh:abc",
+  "turn": 12, "state": 6, "interval": 37, "textSeq": 120,
+  "truncated": false,
+  "entries": [
+    { "interval": 30, "state": 1, "text": "",            "final": false },
+    { "interval": 31, "state": 2, "text": "",            "final": false },
+    { "interval": 32, "state": 5, "text": "我先看一下…", "final": false },
+    { "interval": 33, "state": 6, "text": "改好了。",     "final": true  }
+  ] } }
+```
+
+**「最终答复」的语义：回合结束的 `stream_final` 快照只含最后一段正文。** 引擎是一条消息一条
+消息给的，一轮里可能先有旁白、再有工具、最后才是答复；老宿主把这一轮所有正文拼起来当答复
+重发一遍，手机于是把同一段话画了好几遍。现在快照只取**最后一段有正文的区间**：
+
+- 单条消息的一轮行为不变（最后一段就是那一条），`stream_final` 快照 = 它的正文。
+- 多段正文的一轮，快照只有最后那段；`entries` 里前面的旁白仍然在（它们本来就是那一轮发生过的
+  内容），**手机在重放时把 `final: true` 那条当作答复展示**即可——若它与上一条旁白的正文相同
+  （结束快照就是当前正开的那个流区间），就地「提升」成答复，不要并排画两遍。
+- 回合结束只会发一次这样的快照：结构判定与模型判定先后两次落定（`settle`），只有第一次会
+  重发，第二次什么都不发。
 
 ### 模型与权限
 

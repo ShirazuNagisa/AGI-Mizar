@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 
 use agi_engine::{Engine, EngineError, EngineEvent};
 use agi_layout::model::{Backend, LabelMap, ModelManifest};
-use agi_layout::{facts_from_turn, Item, Layout, LayoutService, Live, StateMachine};
+use agi_layout::{facts_from_turn, Item, JournalEntry, Layout, LayoutService, Live, StateMachine};
 use agi_protocol::api::{
     ApiEvent, Command, CommandResponse, EngineStatus, OnboardingView, StateSnapshot, UsageOverview,
 };
@@ -147,6 +147,27 @@ type HookInstaller = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 /// Looks for agents again, given the ones already hosted.
 type RescanFn =
     Arc<dyn Fn(&[EngineId]) -> (Vec<Arc<dyn Engine>>, HashMap<EngineId, String>) + Send + Sync>;
+
+/// One turn's streamed intervals, as a phone that missed them can read them back.
+///
+/// The live state channel is "what now"; this is "what happened", so a phone that
+/// was disconnected while the turn ran can rebuild the turn instead of finding an
+/// empty interval and a hole in the conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamReplay {
+    /// The turn these intervals belong to, if one has started.
+    pub turn: Option<u32>,
+    /// The state on the wire now.
+    pub state: SessionState,
+    /// The interval on the wire now.
+    pub interval: u32,
+    /// Bytes the current interval has emitted.
+    pub text_seq: u32,
+    /// Every interval of the turn, oldest first.
+    pub entries: Vec<JournalEntry>,
+    /// Whether the oldest intervals were dropped to stay within budget.
+    pub truncated: bool,
+}
 
 pub struct Core {
     engines: Vec<Arc<dyn Engine>>,
@@ -307,6 +328,18 @@ impl Core {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// Whether any session is running right now.
+    ///
+    /// Read from the store rather than from the state machines: `running` is the
+    /// engine's own summary and it is what the activity rows and the phone's
+    /// session list are both drawn from, so the two cannot disagree.
+    pub fn any_running(&self) -> bool {
+        self.store_read()
+            .sessions
+            .values()
+            .any(|session| session.running)
+    }
+
     /// Whether a judge is installed right now.
     pub fn has_judge(&self) -> bool {
         self.layout
@@ -357,6 +390,14 @@ impl Core {
     /// two callers from killing a sidecar the other one just started.
     pub async fn release_judge_if_idle(&self, idle_for: Duration) -> bool {
         if self.phones_attached() != 0 {
+            return false;
+        }
+        // A turn that is still running is a reason to keep the judge even with
+        // nobody on a socket: the verdict is what ends the row on a phone's Live
+        // Activity, and a phone in a pocket is exactly the case the island exists
+        // for. The lease is about "nobody is listening *and* nothing is
+        // happening", not about sockets alone.
+        if self.any_running() {
             return false;
         }
         let idle = self
@@ -805,7 +846,17 @@ impl Core {
             };
             let machine = map.entry(session.clone()).or_insert_with(StateMachine::new);
 
-            if record.kind == RecordKind::AssistantMessage {
+            if record.kind == RecordKind::TurnStart {
+                // A turn start is not a live signal: it also resets what the
+                // session has streamed this turn, which is what the journal
+                // replays to a phone that was away.
+                match record.turn {
+                    Some(turn) => frames.extend(machine.on_turn_start(turn)),
+                    // An engine that does not number its turns gives nothing to
+                    // key the reset on; the old live-signal behaviour stands.
+                    None => frames.extend(machine.on_live(Live::Thinking)),
+                }
+            } else if record.kind == RecordKind::AssistantMessage {
                 if let Some(text) = record.text.as_deref() {
                     frames.extend(machine.on_text(text));
                 }
@@ -871,6 +922,30 @@ impl Core {
         Some((machine.state(), machine.interval()))
     }
 
+    /// What this session has streamed in the current turn, for a phone that was
+    /// away while it happened.
+    ///
+    /// The live channel only carries what is happening now, so a phone that
+    /// disconnected mid-turn comes back to an empty interval and no way to learn
+    /// what it missed. This is the turn's journal: every interval it opened, in
+    /// order, with the text each one carried.
+    ///
+    /// `None` when the session never ran a turn here (an old session, or one
+    /// that only exists on the engine side) -- which is "nothing to replay", not
+    /// an error.
+    pub fn stream_of(&self, session: &SessionKey) -> Option<StreamReplay> {
+        let map = self.states.lock().ok()?;
+        let machine = map.get(session)?;
+        Some(StreamReplay {
+            turn: machine.turn(),
+            state: machine.state(),
+            interval: machine.interval(),
+            text_seq: machine.text_seq(),
+            entries: machine.journal().to_vec(),
+            truncated: machine.truncated(),
+        })
+    }
+
     /// The model service, for the dispatch layer and the snapshot.
     pub fn models(&self) -> &Arc<ModelService> {
         &self.model_service
@@ -931,13 +1006,11 @@ impl Core {
     /// Shadow mode: the answer lands in `layouts` and in the log, and nothing is
     /// pushed to clients. Promotion to the wire is a deliberate, separate change.
     fn judge_turn(self: &Arc<Self>, session: SessionKey, turn: Option<u32>, records: Vec<Record>) {
-        // Nobody is listening: a verdict nobody will read is the most expensive
-        // thing this process can produce. The structural settle above already
-        // answered the phone's question, and `phone_attached` installs the judge
-        // again the moment somebody is.
-        if self.phones_attached() == 0 {
-            return;
-        }
+        // The judge's *presence* is the lease: `phone_attached` installs it, and
+        // `release_judge_if_idle` takes it away after five minutes with nobody
+        // listening and nothing running. Re-checking the socket count here would
+        // stop the verdict a sleeping phone's Live Activity is waiting for --
+        // the one moment the island is the only thing the operator can see.
         let Some(service) = self.layout.read().ok().and_then(|l| l.clone()) else {
             return;
         };
@@ -1656,6 +1729,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_running_turn_keeps_the_judge_while_the_phone_is_asleep() {
+        let core = Core::new(Vec::new());
+        core.install_test_judge();
+        {
+            let mut store = core.store_write();
+            let mut session = Session::bare(SessionKey::new(EngineId::Dsh, "s-1"), 0);
+            session.running = true;
+            store.sessions.insert(session.key.clone(), session);
+        }
+
+        // No socket is open -- the phone is in a pocket -- and the turn is still
+        // running. The verdict is what takes the row off the island, so the judge
+        // stays even though nobody is listening right now.
+        assert_eq!(core.phones_attached(), 0);
+        assert!(core.any_running());
+        assert!(!core.release_judge_if_idle(Duration::ZERO).await);
+        assert!(core.has_judge());
+
+        // Once the turn is over the same call lets it go.
+        {
+            let mut store = core.store_write();
+            for session in store.sessions.values_mut() {
+                session.running = false;
+            }
+        }
+        assert!(core.release_judge_if_idle(Duration::ZERO).await);
+        assert!(!core.has_judge());
+    }
+
+    #[tokio::test]
     async fn a_phone_that_comes_back_installs_the_judge_again() {
         let core = Core::new(Vec::new());
         core.install_test_judge();
@@ -1667,6 +1770,40 @@ mod tests {
         // model installed there is nothing to rebuild, and that is not a failure.
         core.phone_attached();
         assert_eq!(core.phones_attached(), 1);
+    }
+
+    #[test]
+    fn a_turn_that_streamed_can_be_read_back_for_replay() {
+        let core = Core::new(Vec::new());
+        let key = SessionKey::new(EngineId::Dsh, "s-1");
+        assert!(
+            core.stream_of(&key).is_none(),
+            "a session that never ran has nothing to replay, and that is not an error"
+        );
+
+        core.advance(&key, &record(1, 4, RecordKind::TurnStart, None));
+        core.advance(
+            &key,
+            &record(2, 4, RecordKind::AssistantMessage, Some("我先看一下…")),
+        );
+
+        let replay = core.stream_of(&key).expect("the turn is on record");
+        assert_eq!(replay.turn, Some(4));
+        assert_eq!(replay.state, SessionState::StreamNarration);
+        assert_eq!(replay.interval, 2);
+        assert_eq!(replay.text_seq, "我先看一下…".len() as u32);
+        assert!(!replay.truncated);
+        assert_eq!(replay.entries.len(), 2);
+        assert_eq!(replay.entries[0].state, SessionState::Thinking);
+        assert_eq!(replay.entries[1].state, SessionState::StreamNarration);
+        assert_eq!(replay.entries[1].text, "我先看一下…");
+
+        // A new turn starts the replay over instead of appending to it.
+        core.advance(&key, &record(3, 5, RecordKind::TurnStart, None));
+        let next = core.stream_of(&key).unwrap();
+        assert_eq!(next.turn, Some(5));
+        assert_eq!(next.entries.len(), 1, "{:?}", next.entries);
+        assert_eq!(next.entries[0].state, SessionState::Thinking);
     }
 
     #[test]
@@ -1766,6 +1903,19 @@ mod tests {
         Session {
             origin: origin.map(str::to_string),
             ..Session::bare(SessionKey::new(engine, id), 0)
+        }
+    }
+
+    /// One record of a turn, as an engine would hand it to the kernel.
+    fn record(seq: i64, turn: u32, kind: RecordKind, text: Option<&str>) -> Record {
+        Record {
+            seq,
+            time: seq * 1_000,
+            turn: Some(turn),
+            step: None,
+            kind,
+            text: text.map(str::to_string),
+            tool: None,
         }
     }
 

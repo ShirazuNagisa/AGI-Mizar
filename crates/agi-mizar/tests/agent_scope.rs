@@ -17,7 +17,7 @@ use std::time::Duration;
 use agi_core::Core;
 use agi_engine::{Engine, EngineEvent};
 use agi_mizar::{DeviceStore, MizarServer};
-use agi_protocol::domain::{Interaction, Session, SessionKey, Workspace};
+use agi_protocol::domain::{Interaction, Record, RecordKind, Session, SessionKey, Workspace};
 use agi_protocol::engine::{Capabilities, EngineId};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
@@ -67,6 +67,24 @@ impl Fake {
         // A full channel is a test bug, not a runtime condition.
         self.events
             .send(EngineEvent::InteractionRequested(interaction))
+            .ok();
+    }
+
+    /// Tell the kernel a turn happened, the way an adapter does.
+    fn record(&self, seq: i64, turn: u32, kind: RecordKind, text: Option<&str>) {
+        self.events
+            .send(EngineEvent::RecordAppended {
+                session: SessionKey::new(self.id, "session-1"),
+                record: Record {
+                    seq,
+                    time: seq * 1_000,
+                    turn: Some(turn),
+                    step: None,
+                    kind,
+                    text: text.map(str::to_string),
+                    tool: None,
+                },
+            })
             .ok();
     }
 }
@@ -371,6 +389,126 @@ async fn another_agents_session_cannot_be_read_by_naming_it() {
         &mut socket,
         "session.messages",
         json!({ "sessionId": "dsh:session-1", "maxMessages": 10 }),
+    )
+    .await;
+    assert_eq!(served["type"], "ok", "own agent stays readable: {served}");
+}
+
+/// A phone that was away while a turn ran asks for what it missed.
+///
+/// The state channel only carries what is happening now, so this is the only way
+/// back to the intervals that came and went while the socket was down.
+#[tokio::test]
+async fn a_turn_that_streamed_is_replayed_to_a_phone_that_missed_it() {
+    let (server, store, core, fakes, _dir) = start().await;
+    let dsh = &fakes[0];
+    dsh.record(1, 3, RecordKind::TurnStart, None);
+    dsh.record(2, 3, RecordKind::ToolCall, None);
+    dsh.record(3, 3, RecordKind::AssistantMessage, Some("我先看一下…"));
+    dsh.record(4, 3, RecordKind::ToolCall, None);
+    dsh.record(5, 3, RecordKind::AssistantMessage, Some("改好了。"));
+
+    // The kernel ingests engine events on its own task.
+    let key = SessionKey::new(EngineId::Dsh, "session-1");
+    for _ in 0..50 {
+        if core
+            .stream_of(&key)
+            .is_some_and(|replay| replay.entries.len() == 5)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let issued = store.issue("iPhone", None).unwrap();
+    let (mut socket, _) = connect(server.port(), &issued.token, None).await;
+    let answered = call(
+        &mut socket,
+        "session.stream",
+        json!({ "sessionId": "dsh:session-1" }),
+    )
+    .await;
+
+    assert_eq!(answered["type"], "ok", "{answered}");
+    let result = &answered["result"];
+    assert_eq!(result["sessionId"], "dsh:session-1");
+    assert_eq!(result["turn"], 3);
+    // The state on the wire now, not the state the turn ended in.
+    assert_eq!(result["state"], 5, "narration is code 5");
+    assert_eq!(result["truncated"], false);
+
+    let entries = result["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 5, "{result}");
+    assert_eq!(entries[0]["state"], 1, "the turn opened thinking");
+    assert_eq!(entries[1]["state"], 2, "then a tool ran");
+    assert_eq!(entries[2]["text"], "我先看一下…");
+    assert_eq!(entries[4]["text"], "改好了。");
+    // Intervals are handed back oldest first, which is the order to draw them in.
+    let intervals: Vec<u64> = entries
+        .iter()
+        .map(|entry| entry["interval"].as_u64().unwrap())
+        .collect();
+    assert!(
+        intervals.windows(2).all(|pair| pair[0] < pair[1]),
+        "{intervals:?}"
+    );
+    assert!(
+        entries.iter().all(|entry| entry["final"] == false),
+        "the turn is still running"
+    );
+}
+
+/// A session that never ran a turn has nothing to replay, and saying so is not
+/// an error: every session that predates this build is that case.
+#[tokio::test]
+async fn a_session_with_no_journal_replays_empty() {
+    let (server, store, _core, _fakes, _dir) = start().await;
+    let issued = store.issue("iPhone", None).unwrap();
+    let (mut socket, _) = connect(server.port(), &issued.token, None).await;
+
+    let answered = call(
+        &mut socket,
+        "session.stream",
+        json!({ "sessionId": "dsh:session-1" }),
+    )
+    .await;
+    assert_eq!(answered["type"], "ok", "{answered}");
+    assert_eq!(answered["result"]["entries"].as_array().unwrap().len(), 0);
+    assert_eq!(answered["result"]["state"], 0, "idle");
+    assert_eq!(answered["result"]["truncated"], false);
+    assert_eq!(answered["result"]["turn"], Value::Null);
+
+    // No session id at all is a broken frame, the same as every other
+    // per-session method.
+    let broken = call(&mut socket, "session.stream", json!({})).await;
+    assert_eq!(broken["type"], "error", "{broken}");
+    assert_eq!(broken["code"], "MALFORMED_FRAME");
+}
+
+#[tokio::test]
+async fn another_agents_stream_cannot_be_replayed_by_naming_it() {
+    let (server, store, _core, _fakes, _dir) = start().await;
+    let issued = store
+        .issue("iPhone", Some("account:acct-1:phone-1:dsh".to_string()))
+        .unwrap();
+    let (mut socket, _) = connect(server.port(), &issued.token, None).await;
+
+    let refused = call(
+        &mut socket,
+        "session.stream",
+        json!({ "sessionId": "codex:session-1" }),
+    )
+    .await;
+    assert_eq!(
+        refused["type"], "error",
+        "another agent's turn must not be replayed: {refused}"
+    );
+
+    // The same call for its own agent is answered.
+    let served = call(
+        &mut socket,
+        "session.stream",
+        json!({ "sessionId": "dsh:session-1" }),
     )
     .await;
     assert_eq!(served["type"], "ok", "own agent stays readable: {served}");

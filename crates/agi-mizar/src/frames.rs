@@ -276,6 +276,7 @@ impl ClientFrame {
             app_version: field("appVersion"),
             device_model: field("deviceModel"),
             engine: field("engine"),
+            account_id: field("accountId"),
         })
     }
 }
@@ -295,6 +296,13 @@ pub struct Hello {
     /// A token that already carries a choice wins over this — a scoped token
     /// must not be talked out of its scope by the client.
     pub engine: Option<String>,
+    /// The account the phone is signed in to, when it is signed in at all.
+    ///
+    /// Additive, and absent from every phone built before this: a host that
+    /// requires it would strand them. What it buys is the one case neither the
+    /// pairing code nor the device token can answer -- a phone signed in to one
+    /// account reaching a computer signed in to another.
+    pub account_id: Option<String>,
 }
 
 /// Rebuild the DSH event shape the phone decodes from one shared record.

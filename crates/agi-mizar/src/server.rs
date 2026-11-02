@@ -33,6 +33,7 @@ use agi_engine::MAX_SLICE_BYTES;
 use agi_protocol::domain::{AttachmentKind, Balance, InteractionKind, SessionKey, Wallet};
 use agi_protocol::engine::EngineId;
 use agi_protocol::usage::UsageContext;
+use agi_protocol::SessionState;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
 use axum::response::{IntoResponse, Response};
@@ -52,6 +53,12 @@ use crate::store::DeviceStore;
 
 /// How many pairing attempts a minute are allowed.
 const PAIR_ATTEMPTS_PER_MINUTE: usize = 5;
+
+/// The path a phone dials to exchange direct-path candidates.
+///
+/// Not under `HTTP_PREFIX`: this is MizarNet's channel, not Mizar v1's, and a
+/// future version of one must not drag the other along.
+const NET_SIGNAL_PATH: &str = "/mizar-net/signal";
 
 /// The live pairing code, if one was issued and has not been used.
 struct ActiveCode {
@@ -82,6 +89,27 @@ pub struct MizarServer {
     live: Mutex<std::collections::HashMap<String, usize>>,
     /// Files a phone is sending, staged until a prompt names them.
     uploads: std::sync::Arc<crate::uploads::UploadStore>,
+    /// The account this computer is signed in to, kept current by the boot
+    /// sequence from the account events the window already publishes.
+    ///
+    /// A copy rather than a call through to the kernel because the check runs on
+    /// the socket's path: the answer must be available without taking a lock the
+    /// window might hold.
+    account: Mutex<Option<String>>,
+    /// The direct path, when the boot sequence has bound one.
+    ///
+    /// `None` on a host with no tunnel: a punch needs a room to exchange
+    /// candidates in, so without a relay there is nothing to advertise and the
+    /// phone's route plan correctly has no `.p2p` in it.
+    direct: Mutex<Option<DirectPath>>,
+}
+
+/// Where the direct path listens, and the name a phone dials it by.
+struct DirectPath {
+    /// The base64url Ed25519 public key, derived from the tunnel secret.
+    endpoint_id: String,
+    /// Where the engine can be reached, kept current by the engine itself.
+    reach: crate::net::engine::Reach,
 }
 
 /// Keeps the live count honest however the socket ends.
@@ -180,6 +208,8 @@ impl MizarServer {
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             uploads: Arc::new(upload_store()),
+            account: Mutex::new(None),
+            direct: Mutex::new(None),
         })
     }
 
@@ -355,6 +385,137 @@ impl MizarServer {
         }
     }
 
+    /// Record the account this computer is signed in to.
+    ///
+    /// `None` when signed out. Called by the boot sequence on every account
+    /// change, which is also what makes a sign-out take effect on the next
+    /// connection rather than the next launch.
+    pub fn set_account_user(&self, user_id: Option<String>) {
+        *self
+            .account
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = user_id;
+    }
+
+    /// Why this phone may not talk to this computer, when it may not.
+    ///
+    /// The one question neither the pairing code nor the device token answers:
+    /// a phone signed in to one account and a computer signed in to another are
+    /// two different people, however the code travelled. Both sides have to have
+    /// said; a phone or a computer that is signed out is left as it was, because
+    /// making "signed out" mean "refused" would strand every pairing made before
+    /// accounts existed.
+    ///
+    /// - Parameter phone: the account id from the phone's hello, when it sent one.
+    /// - Returns: a sentence for the log and the phone, or `None` when allowed.
+    fn account_mismatch(&self, phone: Option<&str>) -> Option<String> {
+        let phone = phone.map(str::trim).filter(|id| !id.is_empty())?;
+        let desktop = self
+            .account
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .filter(|id| !id.is_empty())?;
+        if phone == desktop {
+            return None;
+        }
+        Some(format!(
+            "this computer is signed in to a different account than this phone"
+        ))
+    }
+
+    /// Attach the direct path, once its UDP socket is bound.
+    ///
+    /// Called by the boot sequence, which is the only thing that knows the tunnel
+    /// secret the identity is derived from, and which owns the socket.
+    ///
+    /// - Parameters:
+    ///   - endpoint_id: the base64url public key a phone's ticket names.
+    ///   - port: the UDP port the engine bound.
+    pub fn attach_direct_path(
+        &self,
+        endpoint_id: impl Into<String>,
+        reach: crate::net::engine::Reach,
+    ) {
+        *self
+            .direct
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(DirectPath {
+            endpoint_id: endpoint_id.into(),
+            reach,
+        });
+    }
+
+    /// The direct path's name, when one is listening.
+    ///
+    /// What `host.info` carries and what a phone turns into a `.p2p` route.
+    /// `None` — absent on the wire — means this host has no direct path, which a
+    /// phone reads as "there is nothing to punch to".
+    pub fn net_endpoint_id(&self) -> Option<String> {
+        self.direct
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(|path| path.endpoint_id.clone())
+    }
+
+    /// The candidate list, for the tests that pin its shape.
+    ///
+    /// Public and `doc(hidden)` because an integration test is another crate:
+    /// the alternative is a test that re-implements the formula and therefore
+    /// checks nothing.
+    #[doc(hidden)]
+    pub fn net_candidates_for_tests(&self) -> Vec<Value> {
+        self.net_candidates()
+    }
+
+    /// Where this computer can be reached directly, best first.
+    ///
+    /// Host addresses first, then the outside address a STUN server last saw.
+    ///
+    /// The reflexive candidate is what makes a punch possible from another
+    /// network at all, and the engine re-asks every fifteen seconds so the NAT
+    /// mapping behind it stays open.
+    fn net_candidates(&self) -> Vec<Value> {
+        let Some(reach) = self
+            .direct
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(|path| path.reach.clone())
+        else {
+            return Vec::new();
+        };
+        reach
+            .candidates()
+            .iter()
+            .map(crate::net::engine::Candidate::to_json)
+            .collect()
+    }
+
+    /// Publish a card, for the test that pins what the relay receives.
+    ///
+    /// `doc(hidden)` rather than private because an integration test is another
+    /// crate, and re-implementing the body in the test would check nothing.
+    #[doc(hidden)]
+    pub async fn publish_card_for_tests(&self, card: &crate::activity::Card) {
+        self.publish_card(card).await;
+    }
+
+    /// Publish a turn-end notification, for the same reason.
+    #[doc(hidden)]
+    pub async fn publish_turn_end_for_tests(&self, session: &SessionKey, title: &str, end: bool) {
+        self.publish_turn_end(session, title, end).await;
+    }
+
+    /// Run one punched connection: the same handshake and methods as a socket.
+    ///
+    /// Public because the accept loop lives in the boot sequence, which owns the
+    /// engine. Everything below this call is transport-agnostic.
+    pub async fn serve_punched(self: &Arc<Self>, stream: crate::net::engine::Stream) {
+        serve_punched(Arc::clone(self), stream).await;
+    }
+
     /// Bind the listener and start serving.
     ///
     /// `port` of `0` asks the OS for a free one; the default is the protocol's
@@ -364,6 +525,9 @@ impl MizarServer {
             .route(&format!("{HTTP_PREFIX}/hello"), get(hello))
             .route(&format!("{HTTP_PREFIX}/pair"), post(pair))
             .route(WS_PATH, get(upgrade))
+            // The side channel a punch needs. Reached through the relay's room
+            // like every other path, which is why it lives beside them.
+            .route(NET_SIGNAL_PATH, get(signal))
             .with_state(Arc::clone(self));
 
         let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
@@ -605,6 +769,10 @@ impl MizarServer {
                         // `null` when no tunnel is configured, which the phone
                         // reads as "there is no relay route".
                         "relay": self.relay_facts(),
+                        // The direct path's key, or `null` when this host has
+                        // none. A phone that sees it grows a `.p2p` route; one
+                        // that sees `null` keeps the two it had.
+                        "netEndpointId": self.net_endpoint_id(),
                     }),
                 )
             }
@@ -721,6 +889,66 @@ impl MizarServer {
                         error.to_string(),
                     ),
                 }
+            }
+
+            // The turn's streamed intervals, replayed. The live state channel
+            // only carries what is happening now, so a phone that was disconnected
+            // mid-turn came back to an empty interval and a hole where the
+            // conversation should be. This hands the whole turn back.
+            "session.stream" => {
+                let Some(key) = self.scoped_session_of(scope, frame) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "session.stream needs a sessionId",
+                    );
+                };
+                let replay = self.core.stream_of(&key);
+                let (turn, state, interval, text_seq, truncated, entries) = match replay {
+                    Some(replay) => (
+                        replay.turn.map(Value::from).unwrap_or(Value::Null),
+                        json!(replay.state.code()),
+                        json!(replay.interval),
+                        json!(replay.text_seq),
+                        json!(replay.truncated),
+                        replay.entries,
+                    ),
+                    // A session that never ran a turn on this host has nothing to
+                    // replay. That is an empty answer, not an error: the phone's
+                    // older sessions are exactly this case, and a refusal would
+                    // make it fall back for no reason.
+                    None => (
+                        Value::Null,
+                        json!(SessionState::Idle.code()),
+                        json!(0),
+                        json!(0),
+                        json!(false),
+                        Vec::new(),
+                    ),
+                };
+                let entries: Vec<Value> = entries
+                    .into_iter()
+                    .map(|entry| {
+                        json!({
+                            "interval": entry.interval,
+                            "state": entry.state.code(),
+                            "text": entry.text,
+                            "final": entry.final_,
+                        })
+                    })
+                    .collect();
+                ServerFrame::ok(
+                    id,
+                    json!({
+                        "sessionId": key.to_string(),
+                        "turn": turn,
+                        "state": state,
+                        "interval": interval,
+                        "textSeq": text_seq,
+                        "truncated": truncated,
+                        "entries": entries,
+                    }),
+                )
             }
 
             // The phone's title, usage panel, model row and permission badge all
@@ -2402,36 +2630,226 @@ async fn upgrade(
     ws.on_upgrade(move |socket| serve_socket(server, peer, socket))
 }
 
-/// Run one phone connection.
+/// One connection's two halves, whatever is carrying them.
 ///
-/// One writer task owns the sink and drains a channel; the read loop and the
-/// event forwarder both produce into it. Two tasks writing to one sink is the
-/// kind of bug that only shows up as a truncated frame under load.
+/// A phone reaches this server over a WebSocket — on the LAN, or bridged through
+/// the relay's room — or over a punched UDP path. The frames are identical, so
+/// everything below the transport is written against this pair of channels and
+/// never against axum's `WebSocket`.
+struct Peer {
+    inbound: tokio::sync::mpsc::Receiver<String>,
+    outbound: tokio::sync::mpsc::Sender<Vec<u8>>,
+}
+
+/// `GET /mizar-net/signal` — where a punch begins.
+///
+/// The phone announces itself with its endpoint key, its candidates and the
+/// device token the Mizar handshake uses. This host stays silent until the token
+/// verifies: the endpoint sits on the machine's whole network, and a stranger
+/// must not be told where this computer is.
+async fn signal(
+    State(server): State<Arc<MizarServer>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    ws.on_upgrade(move |socket| serve_signal(server, peer, socket))
+}
+
+/// The signaling conversation, once the socket is upgraded.
+async fn serve_signal(server: Arc<MizarServer>, peer: SocketAddr, mut socket: WebSocket) {
+    let Some(endpoint_id) = server.net_endpoint_id() else {
+        // A host with no direct path has nothing to say. Closing is the honest
+        // answer: the phone falls back to the route it already had.
+        let _ = socket.send(Message::Close(None)).await;
+        return;
+    };
+
+    // The first frame must be the phone's hello, and it must carry a token this
+    // host issued.
+    let Some(Ok(Message::Text(first))) = socket.recv().await else {
+        return;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&first) else {
+        tracing::debug!("p2p: a signal channel from {peer} sent something that is not JSON");
+        return;
+    };
+    if value.get("type").and_then(Value::as_str) != Some("hello") {
+        tracing::debug!("p2p: a signal channel from {peer} did not start with a hello");
+        return;
+    }
+    let Some(token) = value.get("token").and_then(Value::as_str) else {
+        tracing::debug!("p2p: a signal channel from {peer} carried no device token");
+        return;
+    };
+    if server.store.authenticate(token).is_none() {
+        tracing::warn!("p2p: a signal channel from {peer} presented a token this host does not know");
+        return;
+    }
+
+    let answer = json!({
+        "v": 1,
+        "type": "hello",
+        "endpointId": endpoint_id,
+        "candidates": server.net_candidates(),
+    });
+    if socket.send(Message::Text(answer.to_string())).await.is_err() {
+        return;
+    }
+    tracing::info!("p2p: signaled {peer}");
+
+    // Keep the channel open. A phone that changed networks re-announces itself
+    // on the same socket rather than opening a second one.
+    while let Some(Ok(message)) = socket.recv().await {
+        let Message::Text(text) = message else {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        match value.get("type").and_then(Value::as_str) {
+            Some("hello") => {
+                let answer = json!({
+                    "v": 1,
+                    "type": "hello",
+                    "endpointId": server.net_endpoint_id(),
+                    "candidates": server.net_candidates(),
+                });
+                if socket.send(Message::Text(answer.to_string())).await.is_err() {
+                    break;
+                }
+            }
+            Some("bye") => break,
+            // Candidates from the phone are not used by an acceptor: the punch
+            // is answered at the datagram's source, which is the address that
+            // actually works.
+            _ => {}
+        }
+    }
+}
+
+/// Run one phone connection over a WebSocket.
+///
+/// The socket is adapted to a [`Peer`] by two small tasks — one reading text in,
+/// one writing frames out — and everything that matters happens in
+/// [`serve_peer`]. The two kinds of frame are told apart by their first byte: a
+/// state-channel frame starts with `0x53` ('S'), and every JSON frame starts
+/// with `{`.
 async fn serve_socket(server: Arc<MizarServer>, peer: SocketAddr, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
-    // Text for the API, binary for the state channel: one queue, because one
-    // socket, and the order between "the turn ended" and "the answer streamed"
-    // is part of what the phone draws.
-    let (out, mut out_rx) = tokio::sync::mpsc::channel::<Message>(64);
+    let (text_tx, text_rx) = tokio::sync::mpsc::channel::<String>(64);
+    let (bytes_tx, mut bytes_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
 
+    let reader = tokio::spawn(async move {
+        'reading: while let Some(message) = stream.next().await {
+            match message {
+                Ok(Message::Text(text)) => {
+                    if text_tx.send(text).await.is_err() {
+                        break 'reading;
+                    }
+                }
+                Ok(Message::Close(_)) | Err(_) => break 'reading,
+                // Binary from a phone is the on-device kernel's dialect, not this
+                // socket's, and a ping is answered by the HTTP layer.
+                _ => {}
+            }
+        }
+    });
     let writer = tokio::spawn(async move {
-        while let Some(message) = out_rx.recv().await {
+        while let Some(bytes) = bytes_rx.recv().await {
+            let message = if bytes.first() == Some(&agi_protocol::state_frame::MAGIC) {
+                Message::Binary(bytes)
+            } else {
+                match String::from_utf8(bytes) {
+                    Ok(text) => Message::Text(text),
+                    // A frame that is not UTF-8 is not JSON and not a state
+                    // frame; nothing downstream could read it.
+                    Err(_) => continue,
+                }
+            };
             if sink.send(message).await.is_err() {
                 break;
             }
         }
     });
 
-    // The handshake is the only frame allowed to be unauthenticated.
-    let first = match stream.next().await {
-        Some(Ok(Message::Text(text))) => text,
-        _ => {
-            tracing::warn!("mizar: {peer} opened a socket and sent no hello");
-            return;
+    serve_peer(
+        server,
+        peer.to_string(),
+        Peer {
+            inbound: text_rx,
+            outbound: bytes_tx,
+        },
+    )
+    .await;
+    reader.abort();
+    let _ = writer.await;
+}
+
+/// Run one phone connection over a punched UDP path.
+///
+/// The phone sends bare Mizar frames on this path — no HTTP upgrade, no WebSocket
+/// framing — so the only thing it shares with the socket path is what is below
+/// them: the same handshake, the same methods, the same event forwarders.
+async fn serve_punched(server: Arc<MizarServer>, stream: crate::net::engine::Stream) {
+    let description = format!("p2p {}", stream.describe());
+    let (sender, mut receiver) = stream.split();
+    let (text_tx, text_rx) = tokio::sync::mpsc::channel::<String>(64);
+    let (bytes_tx, mut bytes_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+
+    let reader = tokio::spawn(async move {
+        while let Some(message) = receiver.receive().await {
+            match String::from_utf8(message) {
+                Ok(text) => {
+                    if text_tx.send(text).await.is_err() {
+                        break;
+                    }
+                }
+                Err(_) => tracing::debug!("mizar: a direct-path message was not UTF-8"),
+            }
         }
+    });
+    let writer = tokio::spawn(async move {
+        while let Some(bytes) = bytes_rx.recv().await {
+            if sender.send(bytes).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    serve_peer(
+        server,
+        description,
+        Peer {
+            inbound: text_rx,
+            outbound: bytes_tx,
+        },
+    )
+    .await;
+    reader.abort();
+    let _ = writer.await;
+}
+
+/// Run one phone connection.
+///
+/// The handshake, the state channel, the interaction forwarder and the method
+/// loop are all here, and all of them are transport-agnostic. The only thing a
+/// caller supplies is a [`Peer`]: text frames in, frame bytes out.
+async fn serve_peer(server: Arc<MizarServer>, peer: String, connection: Peer) {
+    let Peer {
+        mut inbound,
+        outbound: out,
+    } = connection;
+
+    // The handshake is the only frame allowed to be unauthenticated.
+    let Some(first) = inbound.recv().await else {
+        tracing::warn!("mizar: {peer} connected and sent no hello");
+        return;
     };
     let Some(frame) = ClientFrame::parse(&first) else {
-        tracing::warn!("mizar: {peer} opened a socket with a frame that is not JSON");
+        tracing::warn!("mizar: {peer} opened a connection with a frame that is not JSON");
         let _ = send(
             &out,
             ServerFrame::error(
@@ -2441,8 +2859,6 @@ async fn serve_socket(server: Arc<MizarServer>, peer: SocketAddr, socket: WebSoc
             ),
         )
         .await;
-        drop(out);
-        let _ = writer.await;
         return;
     };
     let Some(hello) = frame.hello() else {
@@ -2452,8 +2868,6 @@ async fn serve_socket(server: Arc<MizarServer>, peer: SocketAddr, socket: WebSoc
             ServerFrame::error(None, ErrorCode::Unauthenticated, "send hello first"),
         )
         .await;
-        drop(out);
-        let _ = writer.await;
         return;
     };
     let Some(device) = server.store.authenticate(&hello.token) else {
@@ -2467,8 +2881,6 @@ async fn serve_socket(server: Arc<MizarServer>, peer: SocketAddr, socket: WebSoc
             ),
         )
         .await;
-        drop(out);
-        let _ = writer.await;
         return;
     };
 
@@ -2478,7 +2890,19 @@ async fn serve_socket(server: Arc<MizarServer>, peer: SocketAddr, socket: WebSoc
         hello.app_version.as_deref().unwrap_or("unknown version")
     );
 
-    // Held until this function returns, which is when the socket is done.
+    // A different account is a different operator. Refused before the welcome,
+    // so nothing about this computer's sessions reaches the phone.
+    if let Some(reason) = server.account_mismatch(hello.account_id.as_deref()) {
+        tracing::warn!("mizar: {peer} was refused — {reason}");
+        let _ = send(
+            &out,
+            ServerFrame::error(None, ErrorCode::Unauthenticated, reason),
+        )
+        .await;
+        return;
+    }
+
+    // Held until this function returns, which is when the connection is done.
     let _live = LiveSocket::open(Arc::clone(&server), device.id.clone());
 
     let _ = send(
@@ -2492,15 +2916,15 @@ async fn serve_socket(server: Arc<MizarServer>, peer: SocketAddr, socket: WebSoc
     )
     .await;
 
-    // The agent this socket is bound to, from the token or from the hello that
-    // opened it. Every per-agent answer below is filtered by it.
+    // The agent this connection is bound to, from the token or from the hello
+    // that opened it. Every per-agent answer below is filtered by it.
     let scope = MizarServer::connection_scope(&device, Some(&hello));
 
     // The state channel: one byte per session-state change, plus a heartbeat
     // every few seconds, scoped to the agent this phone asked for. This is what
-    // turns the phone's status pill and stream bar on at all -- before this,
-    // the channel only reached the desktop's own window.
-    {
+    // turns the phone's status pill and stream bar on at all -- before this, the
+    // channel only reached the desktop's own window.
+    let states_task = {
         let out = out.clone();
         let mut states = server.core.subscribe_states();
         tokio::spawn(async move {
@@ -2515,7 +2939,7 @@ async fn serve_socket(server: Arc<MizarServer>, peer: SocketAddr, socket: WebSoc
                         payload.push(id.len().min(255) as u8);
                         payload.extend_from_slice(id.as_bytes());
                         payload.extend_from_slice(&bytes);
-                        if out.send(Message::Binary(payload)).await.is_err() {
+                        if out.send(payload).await.is_err() {
                             return;
                         }
                     }
@@ -2523,8 +2947,8 @@ async fn serve_socket(server: Arc<MizarServer>, peer: SocketAddr, socket: WebSoc
                     Err(_) => return,
                 }
             }
-        });
-    }
+        })
+    };
 
     // Interaction notifications, so an approval reaches the phone without a poll.
     let mut events = server.core.subscribe();
@@ -2550,8 +2974,8 @@ async fn serve_socket(server: Arc<MizarServer>, peer: SocketAddr, socket: WebSoc
         })
     };
 
-    // Host notices: today the only one is the tunnel moving, and a phone that
-    // is not told would keep dialling the old relay until something failed.
+    // Host notices: today the only one is the tunnel moving, and a phone that is
+    // not told would keep dialling the old relay until something failed.
     let mut notices = server.notices.subscribe();
     let notifier = {
         let out = out.clone();
@@ -2573,14 +2997,11 @@ async fn serve_socket(server: Arc<MizarServer>, peer: SocketAddr, socket: WebSoc
         })
     };
 
-    while let Some(message) = stream.next().await {
-        let Ok(Message::Text(text)) = message else {
-            break;
-        };
+    while let Some(text) = inbound.recv().await {
         let Some(frame) = ClientFrame::parse(&text) else {
             continue;
         };
-        // A second hello on a live socket is a client bug, not a re-handshake.
+        // A second hello on a live connection is a client bug, not a re-handshake.
         if frame.kind == "hello" {
             continue;
         }
@@ -2590,20 +3011,20 @@ async fn serve_socket(server: Arc<MizarServer>, peer: SocketAddr, socket: WebSoc
         }
     }
 
+    states_task.abort();
     forwarder.abort();
     notifier.abort();
     drop(out);
-    let _ = writer.await;
     tracing::info!("mizar: {} disconnected", device.name);
 }
 
 /// Write one frame to the connection's writer task.
 async fn send(
-    out: &tokio::sync::mpsc::Sender<Message>,
+    out: &tokio::sync::mpsc::Sender<Vec<u8>>,
     frame: ServerFrame,
-) -> Result<(), tokio::sync::mpsc::error::SendError<Message>> {
+) -> Result<(), tokio::sync::mpsc::error::SendError<Vec<u8>>> {
     let text = serde_json::to_string(&frame).unwrap_or_else(|_| "{}".to_string());
-    out.send(Message::Text(text)).await
+    out.send(text.into_bytes()).await
 }
 
 /// Whether an event is one this connection should hear about.

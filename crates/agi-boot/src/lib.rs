@@ -189,6 +189,10 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
         .filter(|url| !url.trim().is_empty())
     {
         let token = config.relay_token.unwrap_or_else(random_token);
+        // The direct path's identity is derived from the same tunnel secret the
+        // room is, so it survives a restart the way the room does. Kept before
+        // the client takes ownership of the token.
+        let net_token = token.clone();
         let relay = RelayClient::new(url, token, mizar.port());
         relay.attach_store(Arc::clone(&roster_for_relay));
         let core_for_relay = Arc::clone(&core);
@@ -199,11 +203,26 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
         // The relay routes by session, so a sign-in has to redial with the new
         // headers; a sign-out revokes the tokens this account was handed and
         // drops the presence the phones were finding it by.
+        // The phone server refuses a phone signed in to another account, and the
+        // answer has to be current rather than taken at launch: a sign-out must
+        // take effect on the next connection.
+        mizar.set_account_user(
+            core.account_user()
+                .map(|user| user.id)
+                .filter(|id| !id.is_empty()),
+        );
         let mut changes = core.subscribe_account();
+        let mizar_for_changes = Arc::clone(&mizar);
         let relay_for_changes = Arc::clone(&relay);
         let roster_for_changes = Arc::clone(&roster_for_relay);
         tokio::spawn(async move {
             while let Ok(event) = changes.recv().await {
+                mizar_for_changes.set_account_user(
+                    event
+                        .user_id
+                        .clone()
+                        .filter(|id| !id.is_empty()),
+                );
                 if !event.signed_in {
                     if let Some(user) = event.user_id.as_deref() {
                         agi_mizar::relay::revoke_account_tokens(&roster_for_changes, user);
@@ -213,6 +232,34 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
             }
         });
         tokio::spawn(async move { relay.run().await });
+
+        // The direct path. Its socket belongs to the process, so it is bound
+        // here rather than per connection; the accept loop hands each punched
+        // stream to the same method dispatch a WebSocket uses.
+        let identity = agi_mizar::net::identity::Identity::derive(
+            net_token.as_bytes(),
+            agi_mizar::net::identity::Purpose::Host,
+        );
+        // The reflexive candidate comes from the relay's own STUN server: the
+        // same host the tunnel already trusts, so no new party learns where this
+        // computer connects from.
+        let stun_servers = stun_servers_for(url);
+        let reach = agi_mizar::net::engine::Reach::default();
+        match agi_mizar::net::engine::Engine::bind(identity, 0, reach.clone(), stun_servers).await {
+            Ok((mut engine, address)) => {
+                let endpoint_id = engine.endpoint_id().to_string();
+                tracing::info!("p2p: direct path on {address} ({endpoint_id})");
+                mizar.attach_direct_path(endpoint_id, reach);
+                let server = Arc::clone(&mizar);
+                tokio::spawn(async move {
+                    while let Some(stream) = engine.accept().await {
+                        let server = Arc::clone(&server);
+                        tokio::spawn(async move { server.serve_punched(stream).await });
+                    }
+                });
+            }
+            Err(error) => tracing::warn!("p2p: no direct path — {error}"),
+        }
     }
 
     // The window needs a code to show; the kernel asks whoever is composed.
@@ -373,6 +420,33 @@ fn shim_path() -> Option<PathBuf> {
     // where the shim lives when it is not beside the executable.
     let resource = directory.parent()?.join("Resources").join(name);
     resource.is_file().then_some(resource)
+}
+
+/// Where to ask what this computer looks like from outside.
+///
+/// The relay that carries this tunnel also runs a STUN server on the standard
+/// port, so the answer comes from the party the pairing already trusts and no
+/// new one learns where this machine connects from. A self-hosted relay answers
+/// on its own host; an unreachable one costs the direct path its outside
+/// candidate and nothing else.
+///
+/// - Parameter relay: the tunnel's base URL.
+/// - Returns: the servers to ask, best first; empty when the URL is unusable.
+fn stun_servers_for(relay: &str) -> Vec<String> {
+    // Hand-parsed rather than through a URL crate: the only part wanted is the
+    // host, and this file has no business depending on an HTTP client for it.
+    let rest = relay
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_start_matches("wss://")
+        .trim_start_matches("ws://");
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority.rsplit_once(':').map(|(host, _)| host).unwrap_or(authority);
+    if host.is_empty() {
+        return Vec::new();
+    }
+    vec![format!("{host}:3478")]
 }
 
 /// 32 bytes of randomness, hex encoded.

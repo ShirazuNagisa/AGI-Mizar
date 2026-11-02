@@ -41,8 +41,10 @@
 //! moment the first packet is sent.
 
 pub mod crypto;
+pub mod engine;
 pub mod identity;
 pub mod session;
+pub mod stun;
 pub mod wire;
 
 #[cfg(test)]
