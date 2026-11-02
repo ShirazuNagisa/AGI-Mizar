@@ -1191,6 +1191,9 @@ impl Core {
 
         StateSnapshot {
             version: self.version.clone(),
+            // The spelling the window shows and the relay records. Every client
+            // asks the same seam rather than guessing from `cfg!(...)`.
+            platform: agi_platform::platform().to_string(),
             theme: self.theme(),
             engines,
             sessions,
@@ -1336,14 +1339,12 @@ impl Core {
                 if !url.starts_with("https://") {
                     CommandResponse::error("MALFORMED_FRAME", "only https URLs are opened")
                 } else {
-                    #[cfg(target_os = "macos")]
-                    let opened = std::process::Command::new("open").arg(&url).spawn();
-                    #[cfg(not(target_os = "macos"))]
-                    let opened: Result<std::process::Child, std::io::Error> = Err(
-                        std::io::Error::new(std::io::ErrorKind::Unsupported, "no opener"),
-                    );
-                    match opened {
-                        Ok(_) => CommandResponse::ok(json!({ "opened": true })),
+                    // The opener is a platform fact — `open`, `start`, or
+                    // `xdg-open` — and everything above this line stays
+                    // platform-free. Until this was a seam, every non-macOS
+                    // build answered "no opener" and the sign-in buttons died.
+                    match agi_platform::open_url(&url) {
+                        Ok(()) => CommandResponse::ok(json!({ "opened": true })),
                         Err(error) => {
                             CommandResponse::error("OPEN_FAILED", format!("the browser: {error}"))
                         }
@@ -2144,8 +2145,7 @@ fn models_dir() -> PathBuf {
     // back up, one to look in when something is missing. The old default was
     // `models/models` relative to the working directory, which for a Finder
     // launch meant `/models/models` and never found anything.
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".agi-mizar").join("models")
+    agi_platform::data_dir().join("models")
 }
 
 /// The live signal a record carries, if any.

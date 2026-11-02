@@ -419,9 +419,7 @@ impl MizarServer {
         if phone == desktop {
             return None;
         }
-        Some(format!(
-            "this computer is signed in to a different account than this phone"
-        ))
+        Some("this computer is signed in to a different account than this phone".to_string())
     }
 
     /// Attach the direct path, once its UDP socket is bound.
@@ -2682,7 +2680,9 @@ async fn serve_signal(server: Arc<MizarServer>, peer: SocketAddr, mut socket: We
         return;
     };
     if server.store.authenticate(token).is_none() {
-        tracing::warn!("p2p: a signal channel from {peer} presented a token this host does not know");
+        tracing::warn!(
+            "p2p: a signal channel from {peer} presented a token this host does not know"
+        );
         return;
     }
 
@@ -2692,7 +2692,11 @@ async fn serve_signal(server: Arc<MizarServer>, peer: SocketAddr, mut socket: We
         "endpointId": endpoint_id,
         "candidates": server.net_candidates(),
     });
-    if socket.send(Message::Text(answer.to_string())).await.is_err() {
+    if socket
+        .send(Message::Text(answer.to_string()))
+        .await
+        .is_err()
+    {
         return;
     }
     tracing::info!("p2p: signaled {peer}");
@@ -2717,7 +2721,11 @@ async fn serve_signal(server: Arc<MizarServer>, peer: SocketAddr, mut socket: We
                     "endpointId": server.net_endpoint_id(),
                     "candidates": server.net_candidates(),
                 });
-                if socket.send(Message::Text(answer.to_string())).await.is_err() {
+                if socket
+                    .send(Message::Text(answer.to_string()))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }

@@ -220,16 +220,20 @@ impl UploadStore {
 
         let upload_id = uuid::Uuid::new_v4().to_string();
         let path = self.root.join("staging").join(&upload_id);
-        std::fs::File::create(&path)
-            .and_then(|file| {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-                }
-                Ok(file)
-            })
+        let file = std::fs::File::create(&path)
             .map_err(|error| UploadError::new("UPLOAD_FAILED", format!("upload.begin: {error}")))?;
+        // Before the first byte is written, so the staging file is never briefly
+        // world-readable. Windows has no mode bits; the profile ACL is the same
+        // guarantee through a different mechanism.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|error| {
+                    UploadError::new("UPLOAD_FAILED", format!("upload.begin: {error}"))
+                })?;
+        }
+        drop(file);
 
         let upload = LiveUpload {
             device: device.to_string(),

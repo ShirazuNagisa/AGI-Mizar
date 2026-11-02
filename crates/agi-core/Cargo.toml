@@ -9,13 +9,13 @@ description = "The kernel: engine registry, aggregated state, and the loopback A
 
 [dependencies]
 agi-protocol = { workspace = true }
+agi-platform = { workspace = true }
 agi-engine = { workspace = true }
 agi-layout = { workspace = true }
 agi-engine-claude = { workspace = true }
 agi-engine-dsh = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
-libc = "0.2"
 reqwest = { workspace = true }
 sha2 = { workspace = true }
 futures-util = { workspace = true }

@@ -354,7 +354,10 @@ impl ClaudeEngine {
             .cloned()
             .unwrap_or_default();
 
-        let mut command = tokio::process::Command::new(&self.binary);
+        // The binary came from `which`, which on Windows may answer with an npm
+        // `claude.cmd` shim. `agi_platform::command` knows a `.cmd` has to go
+        // through `cmd /C`; a bare `Command::new` on it is `os error 193`.
+        let mut command = agi_platform::command(Path::new(&self.binary));
         command
             .arg("-p")
             .arg("--output-format")
@@ -995,6 +998,16 @@ impl Engine for ClaudeEngine {
         if let Some(pid) = child.id() {
             let _ = std::process::Command::new("kill")
                 .args(["-TERM", &format!("-{pid}")])
+                .status();
+        }
+        // Windows has no process group to signal, and the child here is usually
+        // the `cmd /C` wrapper around an npm `.cmd` shim: killing the wrapper
+        // alone would orphan the real agent. `taskkill /T` walks the child tree,
+        // which is the same intent as the group kill above.
+        #[cfg(windows)]
+        if let Some(pid) = child.id() {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/T", "/F", "/PID", &pid.to_string()])
                 .status();
         }
         let _ = child.start_kill();

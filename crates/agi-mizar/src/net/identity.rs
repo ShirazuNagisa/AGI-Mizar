@@ -133,7 +133,8 @@ pub fn verify_signature(signature: &[u8], message: &[u8], endpoint_id: &str) -> 
     let Ok(key) = VerifyingKey::from_bytes(&public) else {
         return false;
     };
-    key.verify(message, &Signature::from_bytes(&signature)).is_ok()
+    key.verify(message, &Signature::from_bytes(&signature))
+        .is_ok()
 }
 
 /// Encode bytes as Crockford base32, taking the first `characters` of it.

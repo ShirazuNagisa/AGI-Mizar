@@ -1,5 +1,6 @@
-import { SHELL_SETTING_ROWS } from '../shell'
+import { shellSettingRows } from '../shell'
 import type { ShellSettingsState } from '../lib/use-shell-settings'
+import { desktopPlatform, type DesktopPlatform } from '../platform'
 import { Switch } from './ui/switch'
 import { cn } from '../lib/utils'
 
@@ -7,20 +8,25 @@ import { cn } from '../lib/utils'
  * The three switches the shell owns.
  *
  * The guide and the settings page show the same three, in the same words, so
- * they cannot drift apart. When the window is not inside the shell there is
- * nothing to read or write, and every switch says so rather than pretending.
+ * they cannot drift apart — and the words are the desktop's own: the Dock and
+ * the menu bar on macOS, the taskbar and the notification area on Windows. When
+ * the window is not inside the shell there is nothing to read or write, and
+ * every switch says so rather than pretending.
  */
 export function ShellSettingsList({
   shell,
+  platform = desktopPlatform(),
   className,
 }: {
   shell: ShellSettingsState
+  /** The desktop whose words to use; the snapshot's answer when it is known. */
+  platform?: DesktopPlatform
   className?: string
 }) {
   return (
     <div className={cn('mz-border', className)}>
       <div className="divide-y divide-ink">
-        {SHELL_SETTING_ROWS.map((row) => (
+        {shellSettingRows(platform).map((row) => (
           <div key={row.field} className="flex items-start justify-between gap-6 px-4 py-3">
             <div className="min-w-0">
               <div className="text-[12px] text-fg">{row.title}</div>

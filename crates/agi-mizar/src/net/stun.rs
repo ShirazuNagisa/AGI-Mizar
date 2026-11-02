@@ -167,10 +167,7 @@ fn xor_mapped(value: &[u8]) -> Option<SocketAddr> {
     }
     let raw = u32::from_be_bytes([value[4], value[5], value[6], value[7]]);
     let address = raw ^ MAGIC_COOKIE;
-    Some(SocketAddr::new(
-        IpAddr::V4(Ipv4Addr::from(address)),
-        port,
-    ))
+    Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::from(address)), port))
 }
 
 /// Decode the unobfuscated `MAPPED-ADDRESS`.
@@ -289,7 +286,10 @@ mod tests {
         let theirs = Probe::new();
         let seen: SocketAddr = "10.0.0.1:1234".parse().unwrap();
         assert_eq!(theirs.decode(&answer(&theirs, seen)), Ok(seen));
-        assert_eq!(ours.decode(&answer(&theirs, seen)), Err(StunError::WrongTransaction));
+        assert_eq!(
+            ours.decode(&answer(&theirs, seen)),
+            Err(StunError::WrongTransaction)
+        );
     }
 
     #[test]

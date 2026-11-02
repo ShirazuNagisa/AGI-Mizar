@@ -9,6 +9,7 @@ description = "The Mizar v1 server: pairing, devices, and the phone-facing WebSo
 
 [dependencies]
 agi-protocol = { workspace = true }
+agi-platform = { workspace = true }
 agi-engine = { workspace = true }
 agi-core = { workspace = true }
 anyhow = { workspace = true }

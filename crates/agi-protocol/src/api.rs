@@ -24,6 +24,13 @@ use crate::engine::{Capabilities, EngineId};
 pub struct StateSnapshot {
     /// The application version, for the about panel and bug reports.
     pub version: String,
+    /// `macos`, `windows` or `linux`: which machine this window draws for.
+    ///
+    /// The page uses it for the words only one desktop uses (the Dock, the
+    /// notification area) and for the layout only one needs (the strip macOS
+    /// reserves for its traffic lights). Answering it once in the snapshot keeps
+    /// every component from guessing from a build-time flag.
+    pub platform: String,
     /// `system`, `light` or `dark` — the window paints itself before it has
     /// asked the kernel, and this is the stored answer for the next launch.
     pub theme: String,

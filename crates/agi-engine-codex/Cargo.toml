@@ -9,6 +9,7 @@ description = "The Codex adapter: drives `codex app-server` over its newline-del
 
 [dependencies]
 agi-protocol = { workspace = true }
+agi-platform = { workspace = true }
 agi-engine = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }

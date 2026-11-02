@@ -1,14 +1,16 @@
 /**
  * The things only the desktop shell can do.
  *
- * Installing an update, writing a login item, hiding the Dock icon and quitting
- * are all process-level actions the kernel has no business owning, so they are
- * Tauri IPC commands rather than kernel ops. The window is served from a
+ * Installing an update, writing a login item, hiding the Dock or taskbar icon and
+ * quitting are all process-level actions the kernel has no business owning, so
+ * they are Tauri IPC commands rather than kernel ops. The window is served from a
  * loopback origin, so this module is the one place that knows the bridge exists
  * at all — and the one place that degrades when it does not: opened in a plain
  * browser (or before the shell's capabilities land) every call throws
  * `仅桌面窗口可用` and the pages grey their buttons out instead.
  */
+
+import { desktopPlatform, type DesktopPlatform } from './platform'
 
 export interface UpdateStatus {
   current: string
@@ -32,7 +34,8 @@ export interface ShellSettingRow {
   detail: string
 }
 
-export const SHELL_SETTING_ROWS: ShellSettingRow[] = [
+/** The three switches, in the words macOS uses for them. */
+const MACOS_ROWS: ShellSettingRow[] = [
   {
     field: 'launch_at_login',
     title: '开机静默启动',
@@ -49,6 +52,38 @@ export const SHELL_SETTING_ROWS: ShellSettingRow[] = [
     detail: '关闭时点击菜单栏图标会唤出主窗口。',
   },
 ]
+
+/** The same three switches, in the words Windows uses for them. */
+const WINDOWS_ROWS: ShellSettingRow[] = [
+  {
+    field: 'launch_at_login',
+    title: '开机静默启动',
+    detail: '登录 Windows 后直接在后台启动，不弹出窗口。',
+  },
+  {
+    field: 'show_dock_icon',
+    title: '在任务栏显示图标',
+    detail: '关闭后只在通知区域留一个图标，任务栏里不再有它。',
+  },
+  {
+    field: 'tray_menu_only',
+    title: '点击托盘图标只打开快捷菜单',
+    detail: '关闭时点击通知区域图标会唤出主窗口。',
+  },
+]
+
+/**
+ * The rows for one desktop.
+ *
+ * macOS calls its badge area the Dock and its tray the menu bar; Windows calls
+ * the same two things the taskbar and the notification area. The switches are
+ * the same three on both, so only the words change.
+ */
+export function shellSettingRows(
+  platform: DesktopPlatform = desktopPlatform(),
+): ShellSettingRow[] {
+  return platform === 'macos' ? MACOS_ROWS : WINDOWS_ROWS
+}
 
 type Invoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>
 

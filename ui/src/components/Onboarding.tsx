@@ -4,6 +4,7 @@ import { AGENTS } from '../navigation'
 import { ENGINE_INSTALL_HINTS } from '../engines'
 import { formatGigabytes, formatModelVersion } from '../format'
 import { useShellSettings, type ShellSettingsState } from '../lib/use-shell-settings'
+import { type DesktopPlatform } from '../platform'
 import { quitApp, shellAvailable, shellFailure } from '../shell'
 import { Button } from './ui/button'
 import { Progress } from './ui/progress'
@@ -29,6 +30,8 @@ interface OnboardingProps {
   serverConnected: boolean
   engines: EngineStatus[]
   model: ModelState | null
+  /** Which desktop the words and the window chrome belong to. */
+  platform: DesktopPlatform
   accountBusy: boolean
   accountError: string | null
   onLogin: (identifier: string, password: string) => Promise<void>
@@ -60,6 +63,7 @@ export function Onboarding({
   serverConnected,
   engines,
   model,
+  platform,
   accountBusy,
   accountError,
   onLogin,
@@ -143,7 +147,13 @@ export function Onboarding({
 
   return (
     <div className="flex h-full w-full flex-col bg-bg text-fg">
-      <div data-tauri-drag-region className="h-8 shrink-0" />
+      {/* macOS draws no title bar, so the guide reserves the traffic lights'
+          strip; Windows keeps the system title bar and a small pad is enough. */}
+      {platform === 'macos' ? (
+        <div data-tauri-drag-region className="h-8 shrink-0" />
+      ) : (
+        <div className="h-2 shrink-0" />
+      )}
       <div className="flex min-h-0 flex-1 justify-center overflow-y-auto px-8 pb-8">
         <div className="flex min-h-full w-full max-w-[560px] flex-col pt-2">
           <div className="flex items-center gap-1.5">
@@ -195,7 +205,7 @@ export function Onboarding({
                 }}
               />
             ) : null}
-            {step === PREFERENCES ? <PreferenceStep shell={shell} /> : null}
+            {step === PREFERENCES ? <PreferenceStep shell={shell} platform={platform} /> : null}
             {step === FINISH ? (
               <DoneStep
                 account={account}
@@ -203,6 +213,7 @@ export function Onboarding({
                 selected={selected}
                 model={model}
                 shell={shell}
+                platform={platform}
               />
             ) : null}
           </div>
@@ -761,7 +772,13 @@ function ModelStep({ kernel, model, onLater }: ModelStepProps) {
 }
 
 /** How this computer behaves once it is closed and reopened. */
-function PreferenceStep({ shell }: { shell: ShellSettingsState }) {
+function PreferenceStep({
+  shell,
+  platform,
+}: {
+  shell: ShellSettingsState
+  platform: DesktopPlatform
+}) {
   return (
     <section>
       <h2 className="text-[24px] leading-8">这台电脑怎么启动</h2>
@@ -769,7 +786,7 @@ function PreferenceStep({ shell }: { shell: ShellSettingsState }) {
         三项现在都是关的，随时可以在「设置 → 启动与窗口」里改。改动立即生效。
       </p>
       <div className="mt-4">
-        <ShellSettingsList shell={shell} />
+        <ShellSettingsList shell={shell} platform={platform} />
       </div>
     </section>
   )
@@ -781,10 +798,11 @@ interface DoneStepProps {
   selected: Set<EngineId>
   model: ModelState | null
   shell: ShellSettingsState
+  platform: DesktopPlatform
 }
 
 /** What is in place, so the window does not leave the guide quietly wrong. */
-function DoneStep({ account, engines, selected, model, shell }: DoneStepProps) {
+function DoneStep({ account, engines, selected, model, shell, platform }: DoneStepProps) {
   const configured = AGENTS.filter(
     ({ engine }) =>
       selected.has(engine) ||
@@ -795,7 +813,9 @@ function DoneStep({ account, engines, selected, model, shell }: DoneStepProps) {
   const preferences: string[] = []
   if (shell.settings !== null) {
     if (shell.settings.launch_at_login) preferences.push('开机静默启动')
-    if (shell.settings.show_dock_icon) preferences.push('程序坞图标')
+    if (shell.settings.show_dock_icon) {
+      preferences.push(platform === 'macos' ? '程序坞图标' : '任务栏图标')
+    }
     if (shell.settings.tray_menu_only) preferences.push('托盘只开快捷菜单')
   }
   const preferenceText =

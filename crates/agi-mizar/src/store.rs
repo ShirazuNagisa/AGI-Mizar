@@ -228,22 +228,13 @@ pub fn hash_token(token: &str) -> String {
 
 /// The default roster path.
 pub fn default_store_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".agi-mizar").join("devices.json")
+    // `~/.agi-mizar/devices.json`, on whichever platform "home" means there.
+    agi_platform::data_dir().join("devices.json")
 }
 
 /// The machine's name, as a person would recognise it.
 pub fn host_name() -> String {
-    std::process::Command::new("hostname")
-        .output()
-        .ok()
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|text| text.trim().to_string())
-        .filter(|text| !text.is_empty())
-        .unwrap_or_else(|| "this computer".to_string())
+    agi_platform::host_name()
 }
 
 /// Every address a phone on this network could dial, best first.
@@ -260,6 +251,9 @@ pub fn host_name() -> String {
 /// - never a point-to-point interface (tunnels: `utun`, `tun`, `tap`, `gif`,
 ///   `stf`, `ppp`) or a peer-to-peer one (`awdl`, `llw`) — those are for other
 ///   Apple devices, not for a phone on the Wi-Fi;
+/// - never a virtual adapter: on Windows, Hyper-V switches, WSL, VMware,
+///   VirtualBox, VPN clients and Bluetooth links all hold private addresses and
+///   would otherwise outrank the real Ethernet (see [`is_virtual_adapter`]);
 /// - never the benchmark ranges `198.18.0.0/15`, nor link-local `169.254/16`;
 /// - private addresses rank above public ones, and `192.168` above `10` above
 ///   `172.16/12`, because that is the order a home network is usually described
@@ -274,7 +268,7 @@ pub fn local_addresses() -> Vec<std::net::IpAddr> {
     let mut found: Vec<(u8, IpAddr)> = Vec::new();
     for interface in interfaces {
         let name = interface.name.to_ascii_lowercase();
-        if is_tunnel(&name) {
+        if is_tunnel(&name) || is_virtual_adapter(&name) {
             continue;
         }
         let IpAddr::V4(address) = interface.addr.ip() else {
@@ -298,6 +292,55 @@ fn is_tunnel(name: &str) -> bool {
     ]
     .iter()
     .any(|prefix| name.starts_with(prefix))
+}
+
+/// Whether an interface is a virtual adapter a phone cannot dial.
+///
+/// Windows enumerates a long list of software adapters — Hyper-V switches, WSL,
+/// VMware, VirtualBox, VPN clients, Bluetooth links, the loopback pseudo
+/// interface — and every one of them holds a private address. The address
+/// ranking alone would then put a `192.168` VMnet ahead of the machine's real
+/// Ethernet and the pairing QR would point at an address no phone can reach.
+///
+/// The names are matched as substrings, lowercased, because Windows spells them
+/// "VMware Network Adapter VMnet1", "vEthernet (Default Switch)", "本地连接* 1".
+/// macOS interface names (`en0`, `utun0`) contain none of these words, so the
+/// check is harmless there and keeps one code path for both.
+fn is_virtual_adapter(name: &str) -> bool {
+    const VIRTUAL: &[&str] = &[
+        // Hypervisors.
+        "vmware",
+        "virtualbox",
+        "vbox",
+        "hyper-v",
+        "vethernet",
+        "virtual ethernet",
+        "wsl",
+        // Overlay networks and VPN clients.
+        "tailscale",
+        "zerotier",
+        "vpn",
+        "openvpn",
+        "wireguard",
+        "wintun",
+        "tap",
+        "tun",
+        // Windows' own pseudo-adapters.
+        "loopback",
+        "bluetooth",
+        "蓝牙",
+        "本地连接",
+        "wi-fi direct",
+        "wifi direct",
+        "npcap",
+        // Consumer VPN clients and PPPoE dial-up.
+        "hamachi",
+        "radmin",
+        "pppoe",
+        "宽带连接",
+        "broadband",
+    ];
+    VIRTUAL.iter().any(|needle| name.contains(needle))
 }
 
 /// The `198.18.0.0/15` benchmark range, which tunnels and sandboxes occupy.
@@ -404,5 +447,57 @@ mod tests {
             .mode();
         assert_eq!(mode & 0o777, 0o600);
         drop(store);
+    }
+
+    #[test]
+    fn virtual_adapters_never_become_pairing_addresses() {
+        // Real names seen on a Windows 11 machine with Hyper-V, VMware and WSL
+        // installed, plus the localised Wi-Fi Direct pseudo-adapter.
+        for name in [
+            "vmware network adapter vmnet1",
+            "vmware network adapter vmnet8",
+            "virtualbox host-only network",
+            "vboxnet0",
+            "hyper-v virtual ethernet adapter",
+            "vethernet (default switch)",
+            "vethernet (wsl)",
+            "tailscale",
+            "zerotier one [abc]",
+            "loopback pseudo-interface 1",
+            "bluetooth network connection",
+            "蓝牙网络连接",
+            "本地连接* 1",
+            "宽带连接",
+            "microsoft wi-fi direct virtual adapter",
+            "tap-windows adapter v9",
+            "openvpn wintun",
+            "wireguard tunnel",
+        ] {
+            assert!(is_virtual_adapter(name), "{name} should be filtered");
+        }
+        // The adapters a phone on the same network actually uses must stay.
+        for name in [
+            "以太网",
+            "ethernet",
+            "ethernet 2",
+            "wlan",
+            "wi-fi",
+            "en0",
+            "eth0",
+        ] {
+            assert!(!is_virtual_adapter(name), "{name} must stay");
+        }
+    }
+
+    #[test]
+    fn tunnel_names_keep_their_macos_meaning() {
+        for name in [
+            "utun0", "tun0", "tap0", "gif0", "stf0", "ppp0", "awdl0", "llw0", "ipsec0", "bridge0",
+        ] {
+            assert!(is_tunnel(name), "{name} should be a tunnel");
+        }
+        for name in ["en0", "以太网", "ethernet"] {
+            assert!(!is_tunnel(name), "{name} is not a tunnel");
+        }
     }
 }

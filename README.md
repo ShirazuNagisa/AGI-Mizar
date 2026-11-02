@@ -50,6 +50,8 @@ protocol/            Mizar v1 黄金帧（手机协议，未来服务端用）
 
 ## 跑起来
 
+macOS / Linux：
+
 ```sh
 cargo test                     # 112 个测试
 cargo run -p agi-daemon        # 内核，无窗口
@@ -59,6 +61,21 @@ scripts/dev-app.sh             # 同上，但包成带图标的 .app（Dock 与 
 cd ui && npm install && npm run build   # 改前端之后：内核在编译时嵌入 ui/dist
 cd ui && npm run dev                    # 前端热更新，代理到 127.0.0.1:19392
 ```
+
+Windows（PowerShell，依赖与坑见 [docs/windows.md](docs/windows.md)）：
+
+```powershell
+scripts\fetch-llama.ps1                  # 固定版本 llama.cpp 运行时（校验 SHA256，装进 resources/bin）
+cargo build -p agi-hook-shim             # hook shim
+Copy-Item target\debug\agi-mizar-hook.exe crates\agi-app\resources\ -Force
+
+cargo test --all
+cargo run -p agi-daemon
+cargo run -p agi-app
+```
+
+Windows 上 `cargo build/test/clippy` 之前必须先准备 `crates/agi-app/resources/`（`tauri.windows.conf.json`
+的 resources 在编译期就会被 `tauri-build` 校验）——只想过编译可以用 `scripts\fetch-llama.ps1 -Stub`。
 
 窗口加载的是内核自己的页面 `http://127.0.0.1:<port>/?token=…`，不是 Tauri 打包的前端资源——
 所以同一份页面在浏览器里开发、在窗口里运行，只有一条路。
@@ -98,13 +115,30 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/jso
 
 ## 打包
 
+macOS：
+
 ```sh
 cargo install tauri-cli --version '^2' --locked   # 一次性
 scripts/package.sh            # 当前平台
 scripts/package.sh --universal # macOS：arm64 + x86_64
 ```
 
-`cargo build -p agi-app` 只产出可执行文件，不产出 `.app` / `.dmg` / `.msi`——那些要 CLI。
+Windows（PowerShell，不依赖 `cargo tauri`，走 `npx @tauri-apps/cli@2`）：
+
+```powershell
+scripts\package.ps1 -FetchLlama          # 默认出 NSIS 安装包
+scripts\package.ps1 -Bundles nsis,msi    # 额外出 MSI（需要 WiX 工具集）
+```
+
+产物在 `target\release\bundle\nsis\AGI Mizar_0.1.1_x64-setup.exe`，脚本会打印 SHA256。
+`package.ps1` 会在无 `TAURI_SIGNING_PRIVATE_KEY` 时关掉 updater 签名（否则 Tauri CLI 生成完安装包
+仍会报错退出），要发布产物用 `-WithUpdater`。
+
+Windows 没有签名证书时安装包未签名，SmartScreen 首次运行会警告一次；MSI 需要 WiX，默认不产出。
+完整前置、资源为什么必须先准备、NSIS/WiX 缓存和手工预置、以及和 macOS 的行为差异见
+[`docs/windows.md`](docs/windows.md)。
+
+`cargo build -p agi-app` 只产出可执行文件，不产出 `.app` / `.dmg` / `.msi` / 安装器——那些要 CLI。
 签名与公证的环境变量见脚本末尾的说明。
 
 ## 许可

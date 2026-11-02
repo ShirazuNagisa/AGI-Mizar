@@ -259,17 +259,8 @@ impl ModelService {
         // Only a process that still calls itself llama-server: pids are reused,
         // and killing a stranger because it inherited a number is worse than
         // leaking a child.
-        let listing = std::process::Command::new("/bin/ps")
-            .args(["-p", &pid.to_string(), "-o", "command="])
-            .output()
-            .ok();
-        let command = listing
-            .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
-            .unwrap_or_default();
-        if command.contains("llama-server") {
-            let _ = std::process::Command::new("/bin/kill")
-                .args(["-9", &pid.to_string()])
-                .status();
+        if stale_runtime_is_ours(pid) {
+            stop_stale_runtime(pid);
             tracing::info!("model: stopped a sidecar left over from a previous launch ({pid})");
         }
         let _ = std::fs::remove_file(&path);
@@ -892,6 +883,53 @@ impl agi_layout::Judge for SidecarJudge {
     }
 }
 
+/// The sidecar's file name on this platform.
+///
+/// Windows release archives and installers ship `llama-server.exe`; looking for
+/// the bare name there never finds it.
+fn llama_server_name() -> &'static str {
+    if cfg!(windows) {
+        "llama-server.exe"
+    } else {
+        "llama-server"
+    }
+}
+
+/// Whether the process holding `pid` is still the sidecar a dead launch left.
+///
+/// This is a pid-to-image-name query and nothing more: pids are reused, so the
+/// name is the only thing that says this is safe to kill. Windows answers with
+/// `tasklist`; the BSD-style systems answer with `/bin/ps`.
+fn stale_runtime_is_ours(pid: u32) -> bool {
+    #[cfg(windows)]
+    let output = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output();
+    #[cfg(not(windows))]
+    let output = std::process::Command::new("/bin/ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output();
+    output
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .to_ascii_lowercase()
+                .contains("llama-server")
+        })
+        .unwrap_or(false)
+}
+
+/// Stop one process by pid, hard.
+fn stop_stale_runtime(pid: u32) {
+    #[cfg(windows)]
+    let _ = std::process::Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .status();
+    #[cfg(not(windows))]
+    let _ = std::process::Command::new("/bin/kill")
+        .args(["-9", &pid.to_string()])
+        .status();
+}
+
 /// The `llama-server` process, and where it is.
 pub struct Runtime {
     process: tokio::sync::Mutex<Option<tokio::process::Child>>,
@@ -928,9 +966,12 @@ impl Runtime {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = view;
     }
 
-    /// Find the binary: an explicit override, then the app bundle, then `PATH`.
+    /// Find the binary: an explicit override, then beside the app, then `PATH`.
     ///
-    /// The bundle path is what ships; `PATH` is what a developer has.
+    /// The bundle path is what ships; `PATH` is what a developer has. The name
+    /// carries `.exe` on Windows, and the PATH lookup goes through the platform
+    /// seam so `PATHEXT` is honoured there — the old branch split `PATH` on `:`
+    /// and looked for an extension-less name, which finds nothing on Windows.
     pub fn binary(&self) -> Option<PathBuf> {
         if let Ok(explicit) = std::env::var("AGI_LLAMA_BIN") {
             let path = PathBuf::from(explicit);
@@ -938,19 +979,30 @@ impl Runtime {
                 return Some(path);
             }
         }
+        let name = llama_server_name();
         if let Ok(exe) = std::env::current_exe() {
-            // AGI Mizar.app/Contents/MacOS/agi-mizar -> Contents/Resources/bin/
-            if let Some(contents) = exe.parent().and_then(|p| p.parent()) {
-                let bundled = contents.join("Resources/bin/llama-server");
-                if bundled.exists() {
-                    return Some(bundled);
+            if let Some(directory) = exe.parent() {
+                // Beside the executable (a macOS bundle, an NSIS install) or in
+                // the `bin/` directory a package manager or release archive uses.
+                let beside = directory.join(name);
+                if beside.is_file() {
+                    return Some(beside);
+                }
+                let in_bin = directory.join("bin").join(name);
+                if in_bin.is_file() {
+                    return Some(in_bin);
+                }
+                // AGI Mizar.app/Contents/MacOS/agi-mizar -> Contents/Resources/bin/
+                #[cfg(target_os = "macos")]
+                if let Some(contents) = directory.parent() {
+                    let bundled = contents.join("Resources/bin/llama-server");
+                    if bundled.exists() {
+                        return Some(bundled);
+                    }
                 }
             }
         }
-        let path = std::env::var("PATH").ok()?;
-        path.split(':')
-            .map(|dir| PathBuf::from(dir).join("llama-server"))
-            .find(|candidate| candidate.exists())
+        agi_platform::which("llama-server")
     }
 
     /// Start the sidecar if it is not already answering, and hand back its port.

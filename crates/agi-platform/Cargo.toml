@@ -1,0 +1,18 @@
+[package]
+name = "agi-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The platform seam: home directory, PATH lookup, launch rules, URL opening."
+
+[dependencies]
+tokio = { workspace = true }
+dunce = "1"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"
+
+[dev-dependencies]
+tempfile = { workspace = true }

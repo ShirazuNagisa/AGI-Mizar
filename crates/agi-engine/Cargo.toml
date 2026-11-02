@@ -9,6 +9,7 @@ description = "The engine trait every agent adapter implements, and the events i
 
 [dependencies]
 agi-protocol = { workspace = true }
+agi-platform = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }

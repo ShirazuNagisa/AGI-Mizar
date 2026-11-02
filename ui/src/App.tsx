@@ -8,6 +8,7 @@ import {
   type UsageOverview,
 } from './api'
 import { AGENTS, type Page } from './navigation'
+import { applyPlatform, platformOf } from './platform'
 import { applyTheme, onSystemThemeChange, storeTheme, storedTheme, type ThemePreference } from './theme'
 import { OledScope } from './lib/oled'
 import { Sidebar } from './components/Sidebar'
@@ -120,7 +121,11 @@ export function App() {
     void kernel
       .state()
       .then((next) => {
-        if (!cancelled) setSnapshot(next)
+        if (cancelled) return
+        // The URL already carried the platform for the first paint; this keeps
+        // `<html data-platform>` honest if a browser page was opened without it.
+        applyPlatform(next.platform)
+        setSnapshot(next)
       })
       .catch((error: unknown) => {
         if (!cancelled) setBanner(error instanceof Error ? error.message : '内核没有应答')
@@ -135,7 +140,13 @@ export function App() {
   // where the event arrives before the subscription does.
   useEffect(() => {
     const read = () => {
-      void kernel.state().then(setSnapshot).catch(() => {})
+      void kernel
+        .state()
+        .then((next) => {
+          applyPlatform(next.platform)
+          setSnapshot(next)
+        })
+        .catch(() => {})
     }
     // The first minute is when the engines are still finding their sessions;
     // after that, a slow poll is only there to catch a machine going to sleep.
@@ -237,7 +248,9 @@ export function App() {
   }, [page.kind, refreshUsage])
 
   const refreshState = useCallback(async () => {
-    setSnapshot(await kernel.state())
+    const next = await kernel.state()
+    applyPlatform(next.platform)
+    setSnapshot(next)
   }, [])
 
   const reconnect = useCallback(
@@ -380,6 +393,11 @@ export function App() {
     }
   }, [])
 
+  // The platform the shell reported, for the copy that differs between the two
+  // desktops. The pre-render attribute already answered it; this is the answer
+  // the kernel owns, and it updates if a browser page was opened without one.
+  const platform = platformOf(snapshot?.platform)
+
   // The tray page is a window of its own, loading this same bundle. It draws
   // nothing but the three lists.
   if (new URLSearchParams(window.location.search).get('panel') === 'tray') {
@@ -397,6 +415,7 @@ export function App() {
         serverConnected={serverConnected}
         engines={snapshot.engines}
         model={snapshot.model ?? null}
+        platform={platform}
         accountBusy={accountBusy}
         accountError={accountError}
         onLogin={login}
@@ -457,6 +476,7 @@ export function App() {
         {page.kind === 'settings' ? (
           <SettingsPage
             version={snapshot?.version ?? ''}
+            platform={platform}
             account={account}
             onlineDesktops={onlineDesktops}
             serverConnected={serverConnected}

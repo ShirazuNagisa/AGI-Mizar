@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { isMac } from '../platform'
 
 interface ToolbarProps {
  title: string
@@ -9,16 +10,18 @@ interface ToolbarProps {
 
 /**
  * The strip every page shares: what this page is, on the left, and what it can
- * do, on the right. It is also a drag region, so a window without a title bar
- * still moves by its top edge.
+ * do, on the right. On macOS it is also a drag region, so a window without a
+ * title bar still moves by its top edge; Windows keeps its system title bar and
+ * needs no drag region.
  *
  * 1-bit: the title is the same 12px as everything else, so a filled square
  * marks where it starts. Size alone cannot carry hierarchy in this theme.
  */
 export function Toolbar({ title, badge, children }: ToolbarProps) {
+ const drag = isMac() ? { 'data-tauri-drag-region': 'deep' } : {}
  return (
     <header
-      data-tauri-drag-region="deep"
+      {...drag}
       className="flex h-12 shrink-0 items-center gap-2 mz-divide-b px-6"
     >
       <span className="size-2 shrink-0 bg-ink" aria-hidden />

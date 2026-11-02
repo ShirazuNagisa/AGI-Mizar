@@ -28,7 +28,6 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::path::PathBuf;
 use std::time::Duration;
 
 /// How long to wait for the kernel. Longer than the kernel's own approval
@@ -66,11 +65,14 @@ fn main() {
 }
 
 /// `~/.agi-mizar/hook.json`, written by the kernel at startup.
+///
+/// The path comes from `agi_platform::data_dir()` for the same reason the kernel
+/// uses it: on Windows `HOME` is often absent (or set by Git Bash to something
+/// that is not the profile), `MIZAR_DATA_DIR` must move the file for tests, and
+/// the shim has to read the file the kernel actually wrote. A shim that picked a
+/// different directory would fail silently on every hook.
 fn read_hook_file() -> Option<(u16, String)> {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)?;
-    let path = home.join(".agi-mizar").join("hook.json");
+    let path = agi_platform::data_dir().join("hook.json");
     let text = std::fs::read_to_string(path).ok()?;
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
     let port = u16::try_from(value.get("port")?.as_u64()?).ok()?;

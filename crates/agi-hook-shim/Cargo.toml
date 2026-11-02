@@ -12,4 +12,5 @@ name = "agi-mizar-hook"
 path = "src/main.rs"
 
 [dependencies]
+agi-platform = { workspace = true }
 serde_json = { workspace = true }

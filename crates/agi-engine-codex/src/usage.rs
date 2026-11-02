@@ -43,11 +43,9 @@ pub fn codex_home() -> PathBuf {
             return PathBuf::from(trimmed);
         }
     }
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".codex")
+    // The platform seam, not `HOME`: a Windows process started from Explorer has
+    // `USERPROFILE` and no `HOME`, and the old fallback silently answered `.`.
+    agi_platform::home().join(".codex")
 }
 
 /// The directory holding one subtree per day of rollouts.
