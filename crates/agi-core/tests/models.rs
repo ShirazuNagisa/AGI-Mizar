@@ -319,7 +319,10 @@ async fn the_sidecar_starts_and_stops() {
     std::env::set_var("AGI_LLAMA_BIN", &runner);
 
     let dir = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
     std::os::unix::fs::symlink(&workspace, dir.path().join("mizarllm-v1.gguf")).unwrap();
+    #[cfg(windows)]
+    std::fs::copy(&workspace, dir.path().join("mizarllm-v1.gguf")).unwrap();
     std::fs::write(
         dir.path().join("mizarllm-v1.json"),
         serde_json::json!({

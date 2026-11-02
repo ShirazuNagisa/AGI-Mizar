@@ -12,8 +12,27 @@
 
 use tauri::{AppHandle, Manager};
 
+#[cfg(target_os = "macos")]
+use crate::login_item;
+#[cfg(target_os = "macos")]
 use crate::shell::{self, ShellSettings};
-use crate::{login_item, updates};
+use crate::updates;
+
+/// The three switches, on platforms where the shell does not implement them.
+///
+/// The page asks for this shape on every platform; the macOS shell owns the
+/// real one. Windows keeps the same wire shape so the front end does not have
+/// to branch, and every switch is simply off.
+#[cfg(not(target_os = "macos"))]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ShellSettings {
+    #[serde(default)]
+    pub launch_at_login: bool,
+    #[serde(default)]
+    pub show_dock_icon: bool,
+    #[serde(default)]
+    pub tray_menu_only: bool,
+}
 
 /// Ask GitHub, and answer with what it said.
 #[tauri::command]
@@ -52,30 +71,56 @@ pub struct ShellPatch {
 /// The three switches.
 #[tauri::command]
 pub fn shell_settings_get() -> ShellSettings {
-    shell::current()
+    #[cfg(target_os = "macos")]
+    {
+        shell::current()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        ShellSettings::default()
+    }
 }
 
 /// Change them: each one takes effect before it is written down.
 #[tauri::command]
 pub fn shell_settings_set(app: AppHandle, settings: ShellPatch) -> Result<ShellSettings, String> {
-    let mut next = shell::current();
-    if let Some(value) = settings.launch_at_login {
-        next.launch_at_login = value;
+    #[cfg(target_os = "macos")]
+    {
+        let mut next = shell::current();
+        if let Some(value) = settings.launch_at_login {
+            next.launch_at_login = value;
+        }
+        if let Some(value) = settings.show_dock_icon {
+            next.show_dock_icon = value;
+        }
+        if let Some(value) = settings.tray_menu_only {
+            next.tray_menu_only = value;
+        }
+        shell::update(&app, next)
     }
-    if let Some(value) = settings.show_dock_icon {
-        next.show_dock_icon = value;
+    #[cfg(not(target_os = "macos"))]
+    {
+        // No login item, Dock icon or status item exists to change. Answer with
+        // the same shape the page already draws, without writing a file that
+        // nothing reads.
+        let _ = (app, settings);
+        Ok(ShellSettings::default())
     }
-    if let Some(value) = settings.tray_menu_only {
-        next.tray_menu_only = value;
-    }
-    shell::update(&app, next)
 }
 
 /// Start at login, for a script or a test — the same call the switch makes.
 #[tauri::command]
 pub fn shell_login_item(enabled: bool) -> Result<bool, String> {
-    login_item::set_enabled(enabled).map_err(|error| error.to_string())?;
-    Ok(login_item::is_enabled())
+    #[cfg(target_os = "macos")]
+    {
+        login_item::set_enabled(enabled).map_err(|error| error.to_string())?;
+        Ok(login_item::is_enabled())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = enabled;
+        Err("starting at login is not implemented on this platform".to_string())
+    }
 }
 
 /// Quit for real. Closing the window only hides it.
@@ -103,6 +148,14 @@ pub fn tray_panel_open_settings(app: AppHandle) -> Result<(), String> {
     if let Some(panel) = app.get_webview_window("tray-panel") {
         let _ = panel.hide();
     }
-    crate::tray::show_settings(&app);
-    Ok(())
+    #[cfg(target_os = "macos")]
+    {
+        crate::tray::show_settings(&app);
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Err("the tray page is not available on this platform".to_string())
+    }
 }
