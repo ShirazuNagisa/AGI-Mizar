@@ -154,6 +154,41 @@ target\release\bundle\msi\AGI Mizar_0.1.1_x64_en-US.msi      # -Bundles msi 时
 安装包已经落盘时（典型原因是 updater 签名缺失），脚本只 warning 并继续；反过来 CLI 退出 0 但没有
 安装包，脚本会失败。
 
+### 两个安装包：NSIS 是 per-user，MSI 是 per-machine
+
+这是两种格式在 Windows 上最大的行为差异，打包和测试都要按它对：
+
+| | NSIS（`*-setup.exe`，默认产物） | MSI（`-Bundles msi`） |
+|---|---|---|
+| 安装范围 | **per-user**（Tauri NSIS `installMode` 默认 `currentUser`） | **per-machine**（Tauri Wix 模板写死 `InstallScope="perMachine"`） |
+| 安装目录 | `%LOCALAPPDATA%\AGI Mizar\` | `C:\Program Files\AGI Mizar\` |
+| 权限 | 普通用户即可，不弹 UAC | **需要管理员/elevated shell**，否则 UAC 弹窗（`/qn` 下无法确认，会挂起） |
+| 快捷方式/卸载登记 | 当前用户开始菜单 + HKCU | 所有用户开始菜单 + HKLM |
+| 适合 | 普通用户下载安装、自动更新载体 | 企业分发/系统级安装 |
+
+两种格式的 payload 布局相同：`agi-mizar.exe`、`agi-mizar-hook.exe`（同目录）、`bin\llama-server.exe`
++ DLL。静默安装/卸载（在**管理员** PowerShell 里跑 MSI）：
+
+```powershell
+# NSIS（per-user，当前用户即可；/S 静默）
+Start-Process -FilePath 'target\release\bundle\nsis\AGI Mizar_0.1.1_x64-setup.exe' -ArgumentList '/S' -Wait
+Get-ChildItem "$env:LOCALAPPDATA\AGI Mizar"
+& "$env:LOCALAPPDATA\AGI Mizar\uninstall.exe" /S     # 卸载
+
+# MSI（per-machine，必须是管理员 shell）
+Start-Process msiexec.exe -ArgumentList '/i', '"D:\path\AGI Mizar_0.1.1_x64_en-US.msi"', '/qn', '/norestart', '/L*v', 'C:\temp\agi-msi-install.log' -Wait
+Get-ChildItem 'C:\Program Files\AGI Mizar'
+Get-ChildItem 'C:\ProgramData\Microsoft\Windows\Start Menu\Programs' | Where-Object Name -like '*AGI Mizar*'
+# 卸载（ProductCode 见 MSI 的 Property 表，或用“应用和功能”里的卸载项）
+Start-Process msiexec.exe -ArgumentList '/x', '{PRODUCT-CODE}', '/qn', '/norestart', '/L*v', 'C:\temp\agi-msi-uninstall.log' -Wait
+```
+
+想在不提权的情况下检查 MSI 内容，用**administrative install**（只展开文件、不登记安装）：
+
+```powershell
+msiexec /a "AGI Mizar_0.1.1_x64_en-US.msi" /qn TARGETDIR="D:\temp\agi-msi-extract"
+```
+
 ### updater 的两条路
 
 主配置里 `bundle.createUpdaterArtifacts = true` 且 `plugins.updater.pubkey` 已配置。这种组合下
@@ -248,24 +283,94 @@ Windows 上「签名」是两个完全独立的东西，不要混：
 
 1. **updater 的 minisign 签名**（`TAURI_SIGNING_PRIVATE_KEY`）：保证自动更新下载的安装包可信，
    产出 `*.sig` 和 `latest.json`。和 Authenticode 无关；`package.ps1 -WithUpdater` 走这条。
-2. **Authenticode 代码签名**（Windows SmartScreen 认的那个）：可选项。Tauri bundler 用
-   `bundle.windows.certificateThumbprint` 指定的证书，通过 `signtool` 签名安装包和主程序；
-   也支持 `bundle.windows.signCommand` 自定义（Azure Trusted Signing 之类）。
+2. **Authenticode 代码签名**（Windows / SmartScreen 认的那个）：对 NSIS `.exe` 和 MSI 用
+   `signtool` 签名。Tauri bundler 原生支持 `bundle.windows.certificateThumbprint`（安装包 + 主程序
+   一起签）和 `bundle.windows.signCommand`（Azure Trusted Signing 之类）；`scripts/package.ps1`
+   在 bundler 之外再对**产物安装包**做一次显式签名/校验。
 
-   注意：**它不会像 macOS 的 `APPLE_CERTIFICATE` 那样从环境变量导入 PFX**。要用的话：
-   - 先 `Import-PfxCertificate ... -CertStoreLocation Cert:\CurrentUser\My`；
-   - 再把 SHA1 指纹写进一个 config 文件，例如 `signing.windows.json`：
-     ```json
-     { "bundle": { "windows": { "certificateThumbprint": "A1B2...", "digestAlgorithm": "sha256", "timestampUrl": "http://timestamp.digicert.com" } } }
-     ```
-   - `npx --yes @tauri-apps/cli@2 build --bundles nsis --config signing.windows.json`；
-   - `signtool` 找不到时用 `TAURI_WINDOWS_SIGNTOOL_PATH` 指向它（默认去 Windows SDK 注册表里找）。
+### 本地用 `package.ps1` 签名
 
-**没有证书时**：安装包照常能用，但首次运行会出现 SmartScreen「Windows 已保护你的电脑」，
-需要点「更多信息 → 仍要运行」。企业机器可能连「仍要运行」都没有（策略禁止）；这是它的正常行为，
-不是打包坏了。签名证书需要 OV/EV 代码签名证书 + 私钥，属于发布流程之外的现实成本。
+```powershell
+# PFX 文件（发布方手里有 .pfx + 密码的常见路径）
+scripts\package.ps1 -Bundles nsis,msi `
+  -PfxPath C:\certs\agi-mizar.pfx -PfxPassword $env:PFX_PASSWORD `
+  -TimestampUrl http://timestamp.digicert.com
 
-MSI 是否需要单独签：是，同一套 `bundle.windows` 配置，`signtool` 同时签 MSI 和 NSIS 产物。
+# 证书已导入 CurrentUser\My（或 LocalMachine\My，自动加 /sm）
+scripts\package.ps1 -Thumbprint 0123456789ABCDEF0123456789ABCDEF01234567 `
+  -TimestampUrl http://timestamp.digicert.com
+```
+
+- 签名在**产物落盘之后**做：`signtool sign /fd SHA256 /f <pfx> /p <pwd> [/tr <url> /td SHA256]`
+  （`-Thumbprint` 换成 `/sha1`）；不传 `-TimestampUrl` 只做无时间戳签名（证书过期后签名失效）。
+- 随后 `signtool verify /pa /v` + `Get-AuthenticodeSignature`，输出 Status / Subject / Thumbprint /
+  时间戳证书，并重新打印签名后的 SHA256。
+- 校验门的判定与语言无关：`signtool verify /pa` 在链不受信时退出码是 1，而 `Get-AuthenticodeSignature`
+  给出 `UnknownError`/`NotTrusted` 且有 SignerCertificate —— 这一对被视为「签名完整、仅信任链不满足」
+  的预期结果（自签名场景）；只有 `NotSigned`/`HashMismatch`/无 Signer 才算失败。`signtool` 的提示文本会随
+  Windows 显示语言本地化，不要靠匹配英文句子（2026-11-03 在中文系统上踩过：只匹配英文导致
+  `-SelfSigned` 在签名后误报失败，已改为按 `Get-AuthenticodeSignature` 判定）。
+- **失败语义是 fail-closed**：`-PfxPath` 不存在、密码错、`signtool` 执行失败、签名后没有 SignerCertificate
+  或 `Get-AuthenticodeSignature` 返回 `NotSigned`/`HashMismatch`，脚本都返回非 0——不会静默产出一个未签名
+  的安装包。`signtool` 从 PATH 或 Windows SDK 目录自动找（本机是
+  `C:\Program Files (x86)\Windows Kits\10\bin\10.0.28000.0\x64\signtool.exe`），也可以用
+  `TAURI_WINDOWS_SIGNTOOL_PATH` 指定。
+- 不传任何签名参数时保持原行为：安装包产出、提示未签名。
+
+### 没有证书时验证签名链路：`-SelfSigned`
+
+```powershell
+scripts\package.ps1 -Bundles nsis,msi -SelfSigned
+```
+
+它会创建临时自签名代码签名证书（`CN=AGI Mizar Test Signing`）→ 导出临时 PFX → 导入
+`Cert:\CurrentUser\TrustedPeople` → 对 NSIS/MSI 签名 → `signtool verify /pa` +
+`Get-AuthenticodeSignature` → **清理**（TrustedPeople、`CurrentUser\My`、临时 PFX 全部删除）。
+
+实测边界（本机 Windows 11、非管理员、无证书）：
+
+- 签名本身成功，`Get-AuthenticodeSignature` 找到签名且 Signer 证书指纹与临时证书一致；
+- `Status` 是 **`UnknownError`**，`signtool verify /pa` 报
+  `A certificate chain processed, but terminated in a root certificate which is not trusted`；
+- 原因是自签名证书是链的根：只放进 `TrustedPeople` **不足以**让 Authenticode 信任链成立。要让
+  Status 变成 `Valid`，必须把证书放进 `CurrentUser\Root`（受信任的根证书颁发机构）。
+- 往 Root 写入会弹**交互式安全警告对话框**（`certutil -user -addstore Root` 和 .NET `X509Store` 都实测
+  会阻塞等待确认），在 CI / 无人值守会话里不能自动化，强行做会挂住流水线。所以 `-SelfSigned` 的正确
+  断言是「签名存在、完整、只有信任链这一项不满足」，不是「Status=Valid」。人工想看到 `Valid` 可以：
+
+  ```powershell
+  # 交互式会话里手动接受一次安全警告（仅测试机；测完务必删除）
+  certutil -user -addstore Root C:\temp\agi-mizar-test.cer
+  Get-AuthenticodeSignature 'target\release\bundle\nsis\AGI Mizar_0.1.1_x64-setup.exe' | Format-List Status, SignerCertificate
+  certutil -user -delstore Root <thumbprint>
+  ```
+
+- 自签名**永远不能**消除 SmartScreen 警告，也**不要**把测试证书提交进仓库；`-SelfSigned` 只用于证明
+  「签名 → 校验 → 清理」链路在无证书环境可用。
+
+### CI（release.yml 的可选 Authenticode）
+
+`release.yml` 的 windows job 支持两种可由发布方提供的 secrets，**仓库里没有、也不应该有证书**：
+
+| secrets | 用途 |
+|---|---|
+| `WINDOWS_CERTIFICATE_BASE64` + `WINDOWS_CERTIFICATE_PASSWORD` | base64 编码的 `.pfx`；job 里导入 `CurrentUser\My`，用 `bundle.windows.certificateThumbprint` 让 tauri-bundler 调 `signtool` 签名主程序和 NSIS 安装包 |
+| `WINDOWS_THUMBPRINT` | 证书已经预装在 runner 证书库时，直接用这个 SHA1 指纹（自定义 runner 镜像才用得上；base64 secret 优先） |
+
+两者都不存在时 job 照常构建，只是安装包未签名。签名使用
+`timestampUrl = http://timestamp.digicert.com`，避免证书到期后历史版本签名失效。注意 macOS 的
+`APPLE_CERTIFICATE` 那套**不适用于 Windows**：tauri-bundler 不会从环境变量导入 PFX，必须先把证书
+导进证书库再传指纹（workflow 里的 import 步骤做的就是这个）。
+
+### SmartScreen 到底由什么决定
+
+- 未签名 / 自签名：首次运行弹「Windows 已保护你的电脑」，需要「更多信息 → 仍要运行」；企业策略可能
+  完全禁止。
+- **受信 CA 签发的代码签名证书（OV/EV）+ 时间戳**：这是必要条件，但不是充分条件。SmartScreen 还看
+  下载声誉：新证书/新文件仍可能警告，直到累计下载量建立声誉；EV 证书通常能更快获得信任。
+- 证书私钥泄露等于发布渠道被接管；CI 里应使用 secrets + 仅发布 job 可用的环境，构建完清理导出的 PFX
+  （workflow 的 import 步骤在 `finally` 里删除临时文件）。
+- MSI 和 NSIS 需要各自签名；`bundle.windows` 这套配置对两种产物都生效。
 
 ---
 
@@ -290,9 +395,10 @@ MSI 是否需要单独签：是，同一套 `bundle.windows` 配置，`signtool`
   （`TAURI_SIGNING_PRIVATE_KEY` / `_PASSWORD`）产出带 `.sig` 的 NSIS 和 `latest.json`，进 draft release。
 
 `needs: macos` 是为了让两个 job 都调 `tauri-action` 时不抢着创建同一个 draft release；代价是
-Windows 任务在 macOS 之后串行。Authenticode 的 CI 接入（`WINDOWS_CERTIFICATE` /
-`WINDOWS_CERTIFICATE_PASSWORD` / 指纹）在 `release.yml` 里以注释说明，没有默认开启——
-没有证书时 release 一样能出，只是未签名。
+Windows 任务在 macOS 之后串行。Authenticode 是**可选**的：只有发布方提供
+`WINDOWS_CERTIFICATE_BASE64` + `WINDOWS_CERTIFICATE_PASSWORD`（或 `WINDOWS_THUMBPRINT`）时，job 才导入
+证书并把 `bundle.windows.certificateThumbprint` 传给 tauri-bundler；没有 secrets 时构建照常、安装包
+未签名。仓库里不保存任何证书/私钥，细节见 §7。
 
 同一轮也补了 `macos` job 缺 hook shim 的既有缺口（对齐本地 `package.sh` 的行为）：先分别构建
 `agi-hook-shim` 的 arm64 / x86_64 两片，`lipo -create` 成
@@ -328,10 +434,20 @@ Windows 任务在 macOS 之后串行。Authenticode 的 CI 接入（`WINDOWS_CER
 
 ## 10. 限制与未决
 
-- **没有签名证书**：安装包未签名，SmartScreen 会警告；updater 的 minisign 只保护自动更新链路。
-- **MSI 未在本机验证**：本机缓存只有 NSIS（`%LOCALAPPDATA%\tauri\NSIS`），没有 WiX；
-  `-Bundles nsis,msi` 需要先按 §6 放好 `WixTools314`。安装包内容（hook / llama）两种格式共用同一份
-  resources 配置，但 MSI 的目录布局和卸载行为没有实机核对过。
+- **证书**：仓库没有代码签名证书，release 默认产出**未签名**安装包；`package.ps1` 已支持
+  `-PfxPath/-PfxPassword`、`-Thumbprint` 和自签名测试（§7），但本机只有自签名链路可验证。
+  自签名无法让 `Get-AuthenticodeSignature` 变成 `Valid`：把临时证书放进 `CurrentUser\Root` 需要
+  交互式安全警告确认（`certutil -user -addstore Root` 和 .NET `X509Store` 都实测阻塞），无人值守
+  会话不能做；没有 CA 证书 + 下载声誉，SmartScreen 仍会警告。真实证书由发布方通过
+  `WINDOWS_CERTIFICATE_BASE64`/`WINDOWS_THUMBPRINT` secrets 提供，本机没有 secrets，**没有实测**
+  release 的签名步骤。
+- **MSI 安装未在本机实机验证（环境限制，不是产物缺陷）**：本机非管理员，Tauri MSI 是
+  `InstallScope=perMachine`，`msiexec /i /qn` 会在 UAC 安全桌面挂起（实测 582.5s，超时被杀），
+  连 `/a` administrative install 也需要提权（实测 300s 后被杀的同一现象）。本机改用
+  **7-Zip 解包 + MSI File/Component/Directory 表**核对 payload（54 个文件 / 84.1 MiB，
+  逐个大小与 File 表一致；`agi-mizar.exe` + `agi-mizar-hook.exe` 在安装根、50 个 llama.cpp
+  文件在 `bin\`），并用解包出来的 `agi-mizar.exe` 启动验证（endpoint.json/hook.json 正常落盘、
+  `/healthz` 200）。真实安装/卸载需在**管理员 PowerShell** 里执行（命令见 §4「两个安装包」）。
 - **只支持 x64**：没有 Windows ARM64 产物；也没有把 CUDA 版 llama.cpp 打进包（默认 CPU）。
 - **`resources/` 不入库**：release CI 每次都要 `fetch-llama.ps1` 联网（约 24 MB）+ 校验；
   离线打 release 包需要 `-Archive`。
@@ -373,5 +489,38 @@ Windows 任务在 macOS 之后串行。Authenticode 的 CI 接入（`WINDOWS_CER
   `src/config.ts`，它的 `mergeUserConfig()` 先按 inline JSON 解析、失败才当文件路径，所以
   `getInfo()` 也不会被这个写法绊倒。macOS 的 lipo/签名段是 shell 步骤，本机（Windows）无法执行，
   只做了静态核对，没有实跑 macOS 构建。
-- 完整 `npx tauri build --bundles nsis` 与安装/卸载实机验证由打包验证步骤统一执行，不在本文的
-  脚本级验证范围内；`package.ps1` 的构建参数、`--config` 覆盖和产物查找逻辑按上面的源码事实编写。
+- 完整打包（2026-11-02 23:15–23:21，一次 cargo 构建）：`scripts\package.ps1 -Bundles nsis,msi -SelfSigned`
+  成功，NSIS 20.4 MiB / MSI 33.2 MiB。自签名前后 hash、`Get-AuthenticodeSignature` Status、清理结果
+  见 `.zwork/win-verify/fixes/signing-msi/build-sign-nsis-msi.log`：
+  - NSIS：签名前 `1E7CC03B…AAEEF25`，签名后 `11E4CDE3…622FAE9`；
+  - MSI：签名前 `D1E19621…F216066D`，签名后 `63629E8D…ABCD32A`；
+  - 两个产物都是 `Status=UnknownError` + `CN=AGI Mizar Test Signing`，`signtool verify /pa` 报
+    「链终止于不受信根」（自签名的预期结果，见 §7）；临时证书已从 `My`/`TrustedPeople` 删除，PFX
+    已删（脚本 finally 清理）。
+- WiX 预置：官方 `wix314-binaries.zip` 41,297,555 B，sha256 `6AC824E1…FF43D31` 与
+  tauri-bundler 2.10.4 常量一致；解压到 `%LOCALAPPDATA%\tauri\WixTools314` 后 `candle.exe` 可直接
+  运行（本机只有 .NET 4.8，没有 3.5，WiX 3.14 不需要旧框架），MSI 构建没有触发自动下载。
+- 签名脚本的其余路径也实测过：不带签名参数时照旧产出未签名安装包并 exit 0；`-Thumbprint` 用临时
+  证书（`CurrentUser\My`，无 PFX 文件）签名并通过校验（同样是 `UnknownError`/链不受信的预期结果），
+  证书随后从证书库删除。证据在同一目录的 `pretest-signing.log` 与 `SUMMARY.md` 里。
+- MSI 安装验证（环境限制）：非管理员下 `msiexec /i /qn` 挂起 582.5s（UAC 安全桌面，Approval 被禁用
+  无法确认）后被杀；`ALLUSERS=2 MSIINSTALLPERUSER=1` 单次尝试同样挂起 150s 被杀；连
+  `msiexec /a` administrative install 也需要提权，300s 后被杀。因此改用 7-Zip 解包 + MSI
+  File/Component/Directory 表核对 payload：54 文件 / 84.1 MiB、逐个大小与 File 表一致、
+  `agi-mizar.exe`+`agi-mizar-hook.exe` 在根、50 个 llama.cpp 文件在 `bin\`；解包产物
+  `agi-mizar.exe --background` 可启动，`endpoint.json`/`hook.json` 落盘、`/healthz` 200
+  （`/api/v1/state` 用 endpoint token 返回 401，属运行时/Auth 问题，不在本步结论内）。证据：
+  `.zwork/win-verify/fixes/signing-msi/`（`msi-database.txt`、`msi-payload.log`、
+  `msi-verification.log`、`pretest-signing.log` 等）。真实安装/卸载需管理员 PowerShell，命令见 §4。
+
+### 2026-11-03 最终重建（判官/协议/信封 R-B1 修复后）
+
+- 代码：`windows-support` 工作树，测试 376 passed / 0 failed / 1 ignored，clippy exit 0。
+- `scripts\package.ps1 -Bundles "nsis,msi"` 一次构建出：
+  - NSIS `AGI Mizar_0.1.1_x64-setup.exe` 21,383,101 B / sha256 `961C61AC8E20BFD4CCB269EE16F2549AD7FDE35D6CBC1A06EA57FB9FBDA7E7B8`（per-user，未签名）；
+  - MSI `AGI Mizar_0.1.1_x64_en-US.msi` 34,807,808 B / sha256 `A40EE111D2A6A113974E948841DB98F95457E0DBC3CA1CA05B26E29F24BD74D4`（perMachine，未签名）。
+- 再跑 `-Bundles nsis -SelfSigned`：签名后 NSIS 21,392,968 B / sha256 `A678E50C48BF60B4CECDD1E9BC198D6BF3C23BB7E29B66F1B26D0F8BF5B799A3`，
+  `Status=UnknownError`、`CN=AGI Mizar Test Signing`、`signtool verify /pa` 报链不受信（预期）；临时证书/PFX 已清理。
+- 最终 NSIS（未签名与自签名两份都）安装/启动/关窗/退出/卸载全 PASS：安装 2.2–2.5s、55 文件 / 88,328,878 B、
+  hook 在安装根、`bin\` 52 文件；退出删除 endpoint/hook；卸载后目录/快捷方式/注册表全清。
+- 证据：`docs/evidence/agi-mizar-windows-2026-11-02/fixed/limitations/packaging/`（工作区仓库）。

@@ -127,15 +127,24 @@ Windows（PowerShell，不依赖 `cargo tauri`，走 `npx @tauri-apps/cli@2`）�
 
 ```powershell
 scripts\package.ps1 -FetchLlama          # 默认出 NSIS 安装包
-scripts\package.ps1 -Bundles nsis,msi    # 额外出 MSI（需要 WiX 工具集）
+scripts\package.ps1 -Bundles nsis,msi    # 额外出 MSI（需要 WiX 工具集，且 MSI 是 per-machine，安装要管理员）
 ```
 
 产物在 `target\release\bundle\nsis\AGI Mizar_0.1.1_x64-setup.exe`，脚本会打印 SHA256。
 `package.ps1` 会在无 `TAURI_SIGNING_PRIVATE_KEY` 时关掉 updater 签名（否则 Tauri CLI 生成完安装包
 仍会报错退出），要发布产物用 `-WithUpdater`。
 
-Windows 没有签名证书时安装包未签名，SmartScreen 首次运行会警告一次；MSI 需要 WiX，默认不产出。
-完整前置、资源为什么必须先准备、NSIS/WiX 缓存和手工预置、以及和 macOS 的行为差异见
+Authenticode 代码签名（可选，SmartScreen 认的那个）：
+
+```powershell
+scripts\package.ps1 -PfxPath C:\certs\agi-mizar.pfx -PfxPassword $env:PFX_PASSWORD `
+  -TimestampUrl http://timestamp.digicert.com
+scripts\package.ps1 -Thumbprint 0123... -TimestampUrl http://timestamp.digicert.com
+scripts\package.ps1 -SelfSigned          # 没有证书时验证 签名→校验→清理 链路（自签名不消除 SmartScreen）
+```
+
+没有证书时安装包未签名，SmartScreen 首次运行会警告一次；MSI 需要 WiX，默认不产出。
+完整前置、资源为什么必须先准备、NSIS/WiX 缓存和手工预置、签名/CI secrets 以及和 macOS 的行为差异见
 [`docs/windows.md`](docs/windows.md)。
 
 `cargo build -p agi-app` 只产出可执行文件，不产出 `.app` / `.dmg` / `.msi` / 安装器——那些要 CLI。

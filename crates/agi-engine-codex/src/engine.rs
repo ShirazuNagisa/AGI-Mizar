@@ -52,6 +52,15 @@ const ACTIVITY_PAGE: usize = 200;
 const RESTART_BASE: Duration = Duration::from_secs(1);
 const RESTART_MAX: Duration = Duration::from_secs(30);
 
+/// How long a session created or touched locally survives a `thread/list` that
+/// does not mention it.
+///
+/// `thread/list` is only eventually consistent: a thread created a moment ago
+/// (or a running turn's thread) can be missing from one page even though it
+/// exists. Removing it then loses the `running` edge the judge listens for, and
+/// re-inserting it from the next status change would lose its title and cwd.
+const THREAD_REMOVAL_GRACE_MS: i64 = 10_000;
+
 /// One approval Codex is waiting on.
 struct PendingApproval {
     /// The JSON-RPC id to answer.
@@ -253,6 +262,22 @@ impl CodexEngine {
                     self.set_running(id, false);
                 }
             }
+            // Current Codex app-servers announce the turn lifecycle through the
+            // thread status (`active` while a turn runs, `idle` after it), not
+            // only through `turn/started` / `turn/completed`. A failed or
+            // reconnecting turn may never send the latter, and a thread created
+            // a moment ago may not be in `thread/list` yet — both leave the
+            // kernel without the running transition the judge waits for.
+            "thread/status/changed" => {
+                if let Some(id) = thread_id {
+                    let running = params
+                        .get("status")
+                        .and_then(|status| status.get("type"))
+                        .and_then(Value::as_str)
+                        == Some("active");
+                    self.set_running(id, running);
+                }
+            }
             "item/completed" => {
                 // Deliberately not appended as a record here. A Codex
                 // notification carries no sequence number, and inventing one
@@ -301,7 +326,6 @@ impl CodexEngine {
                 }
             }
             "thread/name/updated"
-            | "thread/status/changed"
             | "thread/started"
             | "thread/archived"
             | "thread/deleted"
@@ -339,14 +363,25 @@ impl CodexEngine {
     }
 
     /// Mark one cached session as running or not.
+    ///
+    /// A status notification can arrive before the thread is in the cache (the
+    /// create path, or a turn that begins faster than `thread/list` settles), so
+    /// a missing session is inserted instead of dropping the transition: the
+    /// kernel's judge is driven by exactly this `running` edge.
     fn set_running(&self, thread_id: &str, running: bool) {
         let session = {
             let mut state = self.state();
-            let Some(session) = state.sessions.get_mut(thread_id) else {
-                return;
-            };
+            let session = state
+                .sessions
+                .entry(thread_id.to_string())
+                .or_insert_with(|| {
+                    Session::bare(SessionKey::new(EngineId::Codex, thread_id), now_ms())
+                });
+            let was_running = session.running;
             session.running = running;
-            if running {
+            // `turn/started` and `thread/status/changed` can both report the
+            // beginning of one turn; only count the edge, not every report.
+            if running && !was_running {
                 session.turns = session.turns.saturating_add(1);
             }
             session.updated_at = now_ms();
@@ -524,11 +559,28 @@ impl CodexEngine {
                     .sessions
                     .insert(session.key.id.clone(), session.clone());
             }
+            let now = now_ms();
             for id in known {
-                if !sessions.iter().any(|session| session.key.id == id) {
-                    state.sessions.remove(&id);
-                    removed.push(SessionKey::new(EngineId::Codex, id));
+                if sessions.iter().any(|session| session.key.id == id) {
+                    continue;
                 }
+                // A brand-new thread or one whose turn is still running may be
+                // absent from this page of `thread/list`. Dropping it here would
+                // erase the very running edge the judge waits for (and the
+                // next status change would rebuild the row without its title).
+                let keep = state
+                    .sessions
+                    .get(&id)
+                    .map(|session| {
+                        session.running
+                            || now.saturating_sub(session.updated_at) < THREAD_REMOVAL_GRACE_MS
+                    })
+                    .unwrap_or(false);
+                if keep {
+                    continue;
+                }
+                state.sessions.remove(&id);
+                removed.push(SessionKey::new(EngineId::Codex, id));
             }
         }
         for session in &sessions {
@@ -958,6 +1010,20 @@ impl Engine for CodexEngine {
             .and_then(|thread| thread.get("id"))
             .and_then(Value::as_str)
             .ok_or_else(|| EngineError::upstream("thread/start answered without a thread"))?;
+        // Insert the thread the server just returned, without waiting for
+        // `thread/list`: that list is only eventually consistent, and a phone
+        // creates a thread and prompts it immediately. Without the cache entry
+        // the turn's `turn/started` / `thread/status/changed` notifications are
+        // dropped by `set_running`, so the kernel never sees the running
+        // true -> false transition that triggers the judge.
+        if let Some(thread) = value.get("thread") {
+            if let Some(session) = projection::session_from_thread(thread) {
+                self.state()
+                    .sessions
+                    .insert(session.key.id.clone(), session.clone());
+                self.emit(EngineEvent::SessionUpdated(session));
+            }
+        }
         Ok(SessionKey::new(EngineId::Codex, id))
     }
 

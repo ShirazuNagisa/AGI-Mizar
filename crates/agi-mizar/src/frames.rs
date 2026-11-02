@@ -13,6 +13,9 @@
 //! flatter, so [`record_to_event`] rebuilds the shape the phone already knows.
 //! That is deliberate: the alternative is a phone release for every engine we
 //! add, and the phone must not learn that Codex and Claude Code exist.
+//! [`record_to_envelope`] then puts that event back inside the
+//! `{"type":"event","event":{…}}` envelope a `records[]` element is defined to
+//! be — the shape the golden fixture pins and the phones decode.
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -360,6 +363,23 @@ pub fn record_to_event(record: &Record) -> Option<Value> {
         RecordKind::ToolCall | RecordKind::ToolResult => return None,
     };
     Some(event)
+}
+
+/// Put one translated record inside the envelope `records[]` is defined to carry.
+///
+/// A `session.messages` result is a list of *envelopes*, not of bare events:
+/// `{"type":"event","event":{type,seq,time,data}}`, as
+/// `protocol/fixtures/session-messages.json` shows. The envelope is what leaves
+/// room for other element kinds later;
+/// the phones currently tolerate a bare event too (`payload = event ?? raw`),
+/// which is exactly why the drift was invisible. Both clients still decode the
+/// envelope, so aligning the host with the golden shape breaks nothing.
+///
+/// Returns `None` exactly when [`record_to_event`] does: a tool call or result is
+/// not part of the conversation summary.
+pub fn record_to_envelope(record: &Record) -> Option<Value> {
+    let event = record_to_event(record)?;
+    Some(json!({ "type": "event", "event": event }))
 }
 
 /// A `session.list` row.

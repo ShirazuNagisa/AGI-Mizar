@@ -251,6 +251,18 @@ pub fn render_prompt(f: &Facts) -> String {
     parts.join("\n")
 }
 
+/// The teacher's `system` message, **byte-identical to training**.
+///
+/// `tools/replay/teacher/format.mjs` reads `tools/replay/teacher/prompt.md`,
+/// `.trim()`s it, and sends the result as the `system` message of every training
+/// sample. `teacher-prompt.md` is a verbatim copy of that trimmed text; the two
+/// files must stay in sync, because a model trained on one system message and
+/// asked with another is being asked a different question. `tests/parity.rs`
+/// pins this against a fixture captured from the JS side.
+pub fn teacher_system_prompt() -> &'static str {
+    include_str!("teacher-prompt.md").trim()
+}
+
 /// Pull a state out of whatever the model produced.
 ///
 /// Accepts `{"state":"done"}`, a bare `done`, or a ` thinking…<｜end▁of▁thinking｜>` wrapper —
@@ -472,6 +484,45 @@ impl Judge for RuleJudge {
     }
 }
 
+/// The chat-completions body one judgement sends.
+///
+/// Split out of [`LlamaServerJudge::judge`] so a unit test can pin the wire
+/// shape without a live server. The model was trained on a `system` + `user`
+/// chat sample (see [`teacher_system_prompt`]); posting a bare prompt to
+/// `/completion` was a different input distribution, and the model answered it
+/// by continuing the prompt instead of emitting a verdict.
+fn chat_body(facts: &Facts) -> serde_json::Value {
+    serde_json::json!({
+        "messages": [
+            { "role": "system", "content": teacher_system_prompt() },
+            { "role": "user", "content": render_prompt(facts) },
+        ],
+        "temperature": 0.0,
+        "max_tokens": 32,
+        "cache_prompt": true,
+        // Passed straight to the chat template by llama.cpp; a server that does
+        // not know the key ignores it. This keeps a thinking Qwen3 template from
+        // spending the token budget before the JSON. On the pinned b12000 build
+        // the fine-tune answers directly either way (verified 2026-11-02), so
+        // the field is for stability, not for correctness.
+        "chat_template_kwargs": { "enable_thinking": false },
+    })
+}
+
+/// Pull the answer text out of an OpenAI-compatible chat-completions body.
+///
+/// `choices[0].message.content` is the contract; some servers and proxies put
+/// the text in the legacy `choices[0].text` field instead, and a judgement that
+/// silently loses it would send the turn back to the rules.
+fn chat_text(json: &serde_json::Value) -> Option<&str> {
+    json.pointer("/choices/0/message/content")
+        .and_then(|content| content.as_str())
+        .or_else(|| {
+            json.pointer("/choices/0/text")
+                .and_then(|content| content.as_str())
+        })
+}
+
 /// Talks to a warm `llama-server` sidecar over loopback.
 ///
 /// The model stays loaded in the sidecar, so one judgement is a single HTTP round
@@ -486,18 +537,11 @@ pub struct LlamaServerJudge {
 #[async_trait]
 impl Judge for LlamaServerJudge {
     async fn judge(&self, facts: &Facts) -> Option<State> {
-        let prompt = render_prompt(facts);
-        let body = serde_json::json!({
-            "prompt": prompt,
-            "n_predict": 24,
-            "temperature": 0.0,
-            "stop": ["\n\n"],
-            "cache_prompt": true,
-        });
+        let body = chat_body(facts);
         let client = reqwest::Client::new();
         let mut req = client
             .post(format!(
-                "{}/completion",
+                "{}/v1/chat/completions",
                 self.endpoint.trim_end_matches('/')
             ))
             .json(&body);
@@ -509,8 +553,7 @@ impl Judge for LlamaServerJudge {
             return None;
         }
         let json: serde_json::Value = resp.json().await.ok()?;
-        let text = json.get("content")?.as_str()?;
-        parse_state(text)
+        parse_state(chat_text(&json)?)
     }
 }
 
@@ -589,6 +632,72 @@ mod tests {
         );
         assert_eq!(parse_state("stalled"), Some(State::Stalled));
         assert_eq!(parse_state("完全没有"), None);
+    }
+
+    #[test]
+    fn the_teacher_system_prompt_is_the_training_one() {
+        let system = teacher_system_prompt();
+        let first_line = system.lines().next().unwrap_or_default();
+        assert!(system.starts_with("你是一个判定器。"), "{first_line}");
+        assert!(
+            system.contains("只输出 JSON"),
+            "the output contract is trained in"
+        );
+        // Trailing whitespace would change the token stream the model saw.
+        assert_eq!(system, system.trim());
+    }
+
+    #[test]
+    fn the_judge_sends_the_training_chat_not_a_raw_completion() {
+        let facts = base();
+        let body = chat_body(&facts);
+
+        let messages = body["messages"].as_array().expect("messages array");
+        assert_eq!(messages.len(), 2, "system + user, as in training");
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(
+            messages[0]["content"].as_str(),
+            Some(teacher_system_prompt())
+        );
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(
+            messages[1]["content"].as_str(),
+            Some(render_prompt(&facts).as_str())
+        );
+
+        assert_eq!(body["temperature"], 0.0);
+        assert_eq!(body["max_tokens"], 32);
+        assert_eq!(body["cache_prompt"], true);
+        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+        // The old raw-completion shape must be gone, not sent alongside.
+        assert!(
+            body.get("prompt").is_none() && body.get("n_predict").is_none(),
+            "a raw /completion body would not be the trained format: {body}"
+        );
+    }
+
+    #[test]
+    fn the_chat_response_reader_accepts_content_and_the_legacy_text_field() {
+        let content = serde_json::json!({
+            "choices": [{ "message": { "role": "assistant", "content": "{\"state\":\"done\"}" },
+                          "finish_reason": "stop" }]
+        });
+        assert_eq!(parse_state(chat_text(&content).unwrap()), Some(State::Done));
+
+        // A server (or proxy) that answers in the legacy shape must still work.
+        let legacy = serde_json::json!({
+            "choices": [{ "text": "needs_user", "finish_reason": "stop" }]
+        });
+        assert_eq!(
+            parse_state(chat_text(&legacy).unwrap()),
+            Some(State::NeedsUser)
+        );
+
+        // A thinking-only answer with no final content is a miss, not a state.
+        let empty = serde_json::json!({
+            "choices": [{ "message": { "content": null }, "finish_reason": "length" }]
+        });
+        assert_eq!(chat_text(&empty), None);
     }
 
     #[tokio::test]

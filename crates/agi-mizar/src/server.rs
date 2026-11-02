@@ -44,7 +44,7 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
 use crate::frames::{
-    record_to_event, ClientFrame, ErrorCode, Hello, ServerFrame, SessionRow, WelcomeInput,
+    record_to_envelope, ClientFrame, ErrorCode, Hello, ServerFrame, SessionRow, WelcomeInput,
     HTTP_PREFIX, PROTOCOL_VERSION, WS_PATH,
 };
 use crate::pairing::{self, PairingCode};
@@ -842,38 +842,27 @@ impl MizarServer {
                 match engine.records(&key, limit, before).await {
                     Ok(records) => {
                         let as_of = records.last().map(|record| record.seq).unwrap_or(0);
-                        let mut events: Vec<Value> =
-                            records.iter().filter_map(record_to_event).collect();
+                        // `records[]` is a list of *envelopes*, not of bare
+                        // events: `{"type":"event","event":{…}}`, the shape the
+                        // golden fixture pins. The
+                        // phones tolerate a flat event (`event ?? raw`), which is
+                        // how this drifted without anyone noticing.
+                        let mut records_out: Vec<Value> =
+                            records.iter().filter_map(record_to_envelope).collect();
                         // What each turn cost, hung on its own `turn/end` -- the
                         // one place the phone reads it, and the one place it was
                         // always empty. An engine that cannot say answers with an
                         // empty map, so the footer falls back to its own words
                         // rather than to a number nobody counted.
                         if let Ok(totals) = engine.turn_usage(&key).await {
-                            if !totals.is_empty() {
-                                for event in &mut events {
-                                    let is_end = event.get("type").and_then(Value::as_str)
-                                        == Some("turn/end");
-                                    if !is_end {
-                                        continue;
-                                    }
-                                    let Some(data) = event.get_mut("data") else {
-                                        continue;
-                                    };
-                                    let turn = data.get("turn").and_then(Value::as_u64);
-                                    let Some(turn) = turn else { continue };
-                                    if let Some(total) = totals.get(&(turn as u32)) {
-                                        data["mizarTokenUsage"] = json!({ "totalTokens": total });
-                                    }
-                                }
-                            }
+                            attach_turn_usage(&mut records_out, &totals);
                         }
                         ServerFrame::ok(
                             id,
                             json!({
                                 "sessionId": key.to_string(),
                                 "asOfSeq": as_of,
-                                "records": events,
+                                "records": records_out,
                                 "hasMore": records.len() >= limit,
                                 // The phone merges this into its cached usage frame;
                                 // `null` means "this host cannot say", not zero.
@@ -3123,6 +3112,32 @@ impl agi_core::PairingSource for MizarServer {
     }
 }
 
+/// Attach each turn's cost to its own `turn/end` event, inside the envelope.
+///
+/// The phone reads the conversation footer from `event.data.mizarTokenUsage`, so
+/// the number belongs on the event, not on the envelope that carries it. A turn
+/// the engine cannot account for is left without the key, and the footer keeps
+/// its own words.
+fn attach_turn_usage(records: &mut [Value], totals: &std::collections::HashMap<u32, u64>) {
+    for envelope in records {
+        let Some(event) = envelope.get_mut("event") else {
+            continue;
+        };
+        if event.get("type").and_then(Value::as_str) != Some("turn/end") {
+            continue;
+        }
+        let Some(data) = event.get_mut("data") else {
+            continue;
+        };
+        let Some(turn) = data.get("turn").and_then(Value::as_u64) else {
+            continue;
+        };
+        if let Some(total) = totals.get(&(turn as u32)) {
+            data["mizarTokenUsage"] = json!({ "totalTokens": total });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3150,6 +3165,39 @@ mod tests {
             0
         );
         assert!(membership(EngineId::Dsh, None).is_none());
+    }
+
+    #[test]
+    fn turn_usage_lands_inside_the_event_envelope() {
+        // `records[]` elements are envelopes; the footer reads
+        // `event.data.mizarTokenUsage`. Attaching the number to the envelope
+        // itself would be exactly the flat shape the golden fixture rejects.
+        let mut records = vec![
+            json!({
+                "type": "event",
+                "event": {
+                    "type": "turn/end", "seq": 24, "time": 0,
+                    "data": { "turn": 1, "reason": { "kind": "success" } }
+                }
+            }),
+            json!({
+                "type": "event",
+                "event": {
+                    "type": "turn/start", "seq": 12, "time": 0,
+                    "data": { "turn": 1 }
+                }
+            }),
+        ];
+        let totals = std::collections::HashMap::from([(1u32, 1234u64)]);
+        attach_turn_usage(&mut records, &totals);
+        assert_eq!(
+            records[0]["event"]["data"]["mizarTokenUsage"]["totalTokens"],
+            1234
+        );
+        assert!(records[0].get("mizarTokenUsage").is_none());
+        assert!(records[0].get("data").is_none());
+        // A turn the engine cannot account for keeps no key at all.
+        assert!(records[1]["event"]["data"].get("mizarTokenUsage").is_none());
     }
 
     #[test]

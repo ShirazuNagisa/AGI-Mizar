@@ -127,13 +127,63 @@ jobs:
       # SHA1-checked in the bundler). If that download ever becomes flaky the
       # fix is to pre-seed that directory, see docs/windows.md.
       #
-      # Authenticode: tauri-bundler does NOT import a PFX from the environment
-      # the way APPLE_CERTIFICATE works on macOS. Windows signing needs
-      # bundle.windows.certificateThumbprint (or a custom signCommand) passed
-      # through `args: --config ...`. Without it the installer is unsigned and
-      # SmartScreen warns; the release itself still works.
-      # Reusable secrets, when signing is set up:
-      #   WINDOWS_CERTIFICATE, WINDOWS_CERTIFICATE_PASSWORD, WINDOWS_THUMBPRINT
+      # Authenticode signing is optional and comes from the release owner, not
+      # from this repository. Two ways in:
+      #
+      #   WINDOWS_CERTIFICATE_BASE64   base64 of a .pfx with the code-signing
+      #   WINDOWS_CERTIFICATE_PASSWORD its password
+      #       -> imported into the runner's CurrentUser\My store below; the
+      #          thumbprint is handed to tauri-bundler, which signs the app
+      #          binary and the NSIS installer with signtool.
+      #
+      #   WINDOWS_THUMBPRINT           SHA1 thumbprint of a certificate already
+      #                                present in the store (custom runner).
+      #
+      # No secrets -> the installer stays unsigned and SmartScreen warns; the
+      # release itself still works. A certificate alone is not enough for
+      # SmartScreen to stay quiet: it must be CA-issued and the binary needs
+      # download reputation (see docs/windows.md).
+      - name: Import the code-signing certificate (optional)
+        if: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 != '' }}
+        shell: pwsh
+        env:
+          CERT_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'agi-mizar-signing.pfx'
+          [System.IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT_BASE64))
+          $password = ConvertTo-SecureString -String $env:CERT_PASSWORD -AsPlainText -Force
+          try {
+            $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          } finally {
+            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+          }
+          $config = @{ bundle = @{ windows = @{
+            certificateThumbprint = $cert.Thumbprint
+            digestAlgorithm = 'sha256'
+            timestampUrl = 'http://timestamp.digicert.com'
+          } } }
+          $path = Join-Path $env:RUNNER_TEMP 'windows-signing.json'
+          [System.IO.File]::WriteAllText($path, ($config | ConvertTo-Json -Depth 6 -Compress))
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "SIGNING_CONFIG=$path`n")
+          Write-Host "imported code-signing certificate $($cert.Thumbprint)"
+
+      - name: Use a pre-installed code-signing certificate (optional)
+        if: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 == '' && secrets.WINDOWS_THUMBPRINT != '' }}
+        shell: pwsh
+        env:
+          CERT_THUMBPRINT: ${{ secrets.WINDOWS_THUMBPRINT }}
+        run: |
+          $config = @{ bundle = @{ windows = @{
+            certificateThumbprint = $env:CERT_THUMBPRINT
+            digestAlgorithm = 'sha256'
+            timestampUrl = 'http://timestamp.digicert.com'
+          } } }
+          $path = Join-Path $env:RUNNER_TEMP 'windows-signing.json'
+          [System.IO.File]::WriteAllText($path, ($config | ConvertTo-Json -Depth 6 -Compress))
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "SIGNING_CONFIG=$path`n")
+          Write-Host "using pre-installed code-signing certificate $env:CERT_THUMBPRINT"
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -145,4 +195,4 @@ jobs:
           releaseBody: "See the commits in this tag."
           releaseDraft: true
           prerelease: false
-          args: --bundles nsis
+          args: ${{ env.SIGNING_CONFIG != '' && format('--bundles nsis --config {0}', env.SIGNING_CONFIG) || '--bundles nsis' }}

@@ -21,10 +21,16 @@
         the installer, so overrides are written that turn
         bundle.createUpdaterArtifacts off for local builds; -WithUpdater turns
         that off the other way and requires the key.
-      - Authenticode is separate and optional: set bundle.windows.
-        certificateThumbprint / signCommand in a config file passed via
-        `--config` (see docs/windows.md). Without it Windows SmartScreen warns
-        on first run; the installer itself still works.
+      - Authenticode (the Windows / SmartScreen signature) is applied by this
+        script after the bundles are written, with signtool:
+        -PfxPath/-PfxPassword (a .pfx file) or -Thumbprint (a certificate in
+        CurrentUser\My or LocalMachine\My); -TimestampUrl adds an RFC 3161
+        timestamp. Signed installers are then verified with signtool verify /pa
+        and Get-AuthenticodeSignature. -SelfSigned creates a temporary
+        self-signed code-signing certificate so the sign -> verify chain can be
+        exercised on a machine that has no certificate at all; it does not make
+        SmartScreen trust the build and it is cleaned up before the script
+        exits.
 
 .PARAMETER Bundles
     Comma separated bundles: nsis (default), msi, or nsis,msi. MSI needs the
@@ -49,6 +55,29 @@
 .PARAMETER Force
     Passed to fetch-llama.ps1: re-download the archive even if cached.
 
+.PARAMETER PfxPath
+    PFX (PKCS#12) file holding a code-signing certificate and its private key.
+    The installers are signed with it after the build; a missing file or a
+    wrong password fails the script instead of leaving unsigned installers.
+
+.PARAMETER PfxPassword
+    Password for -PfxPath.
+
+.PARAMETER Thumbprint
+    SHA1 thumbprint of a code-signing certificate in CurrentUser\My or
+    LocalMachine\My, used instead of -PfxPath. LocalMachine\My adds /sm.
+
+.PARAMETER TimestampUrl
+    RFC 3161 timestamp server, e.g. http://timestamp.digicert.com. Without it
+    the signature is still valid but expires with the certificate.
+
+.PARAMETER SelfSigned
+    Create a temporary self-signed code-signing certificate, sign the
+    installers with it, verify them, then remove the certificate and temporary
+    files. This tests the signing pipeline on a machine with no certificate; it
+    does NOT make SmartScreen trust the build (that needs a CA-issued
+    certificate and reputation). Cannot be combined with -PfxPath/-Thumbprint.
+
 .EXAMPLE
     scripts/package.ps1 -FetchLlama
 
@@ -57,6 +86,15 @@
 
 .EXAMPLE
     scripts/package.ps1 -Bundles nsis,msi
+
+.EXAMPLE
+    scripts/package.ps1 -PfxPath C:\certs\agi-mizar.pfx -PfxPassword $env:PFX_PASSWORD -TimestampUrl http://timestamp.digicert.com
+
+.EXAMPLE
+    scripts/package.ps1 -Thumbprint 0123456789ABCDEF0123456789ABCDEF01234567 -TimestampUrl http://timestamp.digicert.com
+
+.EXAMPLE
+    scripts/package.ps1 -SelfSigned -Bundles nsis,msi
 
 .EXAMPLE
     $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content ... -Raw
@@ -69,7 +107,12 @@ param(
     [string]$Archive,
     [string]$Proxy,
     [switch]$WithUpdater,
-    [switch]$Force
+    [switch]$Force,
+    [string]$PfxPath,
+    [string]$PfxPassword,
+    [string]$Thumbprint,
+    [string]$TimestampUrl,
+    [switch]$SelfSigned
 )
 
 $ErrorActionPreference = 'Stop'
@@ -99,6 +142,28 @@ function Fail([string]$text) {
     throw $text
 }
 
+# signtool ships with the Windows SDK but is not on PATH by default.
+function Find-SignTool {
+    if ($env:TAURI_WINDOWS_SIGNTOOL_PATH -and (Test-Path -LiteralPath $env:TAURI_WINDOWS_SIGNTOOL_PATH)) {
+        return $env:TAURI_WINDOWS_SIGNTOOL_PATH
+    }
+    $onPath = Get-Command signtool.exe -ErrorAction SilentlyContinue
+    if ($onPath) { return $onPath.Source }
+    $roots = @(
+        (Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'),
+        (Join-Path $env:ProgramFiles 'Windows Kits\10\bin')
+    )
+    foreach ($root in $roots) {
+        if (-not (Test-Path -LiteralPath $root)) { continue }
+        # Newest SDK first; "10.0.26100.0" sorts after "10.0.22621.0".
+        foreach ($version in (Get-ChildItem -LiteralPath $root -Directory | Sort-Object Name -Descending)) {
+            $candidate = Join-Path $version.FullName 'x64\signtool.exe'
+            if (Test-Path -LiteralPath $candidate) { return $candidate }
+        }
+    }
+    return $null
+}
+
 # Rules from package.sh that still apply on Windows: a release tag must be
 # buildable somewhere, so refuse obvious tool gaps early instead of after a
 # five-minute compile.
@@ -118,6 +183,53 @@ foreach ($bundle in $bundleList) {
     }
 }
 Write-Host ("bundles: {0}" -f ($bundleList -join ','))
+
+# Authenticode request: validated before the compile (a wrong PFX path must not
+# cost a five-minute build), applied after the bundles exist.
+$signMode = 'none'
+$signState = @{ Mode = 'none'; Pfx = $null; Password = $null; Thumb = $null; Machine = $false }
+$signTool = $null
+if ($SelfSigned -and ($PfxPath -or $Thumbprint)) {
+    Fail '-SelfSigned cannot be combined with -PfxPath or -Thumbprint'
+}
+if ($PfxPath -and $Thumbprint) {
+    Fail 'pass either -PfxPath or -Thumbprint, not both'
+}
+if ($SelfSigned) {
+    $signMode = 'selfsigned'
+} elseif ($PfxPath) {
+    if (-not (Test-Path -LiteralPath $PfxPath)) {
+        Fail ("-PfxPath does not exist: {0}" -f $PfxPath)
+    }
+    $signMode = 'pfx'
+    $signState = @{ Mode = 'pfx'; Pfx = (Resolve-Path -LiteralPath $PfxPath).Path; Password = $PfxPassword; Thumb = $null; Machine = $false }
+} elseif ($Thumbprint) {
+    $signMode = 'thumbprint'
+    $normalized = ($Thumbprint -replace '\s', '').ToUpperInvariant()
+    $inCurrentUser = Get-ChildItem 'Cert:\CurrentUser\My' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Thumbprint -eq $normalized }
+    if ($inCurrentUser) {
+        $signState = @{ Mode = 'thumbprint'; Pfx = $null; Password = $null; Thumb = $normalized; Machine = $false }
+    } else {
+        $inMachine = Get-ChildItem 'Cert:\LocalMachine\My' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Thumbprint -eq $normalized }
+        if (-not $inMachine) {
+            Fail ("no code-signing certificate with thumbprint {0} in CurrentUser\My or LocalMachine\My" -f $normalized)
+        }
+        $signState = @{ Mode = 'thumbprint'; Pfx = $null; Password = $null; Thumb = $normalized; Machine = $true }
+    }
+}
+if ($signMode -eq 'none' -and ($PfxPassword -or $TimestampUrl)) {
+    Note '-PfxPassword/-TimestampUrl are ignored without -PfxPath, -Thumbprint or -SelfSigned'
+}
+if ($signMode -ne 'none') {
+    $signTool = Find-SignTool
+    if (-not $signTool) {
+        Fail 'signtool.exe was not found: install the Windows SDK signing tools, put signtool on PATH, or set TAURI_WINDOWS_SIGNTOOL_PATH'
+    }
+    Write-Host ("signtool: {0}" -f $signTool)
+    Write-Host ("authenticode: {0}" -f $signMode)
+}
 
 # Fail on a missing signing key before the compile, not after it.
 $signingKey = $env:TAURI_SIGNING_PRIVATE_KEY
@@ -180,11 +292,6 @@ if (-not $hasUpdaterKey) {
 } else {
     Write-Host 'updater: signing key present - updater artifacts will be produced'
 }
-if ($env:WINDOWS_CERTIFICATE) {
-    Note 'WINDOWS_CERTIFICATE is set, but tauri-bundler does not import a PFX from the environment on Windows; see docs/windows.md for the signing setup (it still works unsigned)'
-} else {
-    Note 'no Windows code-signing certificate configured: the installer is unsigned and SmartScreen will warn on first run (More info -> Run anyway)'
-}
 
 # 4. Build. The Tauri CLI is npm, not cargo: package.sh's `cargo tauri` has no
 #    equivalent on a clean Windows box.
@@ -244,6 +351,134 @@ foreach ($artifact in ($artifacts | Sort-Object LastWriteTime)) {
     Write-Host ("  sha256  {0}" -f $hash)
     Write-Host ("  built   {0}" -f $artifact.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))
 }
+
+# 6. Authenticode. Signing after the bundle exists covers everything the
+#    installer will write out, and it is the signature SmartScreen looks at.
+#    Failing here is deliberate: being asked to sign and then quietly shipping an
+#    unsigned installer is the worst possible outcome.
+Step 'authenticode'
+$tempSignDir = $null
+$tempCert = $null
+try {
+    if ($signMode -eq 'none') {
+        Note 'no Authenticode signing requested: installers stay unsigned and SmartScreen warns on first run'
+        Note 'local signing: -PfxPath/-PfxPassword or -Thumbprint; -SelfSigned exercises the pipeline without a certificate'
+    } else {
+        if ($signMode -eq 'selfsigned') {
+            Write-Host ''
+            Write-Host '== self-signed test certificate'
+            $tempSignDir = Join-Path ([System.IO.Path]::GetTempPath()) ('agi-mizar-sign-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Force -Path $tempSignDir | Out-Null
+            $password = [guid]::NewGuid().ToString('N')
+            $secure = ConvertTo-SecureString -String $password -AsPlainText -Force
+            $tempCert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=AGI Mizar Test Signing' `
+                -CertStoreLocation 'Cert:\CurrentUser\My' -HashAlgorithm SHA256 -KeyLength 2048 `
+                -KeyAlgorithm RSA -KeyExportPolicy Exportable -NotAfter (Get-Date).AddDays(1)
+            $pfx = Join-Path $tempSignDir 'agi-mizar-test.pfx'
+            $cer = Join-Path $tempSignDir 'agi-mizar-test.cer'
+            Export-PfxCertificate -Cert $tempCert -FilePath $pfx -Password $secure | Out-Null
+            Export-Certificate -Cert $tempCert -FilePath $cer | Out-Null
+            # TrustedPeople imports silently. CurrentUser\Root would make
+            # Get-AuthenticodeSignature report Valid, but installing a root
+            # raises an interactive consent dialog that would hang CI, so this
+            # test cannot establish chain trust unattended - see docs/windows.md.
+            Import-Certificate -FilePath $cer -CertStoreLocation 'Cert:\CurrentUser\TrustedPeople' | Out-Null
+            Write-Host ("certificate: {0}" -f $tempCert.Thumbprint)
+            Write-Host ("subject:     {0}" -f $tempCert.Subject)
+            Write-Host 'trust:       imported into CurrentUser\TrustedPeople (removed again before exit)'
+            Write-Host 'expected:    signature applied and intact; Get-AuthenticodeSignature says UnknownError'
+            Write-Host '             because a self-signed certificate is not a trusted root. Only a'
+            Write-Host '             CA-issued certificate becomes Valid and SmartScreen-ready.'
+            $signState = @{ Mode = 'pfx'; Pfx = $pfx; Password = $password; Thumb = $null; Machine = $false }
+        }
+
+        if ($tempCert) {
+            $expectedThumb = $tempCert.Thumbprint
+        } elseif ($signState.Mode -eq 'thumbprint') {
+            $expectedThumb = $signState.Thumb
+        } else {
+            $expectedThumb = $null
+        }
+
+        foreach ($artifact in ($artifacts | Sort-Object LastWriteTime)) {
+            Write-Host ''
+            Write-Host ("sign: {0}" -f $artifact.FullName)
+            $signArgs = @('sign', '/fd', 'SHA256')
+            if ($signState.Mode -eq 'thumbprint') {
+                $signArgs += @('/sha1', $signState.Thumb)
+                if ($signState.Machine) { $signArgs += '/sm' }
+            } else {
+                $signArgs += @('/f', $signState.Pfx)
+                if ($signState.Password) { $signArgs += @('/p', $signState.Password) }
+            }
+            if ($TimestampUrl) { $signArgs += @('/tr', $TimestampUrl, '/td', 'SHA256') }
+            $signArgs += $artifact.FullName
+            $signOutput = & $signTool @signArgs 2>&1
+            $signCode = $LASTEXITCODE
+            $signOutput | ForEach-Object { Write-Host ("  {0}" -f $_) }
+            if ($signCode -ne 0) {
+                Fail ("signtool sign failed (exit {0}); refusing to report an unsigned bundle" -f $signCode)
+            }
+
+            $verifyOutput = & $signTool verify /pa /v $artifact.FullName 2>&1
+            $verifyCode = $LASTEXITCODE
+            $verifyText = ($verifyOutput | Out-String)
+            $signature = Get-AuthenticodeSignature -FilePath $artifact.FullName
+            Write-Host ("  status     {0}" -f $signature.Status)
+            if ($signature.SignerCertificate) {
+                Write-Host ("  subject    {0}" -f $signature.SignerCertificate.Subject)
+                Write-Host ("  thumbprint {0}" -f $signature.SignerCertificate.Thumbprint)
+            }
+            if ($signature.TimeStamperCertificate) {
+                Write-Host ("  timestamp  {0}" -f $signature.TimeStamperCertificate.Subject)
+            }
+            Write-Host ("  sha256     {0}" -f (Get-FileHash -Algorithm SHA256 -Path $artifact.FullName).Hash)
+            if (-not $signature.SignerCertificate) {
+                Fail ("no Authenticode signature is present on {0} after signing" -f $artifact.FullName)
+            }
+            if ($expectedThumb -and $signature.SignerCertificate.Thumbprint -ne $expectedThumb) {
+                Fail ("signature on {0} is from {1}, expected {2}" -f $artifact.FullName, $signature.SignerCertificate.Thumbprint, $expectedThumb)
+            }
+            # signtool localizes its messages; the trustworthy, locale-free
+            # signal is Get-AuthenticodeSignature: a present signer with
+            # UnknownError/NotTrusted means "signature intact, chain not
+            # anchored in a trusted root" - exactly the self-signed case.
+            if ($verifyCode -eq 0) {
+                Write-Host '  signtool   verify /pa ok'
+            } elseif (
+                $verifyText -match 'terminated in a root\s+certificate which is not trusted' -or
+                $signature.Status -in @('UnknownError', 'NotTrusted')
+            ) {
+                Write-Host '  signtool   verify /pa: chain untrusted (expected without a CA-issued certificate)'
+            } else {
+                $verifyOutput | Select-Object -Last 6 | ForEach-Object { Write-Host ("  {0}" -f $_) }
+                Fail ("signtool verify /pa failed for a reason other than an untrusted chain ({0}); not a usable signature" -f $artifact.FullName)
+            }
+            switch ($signature.Status) {
+                'Valid' { Write-Host '  result     Valid (chain trusted on this machine)' }
+                'UnknownError' { Write-Host '  result     signature present and intact; chain not trusted on this machine' }
+                'NotTrusted' { Write-Host '  result     signature present; certificate chain not trusted on this machine' }
+                default {
+                    Fail ("Get-AuthenticodeSignature Status={0} for {1}; expected Valid, UnknownError or NotTrusted" -f $signature.Status, $artifact.FullName)
+                }
+            }
+        }
+    }
+} finally {
+    if ($tempCert) {
+        Get-ChildItem 'Cert:\CurrentUser\TrustedPeople' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Thumbprint -eq $tempCert.Thumbprint } |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath ('Cert:\CurrentUser\My\' + $tempCert.Thumbprint) -Force -ErrorAction SilentlyContinue
+        Write-Host ''
+        Write-Host ("cleanup: removed the test certificate {0} from My and TrustedPeople" -f $tempCert.Thumbprint)
+    }
+    if ($tempSignDir) {
+        Remove-Item -LiteralPath $tempSignDir -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host 'cleanup: removed the temporary PFX and certificate files'
+    }
+}
+
 $signatures = @(Get-ChildItem -Path $bundleRoot -Recurse -File -Filter '*.sig' -ErrorAction SilentlyContinue)
 if ($signatures) {
     Write-Host ''
@@ -257,9 +492,17 @@ if ($exitCode -eq 0) {
     Write-Host ("Built (the Tauri CLI exited {0}; see the notes above)." -f $exitCode) -ForegroundColor Green
 }
 Write-Host 'Before this installer can be handed out:'
-Write-Host '  Windows code signing (optional)  bundle.windows.certificateThumbprint or signCommand, passed via --config.'
-Write-Host '                                   Without it SmartScreen warns once per download (More info -> Run anyway).'
-Write-Host '  Updater                          TAURI_SIGNING_PRIVATE_KEY for .sig + latest.json; without it this build'
-Write-Host '                                   is a local installer only.'
-Write-Host '  MSI                              needs the WiX toolset in %LOCALAPPDATA%\tauri\WixTools314; NSIS is the default bundle.'
+if ($signMode -eq 'none') {
+    Write-Host '  Windows code signing  NOT applied: unsigned installer, SmartScreen warns on first run.'
+    Write-Host '                        Use -PfxPath/-PfxPassword or -Thumbprint; a CA-issued certificate'
+    Write-Host '                        plus download reputation is what removes the prompt.'
+} else {
+    Write-Host ("  Windows code signing  {0} signature applied and verified above (see Status)." -f $signMode)
+    Write-Host '                        SmartScreen still needs a CA-issued certificate and reputation; a'
+    Write-Host '                        self-signed test certificate never removes the warning.'
+}
+Write-Host '  Updater               TAURI_SIGNING_PRIVATE_KEY for .sig + latest.json; without it this build'
+Write-Host '                        is a local installer only.'
+Write-Host '  MSI                   installs per-machine (Tauri Wix InstallScope=perMachine): installing needs'
+Write-Host '                        an elevated shell; WiX is cached in %LOCALAPPDATA%\tauri\WixTools314.'
 exit 0

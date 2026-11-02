@@ -53,7 +53,30 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// How long one judgement may take before the rule fallback takes over.
-const JUDGE_TIMEOUT: Duration = Duration::from_millis(1800);
+///
+/// The judge prompt is ~790 tokens. Measured on the pinned b12000 build
+/// (2026-11-02, Windows): prompt eval ~5.0 s on the CPU build (`-t 4`) and
+/// ~0.2 s with CUDA (`-ngl 99`). The old 1.8 s therefore timed out every CPU
+/// judgement and the model silently never decided anything.
+const DEFAULT_JUDGE_TIMEOUT: Duration = Duration::from_millis(10_000);
+
+/// Environment variable overriding [`DEFAULT_JUDGE_TIMEOUT`] (milliseconds).
+const JUDGE_TIMEOUT_ENV: &str = "MIZAR_JUDGE_TIMEOUT_MS";
+
+/// The judge timeout for this process: `MIZAR_JUDGE_TIMEOUT_MS` when it holds a
+/// positive integer, else ten seconds.
+fn judge_timeout() -> Duration {
+    judge_timeout_from(std::env::var(JUDGE_TIMEOUT_ENV).ok().as_deref())
+}
+
+/// Parse the override. Junk and zero keep the default instead of producing a
+/// 0 ms timeout that would turn every judgement into a rule fallback.
+fn judge_timeout_from(raw: Option<&str>) -> Duration {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|millis| *millis > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_JUDGE_TIMEOUT)
+}
 
 /// A change worth telling the window about.
 #[derive(Debug, Clone)]
@@ -877,7 +900,7 @@ impl agi_layout::Judge for SidecarJudge {
         };
         // A sidecar that accepted the request and then hung is worse than one
         // that is down: without the timeout the turn waits forever.
-        tokio::time::timeout(JUDGE_TIMEOUT, judge.judge(facts))
+        tokio::time::timeout(judge_timeout(), judge.judge(facts))
             .await
             .unwrap_or_default()
     }
@@ -1142,5 +1165,23 @@ mod tests {
         assert!(is_newer("v1.1", "1.0.0"));
         assert!(is_newer("1.0", "0.9"));
         assert!(!is_newer("1", "1.0.0"));
+    }
+
+    #[test]
+    fn the_judge_timeout_defaults_to_ten_seconds_and_can_be_overridden() {
+        // A CPU judge spends ~5 s on prompt eval: the old 1.8 s was the bug.
+        assert_eq!(judge_timeout_from(None), Duration::from_millis(10_000));
+        assert_eq!(
+            judge_timeout_from(Some("25000")),
+            Duration::from_millis(25_000)
+        );
+        assert_eq!(
+            judge_timeout_from(Some(" 1500 ")),
+            Duration::from_millis(1_500)
+        );
+        // Junk must not disable judging; zero must not make every turn a rule.
+        assert_eq!(judge_timeout_from(Some("abc")), DEFAULT_JUDGE_TIMEOUT);
+        assert_eq!(judge_timeout_from(Some("0")), DEFAULT_JUDGE_TIMEOUT);
+        assert_eq!(judge_timeout_from(Some("-5")), DEFAULT_JUDGE_TIMEOUT);
     }
 }

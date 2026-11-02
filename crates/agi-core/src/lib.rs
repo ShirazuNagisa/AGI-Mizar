@@ -1017,6 +1017,18 @@ impl Core {
         let Some(turn) = turn else {
             return;
         };
+        // One verdict per (session, turn): the DSH path can call here twice
+        // (a live `turn/end` record and the fallback for engines that do not
+        // emit records), and a second judgement would only re-announce a state
+        // the phone already has.
+        if self
+            .layouts
+            .lock()
+            .map(|map| map.contains_key(&(session.clone(), turn)))
+            .unwrap_or(false)
+        {
+            return;
+        }
         let facts = facts_for(&session, turn, &records);
         let store = self.layouts.clone();
         let core = Arc::clone(self);
@@ -1040,6 +1052,32 @@ impl Core {
         });
     }
 
+    /// Judge a turn that just finished on an engine that does not emit records.
+    ///
+    /// The state channel is built on [`EngineEvent::RecordAppended`], and only the
+    /// DSH adapter produces that: its plugin forwards every projected event.
+    /// Claude Code and Codex are read back from their own logs or app-server, so
+    /// no record ever arrives and the judge used to be reachable only on DSH.
+    /// This turns the session's `running: true -> false` transition into the same
+    /// question, by asking the engine for its newest records. DSH keeps the
+    /// event-driven path (and is skipped here) so the Mac behaviour does not
+    /// change.
+    fn judge_finished_turn(self: &Arc<Self>, session: SessionKey) {
+        let core = Arc::clone(self);
+        tokio::spawn(async move {
+            let Some(engine) = core.engine(session.engine) else {
+                return;
+            };
+            let Ok(records) = engine.records(&session, 200, None).await else {
+                return;
+            };
+            let Some((turn, slice)) = last_finished_turn(&records) else {
+                return;
+            };
+            core.judge_turn(session, Some(turn), slice);
+        });
+    }
+
     fn store_write(&self) -> std::sync::RwLockWriteGuard<'_, Store> {
         self.store
             .write()
@@ -1055,11 +1093,26 @@ impl Core {
     fn on_engine_event(self: &Arc<Self>, engine: EngineId, event: EngineEvent) {
         match event {
             EngineEvent::SessionUpdated(session) => {
+                // A turn that just stopped is the end-of-turn signal for the
+                // engines that do not stream records (Claude Code, Codex).
+                let was_running = self
+                    .store
+                    .read()
+                    .ok()
+                    .and_then(|store| store.sessions.get(&session.key).map(|old| old.running))
+                    .unwrap_or(false);
+                let finished = was_running && !session.running;
+                let key = session.key.clone();
                 {
                     let mut store = self.store_write();
                     store.sessions.insert(session.key.clone(), session.clone());
                 }
                 self.publish(ApiEvent::SessionUpdated { session });
+                // DSH reports the same finish through `RecordAppended`, which
+                // already runs the judge; asking twice would judge one turn twice.
+                if finished && key.engine != EngineId::Dsh {
+                    self.judge_finished_turn(key);
+                }
             }
             EngineEvent::SessionRemoved(key) => {
                 {
@@ -2007,6 +2060,40 @@ mod tests {
         assert_eq!(wire["sessions"], 0);
         assert_eq!(wire["days"], serde_json::json!([]));
     }
+
+    #[test]
+    fn the_judge_fallback_reads_the_latest_finished_turn() {
+        let records = vec![
+            record(1, 1, RecordKind::TurnStart, None),
+            record(2, 1, RecordKind::UserMessage, Some("first")),
+            record(3, 1, RecordKind::TurnEnd, Some("success")),
+            record(4, 2, RecordKind::TurnStart, None),
+            record(5, 2, RecordKind::UserMessage, Some("second")),
+            record(6, 2, RecordKind::AssistantMessage, Some("done")),
+            record(7, 2, RecordKind::TurnEnd, Some("success")),
+            // A third turn is still open: the phone is watching it run.
+            record(8, 3, RecordKind::TurnStart, None),
+            record(9, 3, RecordKind::UserMessage, Some("third")),
+        ];
+
+        let (turn, slice) = last_finished_turn(&records).expect("a finished turn");
+        assert_eq!(turn, 2);
+        // The whole second turn, not just its tail and not the first turn.
+        assert_eq!(slice.first().map(|r| r.seq), Some(4));
+        assert_eq!(slice.last().map(|r| r.seq), Some(7));
+        assert_eq!(slice.len(), 4);
+    }
+
+    #[test]
+    fn the_judge_fallback_waits_while_the_only_turn_is_open() {
+        let records = vec![
+            record(1, 1, RecordKind::TurnStart, None),
+            record(2, 1, RecordKind::UserMessage, Some("running")),
+        ];
+
+        assert!(last_finished_turn(&records).is_none());
+        assert!(last_finished_turn(&[]).is_none());
+    }
 }
 
 // ---------------------------------------------------------------- layout glue
@@ -2075,6 +2162,25 @@ fn turn_records(bucket: &VecDeque<Record>, turn: Option<u32>) -> Vec<Record> {
     }
     out.reverse();
     out
+}
+
+/// The newest turn in `records` that actually finished, with the records of that
+/// turn.
+///
+/// [`Core::judge_finished_turn`] asks an engine for its newest records when a
+/// session stops running; a turn that is still open (a later `turn/start` with no
+/// `turn/end`) must not be judged from the previous turn's text, and the slice
+/// has to start at the matching `turn/start` or the judge sees only the tail.
+fn last_finished_turn(records: &[Record]) -> Option<(u32, Vec<Record>)> {
+    let end = records
+        .iter()
+        .rposition(|record| record.kind == RecordKind::TurnEnd)?;
+    let turn = records[end].turn?;
+    let start = records[..end]
+        .iter()
+        .rposition(|record| record.kind == RecordKind::TurnStart && record.turn == Some(turn))
+        .unwrap_or(0);
+    Some((turn, records[start..=end].to_vec()))
 }
 
 /// Normalise the engine-specific turn-end text into the vocabulary the model was
