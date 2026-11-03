@@ -331,14 +331,24 @@ pub fn record_to_event(record: &Record) -> Option<Value> {
             "type": "step/start", "seq": record.seq, "time": record.time,
             "data": { "turn": turn, "step": record.step.unwrap_or(1) }
         }),
-        RecordKind::UserMessage => json!({
-            "type": "user/message", "seq": record.seq, "time": record.time,
-            "data": {
-                "turn": turn,
-                "content": [{ "type": "text", "text": record.text.clone().unwrap_or_default() }],
-                "source": { "kind": "user" }
+        RecordKind::UserMessage => {
+            // DSH's UserMessage has no `turn` field; only turn/start and
+            // turn/end own one. Writing 0 invented a turn no entry had and made
+            // a prompt look like it belonged to the turn numbered zero.
+            let mut data = serde_json::Map::new();
+            if let Some(turn) = record.turn {
+                data.insert("turn".into(), json!(turn));
             }
-        }),
+            data.insert(
+                "content".into(),
+                json!([{ "type": "text", "text": record.text.clone().unwrap_or_default() }]),
+            );
+            data.insert("source".into(), json!({ "kind": "user" }));
+            json!({
+                "type": "user/message", "seq": record.seq, "time": record.time,
+                "data": data
+            })
+        }
         RecordKind::AssistantMessage => json!({
             "type": "assistant/message", "seq": record.seq, "time": record.time,
             "data": {
@@ -353,13 +363,20 @@ pub fn record_to_event(record: &Record) -> Option<Value> {
         // a summary that replaced older turns -- and the phone draws it as one
         // centred line in the stream. Dropping these is why a compacted
         // conversation looked like it had simply lost its history.
-        RecordKind::Notice => json!({
-            "type": "notice", "seq": record.seq, "time": record.time,
-            "data": {
-                "turn": turn,
-                "text": record.text.clone().unwrap_or_default()
+        RecordKind::Notice => {
+            let mut data = serde_json::Map::new();
+            if let Some(turn) = record.turn {
+                data.insert("turn".into(), json!(turn));
             }
-        }),
+            data.insert(
+                "text".into(),
+                json!(record.text.clone().unwrap_or_default()),
+            );
+            json!({
+                "type": "notice", "seq": record.seq, "time": record.time,
+                "data": data
+            })
+        }
         RecordKind::ToolCall | RecordKind::ToolResult => return None,
     };
     Some(event)
@@ -545,6 +562,43 @@ mod tests {
         assert_eq!(event["data"]["turn"], 2);
         assert_eq!(event["data"]["content"][0]["text"], "hello");
         assert_eq!(event["data"]["source"]["kind"], "user");
+    }
+
+    #[test]
+    fn a_prompt_without_a_turn_does_not_invent_turn_zero() {
+        // DSH's UserMessage has no turn field, and the golden fixture proves it.
+        // Writing 0 made iOS treat a prompt as belonging to a turn no entry had.
+        let record = Record {
+            seq: 7,
+            time: 1_700_000_000_000,
+            turn: None,
+            step: None,
+            kind: RecordKind::UserMessage,
+            text: Some("hello".to_string()),
+            tool: None,
+        };
+        let event = record_to_event(&record).unwrap();
+        assert!(event["data"].get("turn").is_none());
+        assert_eq!(event["data"]["content"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn a_notice_without_a_turn_does_not_invent_turn_zero() {
+        let record = Record {
+            seq: 9,
+            time: 1_700_000_000_001,
+            turn: None,
+            step: None,
+            kind: RecordKind::Notice,
+            text: Some("Background subagent obage-1 finished".to_string()),
+            tool: None,
+        };
+        let event = record_to_event(&record).unwrap();
+        assert!(event["data"].get("turn").is_none());
+        assert_eq!(
+            event["data"]["text"],
+            "Background subagent obage-1 finished"
+        );
     }
 
     #[test]

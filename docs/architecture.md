@@ -321,7 +321,7 @@ phone ──https──▶ relay ──ws──▶ 这台电脑 ──http──
 | `push.register`、`/push/v1/notify` | 通知策略：标题本地化、Live Activity、按设备排除 |
 | `upload.*`、附件 prompt | 分片暂存与 content part 构造 |
 | `file.stat` / `file.read` | 工作区围栏与预览缓存 |
-| `workspace.list`、`session.activity`、`session.stats`、`session.create/rename/archive` | 各自的投影与注册表读 |
+| `workspace.list`、`session.activity`、`session.stats`、`session.rename/archive` | 各自的投影与注册表读；`session.create` 已实现（按目录解析工作区） |
 | `question.*` | 提问还没有进共享模型，`interactions.pending` 的 `questions` 恒为空 |
 
 `NOT_IMPLEMENTED` 是协议自己的信号，意思是"这台主机比你旧"——比一个看起来成功的桩好得多。

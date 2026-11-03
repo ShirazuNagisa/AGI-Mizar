@@ -158,7 +158,7 @@ mizar://pair?h=100.64.0.1:19390&c=K7QP-3M2X&n=Mac-mini&v=1
 | `session.activity` | `sessionId`, `maxEntries?`（默认 200，最多 300）, `beforeSeq?`, `turn?`（见下） | `{sessionId, asOfSeq, turn, entries[], hasMore, oldestSeq}` —— **只返回正在跑的那一轮的紧凑过程**，付费账户的「全量细节」来源：`entries` 里每行是 `{id, seq, at, kind, title, text}`，`kind` 为 `thinking` / `command` / `output` / `tool`，`text` 一行、最多 240 字符；没有正在跑的轮次时 `turn: null, entries: [], hasMore: false`。详细语义见下。 |
 | `session.stream` | `sessionId` | `{sessionId, turn, state, interval, textSeq, truncated, entries[]}` —— 把**本轮已产出的状态区间**整轮重放给手机：`entries` 由旧到新，每项是 `{interval, state, text, final}`；`state`/`interval`/`textSeq` 是此刻线上的那一个区间，`turn` 可为 `null`。只读方法，不唤醒 agent。见下「`session.stream`：断线期间的状态区间」。 |
 | `session.stats` | `sessionId` | `{sessionId, asOfSeq, stats}` —— `stats` 里的每个字段来自主机各自的 projection，**谁有就答谁**：agent 还没跑过的会话没有 `context`（上下文占用）也没有 `title`（标题要等模型读完对话才有），只有 `tokenUsage` 一类。所以「这次的帧比上一帧少几个字段」是**正常回答**，不是失败——实测一台真主机上 12 个会话里有 4 个是这样（缺 `context, title`）。手机必须把新帧**合并**进旧帧（有新值用新值，没有的保留），直接替换会把屏幕上已经画出来的标题、模型、上下文用量抹掉。 |
-| `session.create` | `cwd?` \| `workspaceId?` \| `sessionId?`, `agentPreset?` | `{sessionId, agentPreset}` —— 传 `cwd` 时插件会先把它解析成**工作区**（没有就建一个），再把工作区 id 交给 DSH。原因见下。 |
+| `session.create` | `cwd?`, `sessionId?`, `agentPreset?` | `{sessionId, agentPreset}` —— 传 `cwd` 时适配器先在工作区注册表里找**根目录相同**的工作区；找到就只把 `workspaceId` 交给 DSH，找不到才退回 `cwd`。不自动创建工作区。原因见下。 |
 | `session.rename` | `sessionId`, `title` | `{renamed: true}` |
 | `session.prompt` | `sessionId`, `text?`, `attachmentIds?`, `requestId?`, `clientTimeZone?`, `mode?` | `{accepted, requestId}` —— `text` **在有附件时可省**;两者不能同时缺。`attachmentIds` 是 `upload.finish` 返回的 id,顺序就是 content 的顺序(文本在最前);附件怎么来见「附件上传」。 |
 | `session.cancel` | `sessionId` | `{accepted}` |
@@ -345,7 +345,9 @@ const cwd = workspace?.path ?? request.cwd ?? this.defaultCwd
 if (workspace !== undefined) await workspace.attachSession(sessionId)
 ```
 
-只给 `cwd`，会话就建出来了但**不属于任何工作区**。手机按工作目录分组，照样显示它；电脑的侧边栏是按工作区组织的，什么都不显示 —— 报障原话是"手机上新建会话、发了消息，电脑端 DSH 看不到"。所以插件在收到 `cwd` 时会先找这个目录的工作区，没有就建一个（电脑上手动打开文件夹就是这个行为），然后把 `workspaceId` 传下去。
+只给 `cwd`，会话就建出来了但**不属于任何工作区**。2026-11-03 的报告是「手机选对了工作区，电脑端仍把它归到未分组」：适配器转发 `{request:{cwd}}`，DSH 只在请求带 `workspaceId` 时执行 `attachSession`，所以这句话在 0.9.0 的 link 重写后一直成立。手机按工作目录分组，照样显示它；电脑侧边栏不显示。
+
+现在适配器在 `session.create` 前读一次 `workspaceRegistry.list`，按注册表里的 `record.path` **精确匹配**（只忽略末尾斜杠），找到就把原始 registry id 作为 `workspaceId` 传给 DSH；找不到才退回 `cwd`。**不自动创建工作区**：旧的 0.8.x 插件会替用户建，0.9.0 的 link 不替产品做这个决定；没有就创建会让选错目录变成在电脑上凭空多一个工作区。路径必须原样匹配，因为错误的 `workspaceId` 会让 DSH 先建出会话、再在 attach 时失败，重试会留下重复会话。
 
 `workspaceId` 和 `cwd` **不能同时传**，DSH 会直接拒绝。`sessionId`（恢复已有会话）时不做任何解析：会话已经有归属了，而拿一个和它不一致的目录去 attach 会让整个调用失败。
 

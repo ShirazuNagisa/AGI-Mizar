@@ -1445,6 +1445,11 @@ impl Engine for DshEngine {
                         .filter(|record| before.is_none_or(|cut| record.seq < cut))
                         .cloned()
                         .collect();
+                    // Older pages are appended to the bucket; the wire contract
+                    // and iOS both assume ascending seq. Sorting here keeps a
+                    // scroll-up followed by a refresh from putting an older
+                    // notice after a newer answer.
+                    window.sort_by_key(|record| record.seq);
                     let start = window.len().saturating_sub(limit);
                     window.split_off(start)
                 })
@@ -1459,7 +1464,9 @@ impl Engine for DshEngine {
                 engine: EngineId::Dsh,
             });
         }
-        self.fetch_page(session, limit, before).await
+        let mut fetched = self.fetch_page(session, limit, before).await?;
+        fetched.sort_by_key(|record| record.seq);
+        Ok(fetched)
     }
 
     /// Every day of activity this host has recorded, folded from the sessions it
@@ -2025,9 +2032,16 @@ impl Engine for DshEngine {
     }
 
     async fn create(&self, cwd: Option<&str>) -> Result<SessionKey, EngineError> {
+        // DSH attaches a new Session to a Workspace only when the request
+        // carries `workspaceId`; a bare `cwd` creates the Session outside every
+        // Workspace and the desktop sidebar files it under 未分组. The registry
+        // is the authority, and the phone's picker sends `record.path` verbatim.
         let request = match cwd {
-            Some(cwd) => json!({ "request": { "cwd": cwd } }),
-            None => json!({ "request": {} }),
+            Some(cwd) => {
+                let all = self.workspaces().await.unwrap_or_default();
+                create_request(Some(cwd), &all)
+            }
+            None => create_request(None, &[]),
         };
         let value = self.call("session/create", request).await?;
         let id = value
@@ -2176,5 +2190,90 @@ impl Engine for DshEngine {
 
     fn subscribe(&self) -> broadcast::Receiver<EngineEvent> {
         self.events.subscribe()
+    }
+}
+
+/// The registry id for the Workspace rooted at `path`, when one matches.
+///
+/// Exact on the registry string, with only trailing slashes ignored: a wrong
+/// workspaceId makes DSH create the Session and *then* fail to attach it, and a
+/// retry would create a duplicate. The phone's picker uses `record.path`
+/// verbatim, so anything more aggressive than this is a guess.
+/// The `session/create` request, with the workspace identity when one matches.
+fn create_request(cwd: Option<&str>, workspaces: &[Workspace]) -> serde_json::Value {
+    match cwd {
+        Some(cwd) => match workspace_id(cwd, workspaces) {
+            Some(id) => json!({ "request": { "workspaceId": id } }),
+            None => json!({ "request": { "cwd": cwd } }),
+        },
+        None => json!({ "request": {} }),
+    }
+}
+
+fn workspace_id(path: &str, workspaces: &[Workspace]) -> Option<String> {
+    let wanted = path.trim_end_matches('/');
+    workspaces
+        .iter()
+        .find(|workspace| workspace.path.trim_end_matches('/') == wanted)
+        .map(|workspace| workspace.id.clone())
+}
+
+#[cfg(test)]
+mod workspace_id_tests {
+    use super::{create_request, workspace_id, Workspace};
+
+    fn workspace(id: &str, path: &str) -> Workspace {
+        Workspace {
+            id: id.to_string(),
+            path: path.to_string(),
+            name: None,
+            session_ids: None,
+        }
+    }
+
+    #[test]
+    fn finds_the_registry_workspace_for_the_exact_path() {
+        let all = vec![workspace("ws-1", "/Users/you/Projects/app")];
+        assert_eq!(
+            workspace_id("/Users/you/Projects/app", &all).as_deref(),
+            Some("ws-1")
+        );
+        assert_eq!(
+            workspace_id("/Users/you/Projects/app/", &all).as_deref(),
+            Some("ws-1")
+        );
+    }
+
+    #[test]
+    fn does_not_guess_a_workspace_for_another_path() {
+        let all = vec![workspace("ws-1", "/Users/you/Projects/app")];
+        assert_eq!(workspace_id("/Users/you/Projects/other", &all), None);
+        assert_eq!(workspace_id("/Users/you/Projects", &all), None);
+    }
+
+    #[test]
+    fn sends_the_workspace_id_when_one_matches_and_cwd_otherwise() {
+        let all = vec![workspace("ws-1", "/Users/you/Projects/app")];
+        assert_eq!(
+            create_request(Some("/Users/you/Projects/app"), &all),
+            serde_json::json!({ "request": { "workspaceId": "ws-1" } })
+        );
+        assert_eq!(
+            create_request(Some("/Users/you/Projects/other"), &all),
+            serde_json::json!({ "request": { "cwd": "/Users/you/Projects/other" } })
+        );
+        assert_eq!(
+            create_request(None, &all),
+            serde_json::json!({ "request": {} })
+        );
+    }
+
+    #[test]
+    fn returns_the_raw_registry_id_not_the_phone_prefix() {
+        let all = vec![workspace("dsh:ws-1", "/Users/you/Projects/app")];
+        assert_eq!(
+            workspace_id("/Users/you/Projects/app", &all).as_deref(),
+            Some("dsh:ws-1")
+        );
     }
 }
