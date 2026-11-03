@@ -36,13 +36,13 @@ pub struct UpdateInfo {
 static LAST: RwLock<Option<UpdateInfo>> = RwLock::new(None);
 
 /// Record one line about the updater, somewhere a person can read it after the
-/// window is gone. The app is usually launched by Finder, so stderr goes nowhere.
+/// window is gone. The app is usually launched by Finder or Explorer, so stderr
+/// goes nowhere.
 fn note(line: &str) {
     eprintln!("AGI update: {line}");
-    let Some(home) = std::env::var_os("HOME") else {
+    let Some(directory) = log_directory() else {
         return;
     };
-    let directory = std::path::Path::new(&home).join("Library/Logs/AGI Mizar");
     let _ = std::fs::create_dir_all(&directory);
     use std::io::Write;
     if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -51,6 +51,38 @@ fn note(line: &str) {
         .open(directory.join("update.log"))
     {
         let _ = writeln!(file, "{line}");
+    }
+}
+
+/// Where the updater's log lives: the directory each desktop keeps app logs in.
+///
+/// macOS has a convention for this — `~/Library/Logs` — and Finder-launched apps
+/// are read there. Windows has none for a per-user app, and the obvious
+/// `%LOCALAPPDATA%\AGI Mizar` is *the install directory*: a log written there
+/// survives as an unknown file when the uninstaller removes the files it knows
+/// about, leaving an empty-looking directory behind. So the log lives beside the
+/// WebView2 profile in the app's own data directory instead, where it is not part
+/// of the installation and is removed with the user's data, not with the program.
+fn log_directory() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME")?;
+        Some(std::path::Path::new(&home).join("Library/Logs/AGI Mizar"))
+    }
+    #[cfg(windows)]
+    {
+        if let Some(appdata) = std::env::var_os("LOCALAPPDATA") {
+            return Some(
+                std::path::Path::new(&appdata)
+                    .join("me.shirazu.agimizar")
+                    .join("logs"),
+            );
+        }
+        Some(agi_platform::data_dir().join("logs"))
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        Some(agi_platform::data_dir().join("logs"))
     }
 }
 
@@ -141,11 +173,6 @@ pub fn watch(app: AppHandle) {
         }
     });
 }
-
-/// The tray's "Check for Updates…", which has to hand an async job to a sync
-/// menu event.
-///
-/// This one answers out loud: the person just asked.
 
 /// Download, verify and install, then come back up as the new version.
 pub async fn install(app: AppHandle) -> Result<(), String> {

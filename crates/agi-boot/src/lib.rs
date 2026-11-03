@@ -136,8 +136,19 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
     core.start().await;
     core.refresh_account_in_background();
 
+    // The DSH home, decided the way the DSH CLI itself decides it: the CLI's own
+    // override first, then a `.dsh` under the user's home. `home()` is the
+    // platform seam — a Windows process started from Explorer has no `HOME`, and
+    // the old fallback put the path at the filesystem root.
     let dsh_home = std::env::var("DSH_HOME")
-        .unwrap_or_else(|_| format!("{}/.dsh", std::env::var("HOME").unwrap_or_default()));
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            agi_platform::home()
+                .join(".dsh")
+                .to_string_lossy()
+                .to_string()
+        });
 
     let (api_port, _api) = server::bind(
         Arc::clone(&core),
@@ -217,12 +228,8 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
         let roster_for_changes = Arc::clone(&roster_for_relay);
         tokio::spawn(async move {
             while let Ok(event) = changes.recv().await {
-                mizar_for_changes.set_account_user(
-                    event
-                        .user_id
-                        .clone()
-                        .filter(|id| !id.is_empty()),
-                );
+                mizar_for_changes
+                    .set_account_user(event.user_id.clone().filter(|id| !id.is_empty()));
                 if !event.signed_in {
                     if let Some(user) = event.user_id.as_deref() {
                         agi_mizar::relay::revoke_account_tokens(&roster_for_changes, user);
@@ -338,9 +345,20 @@ fn discover_local(already: &[EngineId]) -> (Vec<Arc<dyn Engine>>, HashMap<Engine
     // forever and a permanently red status on a machine that has no Codex.
     let codex_binary = std::env::var("AGI_CODEX_BIN").unwrap_or_else(|_| "codex".to_string());
     // The ChatGPT app ships the same app-server binary; when nobody installed a
-    // `codex` on PATH, that copy is the one the GUI itself uses.
-    let codex_path = which(&codex_binary)
-        .or_else(|| which("/Applications/ChatGPT.app/Contents/Resources/codex"));
+    // `codex` on PATH, that copy is the one the GUI itself uses. Only the macOS
+    // bundle has that layout; on Windows the npm shim is the real answer and
+    // `which` finds it through PATHEXT.
+    let codex_path = {
+        #[cfg(target_os = "macos")]
+        {
+            which(&codex_binary)
+                .or_else(|| which("/Applications/ChatGPT.app/Contents/Resources/codex"))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            which(&codex_binary)
+        }
+    };
     match codex_path {
         Some(path) => {
             if !already.contains(&EngineId::Codex) {
@@ -392,15 +410,31 @@ fn discover_local(already: &[EngineId]) -> (Vec<Arc<dyn Engine>>, HashMap<Engine
 
 /// Whether the DSH host exists: the app, its CLI, or its home directory.
 fn dsh_installed() -> bool {
+    // Each platform installs the same thing somewhere else. A bundle on macOS,
+    // a per-user Programs directory on Windows, and — on any platform — a CLI
+    // on PATH or a home directory DSH has already written to.
+    #[cfg(target_os = "macos")]
     if std::path::Path::new("/Applications/DeepSeek Harness.app").exists() {
         return true;
+    }
+    #[cfg(windows)]
+    {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            let programs = PathBuf::from(local)
+                .join("Programs")
+                .join("DeepSeek Harness");
+            if programs.join("DeepSeek Harness.exe").exists() {
+                return true;
+            }
+            if programs.exists() {
+                return true;
+            }
+        }
     }
     if which("dsh").is_some() {
         return true;
     }
-    std::env::var("HOME")
-        .map(|home| std::path::Path::new(&home).join(".dsh").exists())
-        .unwrap_or(false)
+    agi_platform::home().join(".dsh").exists()
 }
 
 /// The hook shim, installed beside this binary.
@@ -442,7 +476,10 @@ fn stun_servers_for(relay: &str) -> Vec<String> {
         .trim_start_matches("wss://")
         .trim_start_matches("ws://");
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let host = authority.rsplit_once(':').map(|(host, _)| host).unwrap_or(authority);
+    let host = authority
+        .rsplit_once(':')
+        .map(|(host, _)| host)
+        .unwrap_or(authority);
     if host.is_empty() {
         return Vec::new();
     }
@@ -459,34 +496,10 @@ pub fn random_token() -> String {
 }
 
 /// Find an executable the way a shell would: an absolute path, or `PATH`.
+///
+/// The answer differs enough per platform — launchd's PATH on macOS, `PATHEXT`
+/// and unused npm shims on Windows — that it lives in [`agi_platform::which`],
+/// which both this crate and the engines consult.
 pub fn which(binary: &str) -> Option<PathBuf> {
-    let candidate = PathBuf::from(binary);
-    if candidate.is_absolute() {
-        return candidate.exists().then_some(candidate);
-    }
-    let path = std::env::var_os("PATH")?;
-    // A Finder-launched app inherits launchd's PATH, which is not the shell's:
-    // a CLI installed into the user's own prefix would otherwise be invisible.
-    let mut directories: Vec<PathBuf> = std::env::split_paths(&path).collect();
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = PathBuf::from(home);
-        directories.push(home.join(".local/bin"));
-        directories.push(home.join(".local/node_modules/.bin"));
-        directories.push(home.join(".npm-global/bin"));
-        directories.push(home.join("bin"));
-    }
-    for directory in directories {
-        let full = directory.join(binary);
-        if full.is_file() {
-            return Some(full);
-        }
-        #[cfg(windows)]
-        {
-            let exe = directory.join(format!("{binary}.exe"));
-            if exe.is_file() {
-                return Some(exe);
-            }
-        }
-    }
-    None
+    agi_platform::which(binary)
 }

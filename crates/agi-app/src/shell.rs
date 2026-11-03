@@ -1,9 +1,10 @@
 //! What the shell remembers about itself.
 //!
 //! Three switches, all of them facts about the *process*, not about the kernel:
-//! whether the login item exists, whether the Dock icon is drawn, and what a
-//! click on the status item does. They live in their own file because two writers
-//! to one JSON file is how settings get lost, and the kernel already owns
+//! whether the login item exists, whether the app is drawn in the desktop's
+//! badge area (the Dock on macOS, the taskbar on Windows), and what a click on
+//! the tray icon does. They live in their own file because two writers to one
+//! JSON file is how settings get lost, and the kernel already owns
 //! `preferences.json` for the window's own appearance.
 
 use std::path::PathBuf;
@@ -12,16 +13,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
+#[cfg(windows)]
+use tauri::Manager;
+
 /// What the shell remembers between launches.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShellSettings {
     /// Register a login item that starts the app without a window.
     #[serde(default)]
     pub launch_at_login: bool,
-    /// Draw the icon in the Dock. Off means menu-bar-only.
+    /// Draw the icon in the Dock (macOS) or the taskbar (Windows). Off means
+    /// tray-only.
     #[serde(default = "default_true")]
     pub show_dock_icon: bool,
-    /// A click on the status item opens the menu instead of the window.
+    /// A click on the tray icon opens the menu instead of the window.
     #[serde(default)]
     pub tray_menu_only: bool,
 }
@@ -45,8 +50,7 @@ static TRAY_MENU_ONLY: AtomicBool = AtomicBool::new(false);
 
 /// Where the shell's own settings live: beside the kernel's, not inside them.
 pub fn path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".agi-mizar").join("shell.json")
+    agi_platform::data_dir().join("shell.json")
 }
 
 /// Read the file, falling back to the defaults.
@@ -82,7 +86,7 @@ fn save(settings: &ShellSettings) -> Result<(), String> {
         .map_err(|error| format!("could not move {} into place: {error}", temp.display()))
 }
 
-/// Whether a click on the status item should open the menu.
+/// Whether a click on the tray icon should open the menu.
 pub fn tray_menu_only() -> bool {
     TRAY_MENU_ONLY.load(Ordering::Relaxed)
 }
@@ -110,8 +114,9 @@ pub fn apply(app: &AppHandle, settings: &ShellSettings) -> Result<(), String> {
     TRAY_MENU_ONLY.store(settings.tray_menu_only, Ordering::Relaxed);
 
     // The login item only exists for a real bundle; in `cargo run` there is no
-    // `.app` to point launchd at, and failing here would make the switch useless
-    // in exactly the place it is developed.
+    // `.app` to point launchd at (and on Windows no installed path to point the
+    // Run key at), and failing here would make the switch useless in exactly
+    // the place it is developed.
     if let Err(error) = crate::login_item::set_enabled(settings.launch_at_login) {
         tracing::warn!("login item: {error}");
     }
@@ -131,6 +136,20 @@ pub fn apply(app: &AppHandle, settings: &ShellSettings) -> Result<(), String> {
             ActivationPolicy::Accessory
         };
         let _ = app.set_activation_policy(policy);
+    }
+
+    // Windows has no Dock: the taskbar button is the badge area, and the tray
+    // icon is what keeps the app reachable once its button is gone. The panel
+    // is always out of the taskbar, whatever this switch says: a flyout is not a
+    // task, and its owner (the main window) is one.
+    #[cfg(windows)]
+    {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.set_skip_taskbar(!settings.show_dock_icon);
+        }
+        if let Some(panel) = app.get_webview_window("tray-panel") {
+            let _ = panel.set_skip_taskbar(true);
+        }
     }
 
     Ok(())

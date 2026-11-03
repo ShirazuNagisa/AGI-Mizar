@@ -16,6 +16,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Toolbar } from './Toolbar'
 import { ShellSettingsList } from './ShellSettingsList'
 import { useShellSettings } from '../lib/use-shell-settings'
+import type { DesktopPlatform } from '../platform'
 import {
   shellAvailable,
   shellFailure,
@@ -28,6 +29,8 @@ import { cn, failureMessage } from '../lib/utils'
 
 interface SettingsPageProps {
   version: string
+  /** Which desktop's words the shell switches use. */
+  platform: DesktopPlatform
   account: AccountUser | null
   onlineDesktops: Set<string>
   serverConnected: boolean
@@ -49,6 +52,7 @@ interface SettingsPageProps {
  */
 export function SettingsPage({
   version,
+  platform,
   account,
   onlineDesktops,
   serverConnected,
@@ -123,7 +127,7 @@ export function SettingsPage({
           </Section>
 
           <Section title="启动与窗口">
-            <StartupSection />
+            <StartupSection platform={platform} />
           </Section>
 
           <Section title="关于">
@@ -479,9 +483,9 @@ function CheckSummary({
 }
 
 /** The three switches the shell owns; each one takes effect on click. */
-function StartupSection() {
+function StartupSection({ platform }: { platform: DesktopPlatform }) {
   const shell = useShellSettings()
-  return <ShellSettingsList shell={shell} />
+  return <ShellSettingsList shell={shell} platform={platform} />
 }
 
 /**

@@ -33,7 +33,7 @@ pub fn encode(bytes: &[u8]) -> String {
 /// Decode standard base64. `None` for anything that is not that.
 pub fn decode(text: &str) -> Option<Vec<u8>> {
     let bytes = text.as_bytes();
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return None;
     }
     let mut out = Vec::with_capacity(bytes.len() / 4 * 3);

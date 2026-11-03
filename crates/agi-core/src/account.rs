@@ -630,33 +630,11 @@ fn new_device_id() -> String {
 fn identity(id: &str) -> DeviceIdentity {
     DeviceIdentity {
         id: id.to_string(),
-        name: host_name(),
-        model: "Mac".to_string(),
-        platform: std::env::consts::OS.to_string(),
+        name: agi_platform::host_name(),
+        model: agi_platform::machine_model(),
+        platform: agi_platform::platform().to_string(),
         app_version: env!("CARGO_PKG_VERSION").to_string(),
     }
-}
-
-/// The machine's own name, as every other list on this computer spells it.
-fn host_name() -> String {
-    #[cfg(unix)]
-    {
-        let mut buffer = [0i8; 256];
-        // SAFETY: gethostname writes at most buffer.len() bytes into a buffer
-        // this function owns, and only reads it back afterwards.
-        let result = unsafe { libc::gethostname(buffer.as_mut_ptr(), buffer.len()) };
-        if result == 0 {
-            let bytes: Vec<u8> = buffer
-                .iter()
-                .take_while(|byte| **byte != 0)
-                .map(|byte| *byte as u8)
-                .collect();
-            if !bytes.is_empty() {
-                return String::from_utf8_lossy(&bytes).to_string();
-            }
-        }
-    }
-    "AGI Mizar".to_string()
 }
 
 /// A directory only this user can enter.

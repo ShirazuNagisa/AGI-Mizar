@@ -12,8 +12,10 @@
 
 use tauri::{AppHandle, Manager};
 
+use crate::login_item;
 use crate::shell::{self, ShellSettings};
-use crate::{login_item, updates};
+use crate::tray;
+use crate::updates;
 
 /// Ask GitHub, and answer with what it said.
 #[tauri::command]
@@ -92,9 +94,16 @@ pub fn tray_panel_resize(app: AppHandle, height: u32) -> Result<(), String> {
     };
     // Logical, not physical: the height arrives in CSS pixels, and a Retina
     // screen would otherwise draw the page at half the height asked for.
+    let height = f64::from(height.max(120));
     panel
-        .set_size(tauri::LogicalSize::new(232.0, f64::from(height.max(120))))
-        .map_err(|error| error.to_string())
+        .set_size(tauri::LogicalSize::new(tray::PANEL_WIDTH, height))
+        .map_err(|error| error.to_string())?;
+    // The page is opened from the bottom of the screen on Windows, so a panel
+    // that shrinks to its measured height has to move as well: the anchor is the
+    // pointer, and the bottom edge stays where the click put it.
+    #[cfg(windows)]
+    tray::reposition_panel(&app, height);
+    Ok(())
 }
 
 /// Hide the tray page and bring the window up on its settings page.
@@ -103,6 +112,6 @@ pub fn tray_panel_open_settings(app: AppHandle) -> Result<(), String> {
     if let Some(panel) = app.get_webview_window("tray-panel") {
         let _ = panel.hide();
     }
-    crate::tray::show_settings(&app);
+    tray::show_settings(&app);
     Ok(())
 }

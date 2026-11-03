@@ -227,6 +227,8 @@ export interface DeviceStatus {
 
 export interface StateSnapshot {
   version: string
+  /** `macos`, `windows` or `linux`: which machine this window draws for. */
+  platform: string
   engines: EngineStatus[]
   devices: DeviceStatus[]
   sessions: Session[]

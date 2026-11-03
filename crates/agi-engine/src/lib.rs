@@ -487,9 +487,11 @@ pub fn read_within(cwd: &std::path::Path, path: &str) -> Result<FilePreview, Eng
 /// The root is canonicalised first and the candidate is built *from it*, so a
 /// lexical comparison is meaningful: on macOS `/var` is a symlink to
 /// `/private/var`, and joining the raw cwd would compare two spellings of the
-/// same directory and call every file outside.
+/// same directory and call every file outside. On Windows the platform seam
+/// strips the `\\?\` prefix that `std::fs::canonicalize` adds and names a
+/// prefix a component, so two spellings of one directory compare correctly.
 fn resolve_within(cwd: &std::path::Path, path: &str) -> Result<std::path::PathBuf, EngineError> {
-    let root = cwd.canonicalize().map_err(|error| {
+    let root = agi_platform::canonicalize(cwd).map_err(|error| {
         forbidden(
             cwd.display().to_string().as_str(),
             format!("the session's working directory cannot be resolved ({error})"),
@@ -509,19 +511,20 @@ fn resolve_within(cwd: &std::path::Path, path: &str) -> Result<std::path::PathBu
     // The written form of the root counts too: a working directory recorded as
     // `/tmp/proj` and a canonical root of `/private/tmp/proj` are the same
     // directory, and an absolute path the model wrote in the first spelling is
-    // not an escape.
+    // not an escape. `path_is_under` compares case-insensitively on Windows,
+    // where `C:\Project` and `c:\project` are one directory.
     let written_root = lexical_normalize(cwd);
     let lexical = lexical_normalize(&candidate);
-    if !lexical.starts_with(&root) && !lexical.starts_with(&written_root) {
+    if !agi_platform::path_is_under(&root, &lexical)
+        && !agi_platform::path_is_under(&written_root, &lexical)
+    {
         return Err(forbidden(
             path,
             "it is outside the session's directory".to_string(),
         ));
     }
-    let resolved = candidate
-        .canonicalize()
-        .map_err(|error| unknown(path, &error))?;
-    if !resolved.starts_with(&root) {
+    let resolved = agi_platform::canonicalize(&candidate).map_err(|error| unknown(path, &error))?;
+    if !agi_platform::path_is_under(&root, &resolved) {
         return Err(forbidden(
             path,
             "it is outside the session's directory".to_string(),
@@ -722,6 +725,36 @@ mod tests {
     fn refuses_an_absolute_path_outside() {
         let dir = tempfile::tempdir().unwrap();
         let error = read_within(dir.path(), "/etc/hosts").unwrap_err();
+        assert_eq!(error.code(), "FILE_FORBIDDEN");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_differently_cased_path_inside_the_directory_is_allowed() {
+        // Windows paths compare case-insensitively: a session whose working
+        // directory was recorded as `C:\Project` must not fence out a file the
+        // tool wrote as `c:\project\a.txt`. The old string comparison called that
+        // spelling an escape.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hi").unwrap();
+        let as_written_elsewhere = dir.path().join("a.txt").to_string_lossy().to_uppercase();
+        let preview = read_within(dir.path(), &as_written_elsewhere).unwrap();
+        assert_eq!(preview.text.as_deref(), Some("hi"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_differently_cased_sibling_is_still_refused() {
+        // Case-insensitivity must not turn a shared prefix into containment:
+        // `C:\...\project-other` is not inside `C:\...\project`.
+        let parent = tempfile::tempdir().unwrap();
+        let dir = parent.path().join("project");
+        std::fs::create_dir(&dir).unwrap();
+        let other = parent.path().join("project-other");
+        std::fs::create_dir(&other).unwrap();
+        std::fs::write(other.join("secret.txt"), "secret").unwrap();
+        let outside = other.join("secret.txt").to_string_lossy().to_uppercase();
+        let error = read_within(&dir, &outside).unwrap_err();
         assert_eq!(error.code(), "FILE_FORBIDDEN");
     }
 

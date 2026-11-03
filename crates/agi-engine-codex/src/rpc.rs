@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use tokio::sync::{broadcast, oneshot, Mutex as AsyncMutex};
 
 /// How long one request may take before it is failed.
@@ -153,7 +153,10 @@ impl AppServer {
     pub async fn start(&self) -> Result<Value, RpcError> {
         self.stop().await;
 
-        let mut command = Command::new(&self.config.binary);
+        // The caller hands in the path `which` resolved. On Windows that is
+        // usually an npm `codex.cmd` shim, which `CreateProcess` refuses
+        // (`os error 193`); the platform seam wraps it in `cmd /C` for us.
+        let mut command = agi_platform::command(std::path::Path::new(&self.config.binary));
         command
             .args(&self.config.args)
             .arg("app-server")
@@ -243,6 +246,15 @@ impl AppServer {
 
         let child = self.child.lock().unwrap_or_else(|p| p.into_inner()).take();
         if let Some(mut child) = child {
+            // On Windows the child is usually `cmd /C` around an npm `.cmd`
+            // shim, so killing it alone would orphan the app-server it started.
+            // `taskkill /T` walks the tree the way a Unix process group would.
+            #[cfg(windows)]
+            if let Some(pid) = child.id() {
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/T", "/F", "/PID", &pid.to_string()])
+                    .status();
+            }
             let _ = child.start_kill();
             let _ = child.wait().await;
         }

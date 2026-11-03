@@ -10,15 +10,29 @@
       // URL because the kernel's port, and so this page's origin, changes on
       // every launch.
       (function () {
-        var choice = new URLSearchParams(location.search).get('theme')
+        var query = new URLSearchParams(location.search)
+        var choice = query.get('theme')
         var systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches
         var dark = choice === 'dark' || (choice !== 'light' && systemDark)
         document.documentElement.classList.toggle('dark', dark)
         document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
+
+        // The platform is in the URL for the same reason: macOS reserves a strip
+        // for its traffic lights and Windows keeps its own title bar, and the
+        // sidebar must not flash the other layout before the kernel answers.
+        var platform = query.get('platform')
+        if (platform !== 'macos' && platform !== 'windows' && platform !== 'linux') {
+          platform = /Windows/.test(navigator.userAgent)
+            ? 'windows'
+            : /Macintosh|Mac OS X/.test(navigator.userAgent)
+              ? 'macos'
+              : 'linux'
+        }
+        document.documentElement.dataset.platform = platform
       })()
     </script>
-    <script type="module" crossorigin src="/assets/index-BrqWyDF2.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-BY1ws7LU.css">
+    <script type="module" crossorigin src="/assets/index-QRgaZo6y.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DXhEykQY.css">
   </head>
   <body>
     <div id="root"></div>

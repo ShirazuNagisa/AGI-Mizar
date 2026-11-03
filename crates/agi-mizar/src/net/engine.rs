@@ -41,8 +41,8 @@ use tokio::sync::mpsc;
 
 use super::crypto;
 use super::identity::{verify_signature, Identity};
-use super::stun;
 use super::session::{Event, Role, Session, TICK};
+use super::stun;
 use super::wire::{Packet, PacketBody, PacketType};
 
 /// How many messages one stream buffers before the socket loop waits.
@@ -196,9 +196,7 @@ impl Stream {
         self.outgoing
             .send(Command::Send(self.connection_id, message))
             .await
-            .map_err(|_| {
-                io::Error::new(io::ErrorKind::BrokenPipe, "the direct connection is gone")
-            })
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "the direct connection is gone"))
     }
 
     /// Wait for the next message.
@@ -254,9 +252,7 @@ impl StreamSender {
         self.outgoing
             .send(Command::Send(self.connection_id, message))
             .await
-            .map_err(|_| {
-                io::Error::new(io::ErrorKind::BrokenPipe, "the direct connection is gone")
-            })
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "the direct connection is gone"))
     }
 
     /// Close the connection, telling the peer.
@@ -571,10 +567,10 @@ async fn accept(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::identity::Purpose;
     use super::super::session::Role;
     use super::super::wire::PacketType;
+    use super::*;
     use std::time::Duration;
 
     /// A phone, simulated with the same primitives the kernel uses.
@@ -591,7 +587,9 @@ mod tests {
     }
 
     async fn hello(engine: SocketAddr) -> Dialer {
-        let socket = UdpSocket::bind(("127.0.0.1", 0)).await.expect("a phone socket");
+        let socket = UdpSocket::bind(("127.0.0.1", 0))
+            .await
+            .expect("a phone socket");
         let identity = Identity::derive(b"the device token", Purpose::Device);
         let (local_secret, local_public) = crypto::ephemeral_keypair();
         let connection_id = 0x0102_0304_0506_0708;
@@ -628,10 +626,11 @@ mod tests {
         /// Read the answer and build the session the phone would build.
         async fn settle(&mut self, engine_endpoint_id: &str) {
             let mut buffer = vec![0u8; 2048];
-            let (length, _from) = tokio::time::timeout(Duration::from_secs(2), self.socket.recv_from(&mut buffer))
-                .await
-                .expect("a server hello arrives")
-                .expect("a datagram");
+            let (length, _from) =
+                tokio::time::timeout(Duration::from_secs(2), self.socket.recv_from(&mut buffer))
+                    .await
+                    .expect("a server hello arrives")
+                    .expect("a datagram");
             let packet = Packet::decode(&buffer[..length]).expect("a decoded hello");
             assert_eq!(packet.kind, PacketType::ServerHello);
             let PacketBody::Hello {
@@ -657,17 +656,15 @@ mod tests {
                 Instant::now(),
             ));
         }
-
     }
 
     #[tokio::test]
     async fn a_hello_is_answered_and_a_message_crosses_both_ways() {
         let identity = Identity::derive(b"the host secret", Purpose::Host);
         let endpoint_id = identity.endpoint_id().to_string();
-        let (mut engine, address) =
-            Engine::bind(identity, 0, Reach::default(), Vec::new())
-                .await
-                .expect("a socket");
+        let (mut engine, address) = Engine::bind(identity, 0, Reach::default(), Vec::new())
+            .await
+            .expect("a socket");
 
         let mut dialer = hello(address).await;
         dialer.settle(&endpoint_id).await;
@@ -680,7 +677,9 @@ mod tests {
         // Phone to computer. The dialer's session needs the engine's address to
         // send to, so re-point the datagram's destination here.
         let session = dialer.session.as_mut().expect("settled");
-        let packet = session.send(b"hello from the phone", Instant::now()).remove(0);
+        let packet = session
+            .send(b"hello from the phone", Instant::now())
+            .remove(0);
         dialer
             .socket
             .send_to(&packet.encode(), address)
@@ -694,12 +693,16 @@ mod tests {
         assert_eq!(received, b"hello from the phone");
 
         // Computer to phone.
-        stream.send(b"hello from the computer".to_vec()).await.expect("sent");
-        let mut buffer = vec![0u8; 2048];
-        let (length, _) = tokio::time::timeout(Duration::from_secs(2), dialer.socket.recv_from(&mut buffer))
+        stream
+            .send(b"hello from the computer".to_vec())
             .await
-            .expect("a datagram comes back")
-            .expect("a datagram");
+            .expect("sent");
+        let mut buffer = vec![0u8; 2048];
+        let (length, _) =
+            tokio::time::timeout(Duration::from_secs(2), dialer.socket.recv_from(&mut buffer))
+                .await
+                .expect("a datagram comes back")
+                .expect("a datagram");
         let packet = Packet::decode(&buffer[..length]).expect("a packet");
         let events = dialer
             .session
@@ -762,16 +765,18 @@ mod tests {
             .iter()
             .map(|candidate| candidate.kind)
             .collect();
-        assert!(kinds.contains(&"srflx"), "the signalling list has it: {kinds:?}");
+        assert!(
+            kinds.contains(&"srflx"),
+            "the signalling list has it: {kinds:?}"
+        );
     }
 
     #[tokio::test]
     async fn a_hello_that_does_not_verify_is_ignored() {
         let identity = Identity::derive(b"the host secret", Purpose::Host);
-        let (mut engine, address) =
-            Engine::bind(identity, 0, Reach::default(), Vec::new())
-                .await
-                .expect("a socket");
+        let (mut engine, address) = Engine::bind(identity, 0, Reach::default(), Vec::new())
+            .await
+            .expect("a socket");
 
         let stranger = Identity::derive(b"some other phone", Purpose::Device);
         let (_secret, public) = crypto::ephemeral_keypair();
@@ -783,7 +788,8 @@ mod tests {
             [0u8; 64],
         );
         // A signature from a different key: the name is not this sender's.
-        let signature = Identity::derive(b"not that phone", Purpose::Device).sign(&packet.handshake_message());
+        let signature =
+            Identity::derive(b"not that phone", Purpose::Device).sign(&packet.handshake_message());
         packet = Packet::hello(
             PacketType::ClientHello,
             7,
@@ -793,7 +799,10 @@ mod tests {
         );
 
         let socket = UdpSocket::bind(("127.0.0.1", 0)).await.expect("a socket");
-        socket.send_to(&packet.encode(), address).await.expect("sent");
+        socket
+            .send_to(&packet.encode(), address)
+            .await
+            .expect("sent");
 
         assert!(
             tokio::time::timeout(Duration::from_millis(300), engine.accept())
@@ -807,10 +816,9 @@ mod tests {
     async fn a_repeated_hello_is_answered_with_the_same_key() {
         let identity = Identity::derive(b"the host secret", Purpose::Host);
         let endpoint_id = identity.endpoint_id().to_string();
-        let (mut engine, address) =
-            Engine::bind(identity, 0, Reach::default(), Vec::new())
-                .await
-                .expect("a socket");
+        let (mut engine, address) = Engine::bind(identity, 0, Reach::default(), Vec::new())
+            .await
+            .expect("a socket");
 
         let mut dialer = hello(address).await;
         dialer.settle(&endpoint_id).await;
@@ -838,13 +846,18 @@ mod tests {
             dialer.identity.endpoint_id(),
             signature,
         );
-        dialer.socket.send_to(&repeat.encode(), address).await.expect("sent");
+        dialer
+            .socket
+            .send_to(&repeat.encode(), address)
+            .await
+            .expect("sent");
 
         let mut buffer = vec![0u8; 2048];
-        let (length, _) = tokio::time::timeout(Duration::from_secs(2), dialer.socket.recv_from(&mut buffer))
-            .await
-            .expect("the answer comes again")
-            .expect("a datagram");
+        let (length, _) =
+            tokio::time::timeout(Duration::from_secs(2), dialer.socket.recv_from(&mut buffer))
+                .await
+                .expect("the answer comes again")
+                .expect("a datagram");
         let packet = Packet::decode(&buffer[..length]).expect("a packet");
         let PacketBody::Hello { ref ephemeral, .. } = packet.body else {
             panic!("an answer is a hello");
@@ -864,6 +877,10 @@ mod tests {
         );
         // Proving the key is the session's: a message sealed with it opens.
         let packet = session.send(b"still here", Instant::now()).remove(0);
-        dialer.socket.send_to(&packet.encode(), address).await.expect("sent");
+        dialer
+            .socket
+            .send_to(&packet.encode(), address)
+            .await
+            .expect("sent");
     }
 }

@@ -565,7 +565,10 @@ mod tests {
             at += Duration::from_secs(3);
             dialer.tick(at);
         }
-        assert!(dialer.is_stalled(), "eight attempts, then the session says so");
+        assert!(
+            dialer.is_stalled(),
+            "eight attempts, then the session says so"
+        );
     }
 
     #[test]
@@ -582,7 +585,10 @@ mod tests {
         dialer.on_packet(&acks[0], now + Duration::from_millis(30));
 
         assert_eq!(dialer.unacked(), 0);
-        assert!(dialer.tick(now + Duration::from_secs(1)).is_empty(), "nothing left to resend");
+        assert!(
+            dialer.tick(now + Duration::from_secs(1)).is_empty(),
+            "nothing left to resend"
+        );
         assert_eq!(dialer.rtt_milliseconds(), Some(30));
     }
 

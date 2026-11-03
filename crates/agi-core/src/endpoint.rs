@@ -35,11 +35,7 @@ pub struct HookFile {
 
 /// `~/.agi-mizar/hook.json`.
 pub fn default_hook_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".agi-mizar").join("hook.json")
+    agi_platform::data_dir().join("hook.json")
 }
 
 /// Publish the hook endpoint atomically, owner-readable only.
@@ -55,11 +51,7 @@ pub fn write_hook_file(path: &Path, port: u16, token: &str) -> io::Result<()> {
 
 /// `~/.agi-mizar/endpoint.json`.
 pub fn default_endpoint_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".agi-mizar").join("endpoint.json")
+    agi_platform::data_dir().join("endpoint.json")
 }
 
 /// Publish the endpoint atomically.
@@ -106,6 +98,15 @@ pub fn remove_endpoint_file(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
+/// Remove the hook endpoint, on shutdown.
+///
+/// Same contract as [`remove_endpoint_file`]: best effort, and a file that is
+/// already gone is not an error. The window's exit path calls this so a hook
+/// invocation after the app quit does not keep dialing a dead port.
+pub fn remove_hook_file(path: &Path) {
+    let _ = std::fs::remove_file(path);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,6 +142,16 @@ mod tests {
         write_endpoint_file(&path, 1, "tok").unwrap();
         remove_endpoint_file(&path);
         remove_endpoint_file(&path);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn hook_removal_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hook.json");
+        write_hook_file(&path, 1, "tok").unwrap();
+        remove_hook_file(&path);
+        remove_hook_file(&path);
         assert!(!path.exists());
     }
 }

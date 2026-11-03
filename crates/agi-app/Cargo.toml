@@ -17,7 +17,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 agi-boot = { workspace = true }
 agi-core = { workspace = true }
+agi-platform = { workspace = true }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-dialog = "2"
 tokio = { workspace = true }
@@ -30,3 +32,6 @@ objc2 = { version = "0.6" }
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSAppearance", "NSImage"] }
 objc2-foundation = { version = "0.3", features = ["NSData", "NSString"] }
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"

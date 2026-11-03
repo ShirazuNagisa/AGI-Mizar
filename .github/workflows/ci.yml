@@ -34,6 +34,37 @@ jobs:
       - name: Test
         run: cargo test --all
 
+  windows:
+    name: kernel (windows)
+    # A real Windows runner, because Windows is a shipped platform: the Tauri
+    # shell, its NSIS bundle and the sidecar lookup only compile there.
+    # `cargo fmt --check` is deliberately not a step here: the tree has rustfmt
+    # drift between platforms that is being fixed separately, and this job
+    # exists to cover Windows behaviour, not to reformat the workspace.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # tauri-build validates bundle.resources while compiling agi-app, so the
+      # source paths named by tauri.windows.conf.json must exist even for
+      # clippy and tests. This job builds no installer, so stubbing them is
+      # enough; the release job fetches the real runtime.
+      - name: Stub the generated bundle resources
+        shell: pwsh
+        run: ./scripts/fetch-llama.ps1 -Stub
+
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --all
+
   ui:
     name: window
     runs-on: ubuntu-latest

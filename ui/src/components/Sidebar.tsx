@@ -2,6 +2,7 @@ import type { EngineStatus } from '../api'
 import { AGENTS, type Page, samePage } from '../navigation'
 import { ENGINE_MARKS, GearIcon, PersonIcon } from '../icons'
 import { cn } from '../lib/utils'
+import { isMac } from '../platform'
 import { WipeButton } from './ui/wipe'
 import { useIsOled } from '../lib/oled'
 
@@ -80,9 +81,15 @@ export function Sidebar({ engines, page, serverConnected, loggedIn, onNavigate }
         oled ? 'border-ink' : 'border-border',
       )}
     >
-      {/* The window's title bar is gone; the first row is the traffic lights'
-          room, and the system draws them over this strip. */}
-      <div data-tauri-drag-region className="h-8 shrink-0" />
+      {/* The window's title bar is gone on macOS; the first row is the traffic
+          lights' room, and the system draws them over this strip. Windows keeps
+          the system title bar, so the strip would be empty space there — a small
+          pad is all the Windows rows need. */}
+      {isMac() ? (
+        <div data-tauri-drag-region className="h-8 shrink-0" />
+      ) : (
+        <div className="h-2 shrink-0" />
+      )}
 
       <WipeButton
         onClick={() => onNavigate({ kind: 'home' })}

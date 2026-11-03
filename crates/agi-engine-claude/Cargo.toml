@@ -9,6 +9,7 @@ description = "The Claude Code adapter: transcripts for reading, hooks for obser
 
 [dependencies]
 agi-protocol = { workspace = true }
+agi-platform = { workspace = true }
 agi-engine = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }

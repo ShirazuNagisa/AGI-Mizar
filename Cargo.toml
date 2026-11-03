@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/agi-protocol",
+    "crates/agi-platform",
     "crates/agi-engine",
     "crates/agi-engine-dsh",
     "crates/agi-engine-codex",
@@ -18,12 +19,16 @@ resolver = "2"
 [workspace.package]
 version = "0.1.1"
 edition = "2021"
-rust-version = "1.82"
+# 1.90: tauri-plugin-single-instance 2.5 declares that as its MSRV, and the
+# single-instance behaviour is what keeps a second launch from booting a second
+# kernel (see crates/agi-app/src/main.rs).
+rust-version = "1.90"
 license = "GPL-3.0-only"
 repository = "https://github.com/ShirazuNagisa/AGI-Mizar"
 
 [workspace.dependencies]
 agi-protocol = { path = "crates/agi-protocol" }
+agi-platform = { path = "crates/agi-platform" }
 agi-engine = { path = "crates/agi-engine" }
 agi-engine-dsh = { path = "crates/agi-engine-dsh" }
 agi-engine-codex = { path = "crates/agi-engine-codex" }

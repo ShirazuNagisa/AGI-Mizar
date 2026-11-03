@@ -2,6 +2,13 @@ target/
 node_modules/
 .DS_Store
 
+# Bundle resources are generated, never committed: scripts/fetch-llama.ps1
+# installs the pinned llama.cpp runtime (a 24 MB zip that unpacks to ~60 MiB of
+# exe/dll) and scripts/package.ps1 copies the hook shim in.  The paths
+# themselves are not optional on Windows — crates/agi-app/tauri.windows.conf.json
+# names them, and tauri-build fails the agi-app build script when they are missing.
+crates/agi-app/resources/
+
 # The built UI is committed, the same way the DSH plugin commits lib/: a fresh
 # clone has to be able to `cargo build` without a Node toolchain first.
 !ui/dist/

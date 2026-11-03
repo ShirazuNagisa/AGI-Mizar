@@ -77,7 +77,7 @@ mod fixture_tests {
     }
 
     fn hex(text: &str) -> Vec<u8> {
-        assert!(text.len() % 2 == 0, "{text} is not hex");
+        assert!(text.len().is_multiple_of(2), "{text} is not hex");
         (0..text.len())
             .step_by(2)
             .map(|index| u8::from_str_radix(&text[index..index + 2], 16).expect("hex digits"))
@@ -227,7 +227,9 @@ mod fixture_tests {
         );
         assert_eq!(salt.to_vec(), bytes(session, "saltHex"));
 
-        let shared: [u8; 32] = bytes(session, "sharedSecretHex").try_into().expect("32 bytes");
+        let shared: [u8; 32] = bytes(session, "sharedSecretHex")
+            .try_into()
+            .expect("32 bytes");
         let keys = crypto::session_keys(&shared, &salt);
         assert_eq!(
             keys.dialer_to_acceptor.to_vec(),

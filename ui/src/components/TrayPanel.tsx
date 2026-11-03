@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { DeviceStatus, EngineStatus, Kernel, StateSnapshot } from '../api'
 import { ENGINE_MARKS, GearIcon, PowerIcon } from '../icons'
 import { AGENTS } from '../navigation'
+import { applyPlatform } from '../platform'
 import { cn } from '../lib/utils'
 
 /**
@@ -23,7 +24,9 @@ export function TrayPanel({ kernel }: { kernel: Kernel }) {
       void kernel
         .state()
         .then((next) => {
-          if (!cancelled) setSnapshot(next)
+          if (cancelled) return
+          applyPlatform(next.platform)
+          setSnapshot(next)
         })
         .catch(() => {})
     read()

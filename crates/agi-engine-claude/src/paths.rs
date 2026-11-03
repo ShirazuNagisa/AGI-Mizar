@@ -31,15 +31,9 @@ pub fn claude_home() -> PathBuf {
             return PathBuf::from(trimmed);
         }
     }
-    home().join(".claude")
-}
-
-/// The user's home directory.
-fn home() -> PathBuf {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+    // `agi_platform::home` is the platform seam: `HOME` on macOS, and
+    // `USERPROFILE` on Windows, where a GUI-launched process has no `HOME`.
+    agi_platform::home().join(".claude")
 }
 
 /// The directory holding one subdirectory per project.

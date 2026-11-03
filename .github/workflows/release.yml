@@ -37,8 +37,20 @@ jobs:
 
       # The hook shim ships beside the app: the installer writes its absolute
       # path into ~/.claude/settings.json, so it has to exist in the bundle.
+      # The app bundle is universal, so the shim is lipo'd from both slices — an
+      # arm64-only nested binary would run on Apple Silicon and fail on Intel.
+      # It is staged under the same name package.sh uses (no .exe on macOS) and
+      # handed to the bundler with --config below; macOS keeps the --config
+      # injection while Windows uses tauri.windows.conf.json.
       - name: Build the hook shim
-        run: cargo build --release -p agi-hook-shim
+        run: |
+          cargo build --release -p agi-hook-shim --target aarch64-apple-darwin
+          cargo build --release -p agi-hook-shim --target x86_64-apple-darwin
+          mkdir -p crates/agi-app/resources
+          lipo -create -output crates/agi-app/resources/agi-mizar-hook \
+            target/aarch64-apple-darwin/release/agi-mizar-hook \
+            target/x86_64-apple-darwin/release/agi-mizar-hook
+          chmod +x crates/agi-app/resources/agi-mizar-hook
 
       - uses: tauri-apps/tauri-action@v0
         env:
@@ -57,4 +69,130 @@ jobs:
           releaseBody: "See the commits in this tag."
           releaseDraft: true
           prerelease: false
-          args: --target universal-apple-darwin
+          # Only the hook shim is injected: this job does not fetch the
+          # llama.cpp runtime, so naming resources/bin here would fail the
+          # bundler with `resource path ... doesn't exist`. package.sh can
+          # inject both because it runs fetch-llama.sh first.
+          args: --target universal-apple-darwin --config '{"bundle":{"resources":{"resources/agi-mizar-hook":"agi-mizar-hook"}}}'
+
+  windows:
+    name: nsis installer
+    # Sequential rather than parallel on purpose: both jobs hand the same tag
+    # to tauri-action, and letting the macOS job create the draft release first
+    # removes the create-release race between the two runners.
+    needs: macos
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check the tag matches the bundle
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $version = $metadata.packages[0].version
+          $tag = $env:GITHUB_REF_NAME -replace '^v', ''
+          if ($version -ne $tag) {
+            Write-Error "tag $env:GITHUB_REF_NAME does not match workspace version $version"
+            exit 1
+          }
+
+      # The hook shim ships beside the app: the installer writes its absolute
+      # path into %USERPROFILE%\.claude\settings.json, so it has to exist in the
+      # bundle. Staging it as the resource tauri.windows.conf.json names is what
+      # puts it there on Windows.
+      - name: Build the hook shim
+        run: cargo build --release -p agi-hook-shim
+
+      - name: Stage the hook shim as a bundle resource
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force crates/agi-app/resources | Out-Null
+          Copy-Item target/release/agi-mizar-hook.exe crates/agi-app/resources/agi-mizar-hook.exe
+
+      # Pinned tag + SHA256, same file the macOS release reads. The Windows
+      # build of llama-server.exe needs its DLLs from the same directory, which
+      # is why the whole archive directory is installed, not just the exe.
+      - name: Fetch the pinned llama.cpp runtime
+        shell: pwsh
+        run: ./scripts/fetch-llama.ps1
+
+      # tauri-bundler fetches the NSIS toolset itself into
+      # %LOCALAPPDATA%\tauri\NSIS (nsis-3.13.zip + nsis_tauri_utils.dll, both
+      # SHA1-checked in the bundler). If that download ever becomes flaky the
+      # fix is to pre-seed that directory, see docs/windows.md.
+      #
+      # Authenticode signing is optional and comes from the release owner, not
+      # from this repository. Two ways in:
+      #
+      #   WINDOWS_CERTIFICATE_BASE64   base64 of a .pfx with the code-signing
+      #   WINDOWS_CERTIFICATE_PASSWORD its password
+      #       -> imported into the runner's CurrentUser\My store below; the
+      #          thumbprint is handed to tauri-bundler, which signs the app
+      #          binary and the NSIS installer with signtool.
+      #
+      #   WINDOWS_THUMBPRINT           SHA1 thumbprint of a certificate already
+      #                                present in the store (custom runner).
+      #
+      # No secrets -> the installer stays unsigned and SmartScreen warns; the
+      # release itself still works. A certificate alone is not enough for
+      # SmartScreen to stay quiet: it must be CA-issued and the binary needs
+      # download reputation (see docs/windows.md).
+      - name: Import the code-signing certificate (optional)
+        if: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 != '' }}
+        shell: pwsh
+        env:
+          CERT_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'agi-mizar-signing.pfx'
+          [System.IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT_BASE64))
+          $password = ConvertTo-SecureString -String $env:CERT_PASSWORD -AsPlainText -Force
+          try {
+            $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          } finally {
+            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+          }
+          $config = @{ bundle = @{ windows = @{
+            certificateThumbprint = $cert.Thumbprint
+            digestAlgorithm = 'sha256'
+            timestampUrl = 'http://timestamp.digicert.com'
+          } } }
+          $path = Join-Path $env:RUNNER_TEMP 'windows-signing.json'
+          [System.IO.File]::WriteAllText($path, ($config | ConvertTo-Json -Depth 6 -Compress))
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "SIGNING_CONFIG=$path`n")
+          Write-Host "imported code-signing certificate $($cert.Thumbprint)"
+
+      - name: Use a pre-installed code-signing certificate (optional)
+        if: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 == '' && secrets.WINDOWS_THUMBPRINT != '' }}
+        shell: pwsh
+        env:
+          CERT_THUMBPRINT: ${{ secrets.WINDOWS_THUMBPRINT }}
+        run: |
+          $config = @{ bundle = @{ windows = @{
+            certificateThumbprint = $env:CERT_THUMBPRINT
+            digestAlgorithm = 'sha256'
+            timestampUrl = 'http://timestamp.digicert.com'
+          } } }
+          $path = Join-Path $env:RUNNER_TEMP 'windows-signing.json'
+          [System.IO.File]::WriteAllText($path, ($config | ConvertTo-Json -Depth 6 -Compress))
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "SIGNING_CONFIG=$path`n")
+          Write-Host "using pre-installed code-signing certificate $env:CERT_THUMBPRINT"
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "AGI Mizar ${{ github.ref_name }}"
+          releaseBody: "See the commits in this tag."
+          releaseDraft: true
+          prerelease: false
+          args: ${{ env.SIGNING_CONFIG != '' && format('--bundles nsis --config {0}', env.SIGNING_CONFIG) || '--bundles nsis' }}

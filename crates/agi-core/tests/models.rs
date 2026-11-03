@@ -313,13 +313,28 @@ async fn the_sidecar_starts_and_stops() {
         eprintln!("no weights at {}, skipping", workspace.display());
         return;
     }
+    // The runner ships as a plain executable on macOS and as `.exe` on Windows;
+    // the packaged layout puts it under the app's resources/bin in both cases.
+    let runner_name = if cfg!(windows) {
+        "llama-server.exe"
+    } else {
+        "llama-server"
+    };
     let runner = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../agi-app/resources/bin/llama-server");
-    assert!(runner.exists(), "run scripts/fetch-llama.sh first");
+        .join("../agi-app/resources/bin")
+        .join(runner_name);
+    assert!(
+        runner.exists(),
+        "run scripts/fetch-llama.sh first (looked for {})",
+        runner.display()
+    );
     std::env::set_var("AGI_LLAMA_BIN", &runner);
 
     let dir = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
     std::os::unix::fs::symlink(&workspace, dir.path().join("mizarllm-v1.gguf")).unwrap();
+    #[cfg(windows)]
+    std::fs::copy(&workspace, dir.path().join("mizarllm-v1.gguf")).unwrap();
     std::fs::write(
         dir.path().join("mizarllm-v1.json"),
         serde_json::json!({
