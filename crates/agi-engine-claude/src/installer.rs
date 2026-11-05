@@ -135,6 +135,33 @@ pub fn install(settings: &Path, shim: &Path) -> io::Result<InstallOutcome> {
     })
 }
 
+/// How many of the eight hooks are already in a settings file.
+///
+/// Read-only, and deliberately not a full verification: a stale shim path is
+/// repaired by [`install`], which rewrites the command under our marker. This
+/// answers the one question the dependency card asks — "would Claude Code notify
+/// this app at all?" — without writing to the operator's file.
+pub fn installed_count(settings: &Path) -> io::Result<usize> {
+    if !settings.exists() {
+        return Ok(0);
+    }
+    let root = read_settings(settings)?;
+    let Some(hooks) = root.get("hooks").and_then(Value::as_object) else {
+        return Ok(0);
+    };
+    let mut installed = 0;
+    for (event, _) in HOOK_EVENTS {
+        let found = hooks
+            .get(event)
+            .and_then(Value::as_array)
+            .is_some_and(|entries| entries.iter().any(contains_marker));
+        if found {
+            installed += 1;
+        }
+    }
+    Ok(installed)
+}
+
 /// Remove every entry this module wrote.
 ///
 /// Returns how many entries were removed. A settings file that does not exist is

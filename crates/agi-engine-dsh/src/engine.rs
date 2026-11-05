@@ -1361,6 +1361,7 @@ fn parse_session(value: &Value) -> Option<Session> {
             .get("origin")
             .and_then(Value::as_str)
             .map(str::to_string),
+        source: None,
         turns: value
             .get("turns")
             .and_then(Value::as_u64)
@@ -1606,6 +1607,42 @@ impl Engine for DshEngine {
             json!({ "request": { "sessionId": session.raw() } }),
         )
         .await?;
+        Ok(())
+    }
+
+    async fn compact(&self, session: &SessionKey) -> Result<(), EngineError> {
+        if session.engine != EngineId::Dsh {
+            return Err(EngineError::UnknownSession(session.clone()));
+        }
+        // The desktop's compaction is a command, not a prompt. `/bc` prepares
+        // the transaction and `/bc confirm` executes the plan it just cached
+        // for this agent; sending the words to the model would not touch the
+        // stored history at all.
+        for line in ["/bc", "/bc confirm"] {
+            let value = self
+                .call(
+                    "commands/execute",
+                    json!({
+                        "agentId": session.raw(),
+                        "line": line,
+                        "submittedAttachments": [],
+                    }),
+                )
+                .await?;
+            let kind = value
+                .get("result")
+                .and_then(|result| result.get("kind"))
+                .and_then(Value::as_str)
+                .unwrap_or("success");
+            if kind == "error" {
+                let text = value
+                    .get("result")
+                    .and_then(|result| result.get("text"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("compaction was refused");
+                return Err(EngineError::upstream(text));
+            }
+        }
         Ok(())
     }
 

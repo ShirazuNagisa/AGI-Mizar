@@ -18,21 +18,22 @@
 //! supervisor spawns another. The UI sees a status change, not a stack of failed
 //! calls.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 use agi_engine::{Answer, Engine, EngineError, EngineEvent};
 use agi_protocol::domain::{
     ActivityEntry, ActivityKind, DeliveredFile, Interaction, InteractionKind, ModelInfo,
-    PermissionPreset, Record, RecordKind, Session, SessionKey, Workspace,
+    PermissionPreset, Question, Record, RecordKind, Session, SessionKey, Workspace,
 };
 use agi_protocol::engine::{Capabilities, EngineId};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
+use crate::gui_state;
 use crate::projection;
 use crate::rpc::{AppServer, AppServerConfig, RpcEvent};
 
@@ -52,6 +53,14 @@ const ACTIVITY_PAGE: usize = 200;
 const RESTART_BASE: Duration = Duration::from_secs(1);
 const RESTART_MAX: Duration = Duration::from_secs(30);
 
+/// How often to re-read `thread/list` for threads another window created.
+///
+/// The app-server only pushes events for turns it is running itself. A Codex
+/// desktop window has its own app-server child, so its new thread would never
+/// appear in this window without a poll. Five seconds is fast enough for a
+/// session list and cheap enough for a local SQLite read.
+const GUI_REFRESH: Duration = Duration::from_secs(5);
+
 /// How long a session created or touched locally survives a `thread/list` that
 /// does not mention it.
 ///
@@ -70,6 +79,16 @@ struct PendingApproval {
     /// The request's `permissions`, echoed back when a permissions ask is granted.
     permissions: Value,
     /// For a question batch, the ids to answer, in the order asked.
+    questions: Option<Vec<String>>,
+}
+
+/// One approval the Codex desktop window is waiting on.
+struct GuiApproval {
+    session: SessionKey,
+    /// JSON-RPC ids can be strings or numbers; keep the exact value.
+    request_id: Value,
+    method: String,
+    /// Question ids for `item/tool/requestUserInput`, in the order asked.
     questions: Option<Vec<String>>,
 }
 
@@ -103,13 +122,34 @@ pub struct CodexEngine {
     usage_cache: Mutex<agi_engine::usage::ScanCache>,
     /// Files the running turns changed, by thread, newest last.
     deliverables: Mutex<HashMap<String, Vec<DeliveredFile>>>,
+    /// Turns this window started through the Codex desktop bridge, by thread.
+    ///
+    /// The GUI owns the turn; this id is what `interrupt-turn` needs. It is
+    /// deliberately only for turns AGI Mizar started — interrupting a turn
+    /// another client started is not this bridge's claim.
+    gui_turns: Mutex<HashMap<String, String>>,
+    /// Running turns started by this adapter on the CLI app-server, by thread.
+    ///
+    /// `turn/steer` is turn-scoped: the app-server requires `expectedTurnId`.
+    /// Keeping the id from `turn/start` avoids a second round trip and, more
+    /// importantly, makes "steer" answer a real current turn rather than guess.
+    cli_turns: Mutex<HashMap<String, String>>,
+    /// Watchers already polling the GUI snapshot for a thread.
+    gui_watches: Mutex<HashSet<String>>,
+    /// Pending GUI approvals, keyed by the interaction id shown to clients.
+    gui_approvals: Mutex<HashMap<String, GuiApproval>>,
+    /// Records folded from the last GUI snapshot, for live turns whose
+    /// app-server copy has not been written yet.
+    gui_records: Mutex<HashMap<String, Vec<Record>>>,
+    /// A weak self so a prompt can spawn its own snapshot watcher.
+    me: Weak<Self>,
 }
 
 impl CodexEngine {
     /// Build the engine. Nothing is spawned until [`CodexEngine::spawn`].
     pub fn new(config: AppServerConfig) -> Arc<Self> {
         let (events, _) = broadcast::channel(512);
-        Arc::new(Self {
+        Arc::new_cyclic(|me| Self {
             server: AppServer::new(config),
             events,
             state: Mutex::new(State::new()),
@@ -117,6 +157,12 @@ impl CodexEngine {
             next_local: AtomicU64::new(1),
             usage_cache: Mutex::new(agi_engine::usage::ScanCache::new()),
             deliverables: Mutex::new(HashMap::new()),
+            gui_turns: Mutex::new(HashMap::new()),
+            cli_turns: Mutex::new(HashMap::new()),
+            gui_watches: Mutex::new(HashSet::new()),
+            gui_approvals: Mutex::new(HashMap::new()),
+            gui_records: Mutex::new(HashMap::new()),
+            me: me.clone(),
         })
     }
 
@@ -195,24 +241,35 @@ impl CodexEngine {
                 }
             }
 
-            // Serve until the child goes away.
+            // Serve until the child goes away. The interval is the only way
+            // this app-server learns about threads created by another Codex
+            // window: they share the on-disk store, not this process's events.
+            let mut gui_refresh = tokio::time::interval(GUI_REFRESH);
+            gui_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                match events.recv().await {
-                    Ok(RpcEvent::Notification { method, params }) => {
-                        self.on_notification(&method, params);
+                tokio::select! {
+                    _ = gui_refresh.tick() => {
+                        if let Err(error) = self.refresh_sessions().await {
+                            tracing::debug!("codex: periodic thread/list failed — {error}");
+                        }
                     }
-                    Ok(RpcEvent::ServerRequest { id, method, params }) => {
-                        self.on_server_request(id, method, params);
-                    }
-                    Ok(RpcEvent::Exited { reason }) => {
-                        tracing::warn!("codex: app-server exited — {reason}");
-                        self.detach(&reason);
-                        break;
-                    }
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        tracing::warn!("codex: fell {skipped} events behind");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    event = events.recv() => match event {
+                        Ok(RpcEvent::Notification { method, params }) => {
+                            self.on_notification(&method, params);
+                        }
+                        Ok(RpcEvent::ServerRequest { id, method, params }) => {
+                            self.on_server_request(id, method, params);
+                        }
+                        Ok(RpcEvent::Exited { reason }) => {
+                            tracing::warn!("codex: app-server exited — {reason}");
+                            self.detach(&reason);
+                            break;
+                        }
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            tracing::warn!("codex: fell {skipped} events behind");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    },
                 }
             }
 
@@ -549,15 +606,35 @@ impl CodexEngine {
 
     /// Re-read the thread list into the cache and announce the difference.
     async fn refresh_sessions(&self) -> Result<Vec<Session>, EngineError> {
-        let sessions = list_threads(&self.server).await?;
+        let mut sessions = list_threads(&self.server, false).await?;
+        // The app-server only reports turns it is running. A Codex desktop
+        // window owns a different child; its live turn and its title live in
+        // the shared store, so overlay those facts without writing anything.
+        let gui = gui_state::read();
+        for session in &mut sessions {
+            let id = &session.key.id;
+            if gui.desktop.contains(id) {
+                session.source = Some("codex_desktop".to_string());
+                if session.title.is_none() {
+                    session.title = gui.titles.get(id).cloned();
+                }
+            }
+            if gui.running.contains(id) {
+                session.running = true;
+            }
+        }
+        let mut changed = Vec::new();
         let mut removed = Vec::new();
         {
             let mut state = self.state();
             let known: Vec<String> = state.sessions.keys().cloned().collect();
             for session in &sessions {
-                state
+                let previous = state
                     .sessions
                     .insert(session.key.id.clone(), session.clone());
+                if previous.as_ref() != Some(session) {
+                    changed.push(session.clone());
+                }
             }
             let now = now_ms();
             for id in known {
@@ -583,18 +660,302 @@ impl CodexEngine {
                 removed.push(SessionKey::new(EngineId::Codex, id));
             }
         }
-        for session in &sessions {
-            self.emit(EngineEvent::SessionUpdated(session.clone()));
+        // A five-second poll must be quiet when nothing changed; otherwise the
+        // window redraws every session twice a tick and the phone sees a stream
+        // of identical rows.
+        for session in changed {
+            self.emit(EngineEvent::SessionUpdated(session));
         }
         for key in removed {
             self.emit(EngineEvent::SessionRemoved(key));
         }
         Ok(sessions)
     }
+
+    fn is_desktop_session(&self, session: &SessionKey) -> bool {
+        self.state()
+            .sessions
+            .get(&session.id)
+            .and_then(|row| row.source.as_deref())
+            == Some("codex_desktop")
+    }
+
+    fn gui_error(message: impl Into<String>) -> EngineError {
+        EngineError::Upstream {
+            code: "CODEX_DESKTOP_CONTROL".to_string(),
+            message: message.into(),
+            details: None,
+        }
+    }
+
+    fn mark_gui_running(&self, session: &SessionKey, running: bool) {
+        let changed = {
+            let mut state = self.state();
+            state.sessions.get_mut(&session.id).map(|row| {
+                row.running = running;
+                row.updated_at = now_ms();
+                row.clone()
+            })
+        };
+        if let Some(row) = changed {
+            self.emit(EngineEvent::SessionUpdated(row));
+        }
+    }
+
+    /// Watch one GUI thread while a turn is in flight.
+    ///
+    /// The desktop app does not push app-server notifications to this process.
+    /// A short snapshot poll is enough to pick up its turn status and pending
+    /// approvals, and it naturally stops when the GUI closes or the turn ends.
+    fn spawn_gui_watch(&self, session: SessionKey) {
+        let Some(engine) = self.me.upgrade() else {
+            return;
+        };
+        {
+            let mut watches = self
+                .gui_watches
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !watches.insert(session.id.clone()) {
+                return;
+            }
+        }
+        tokio::spawn(async move {
+            let mut quiet = 0u8;
+            let mut saw_activity = false;
+            loop {
+                match crate::gui_ipc::snapshot(&session.id).await {
+                    Ok(state) => {
+                        let has_state = state
+                            .get("turns")
+                            .and_then(Value::as_array)
+                            .is_some_and(|turns| !turns.is_empty())
+                            || state
+                                .get("requests")
+                                .and_then(Value::as_array)
+                                .is_some_and(|requests| !requests.is_empty());
+                        saw_activity |= has_state;
+                        if engine.apply_gui_snapshot(&session, &state) {
+                            quiet = 0;
+                        } else {
+                            quiet = quiet.saturating_add(1);
+                        }
+                    }
+                    Err(_) => quiet = quiet.saturating_add(1),
+                }
+                // The desktop can take several seconds to materialise the
+                // first turn (the model is still connecting), so an empty
+                // snapshot right after start-turn must not end the watcher.
+                // Once a turn has appeared, a short quiet window is enough.
+                let limit = if saw_activity { 4 } else { 120 };
+                if quiet >= limit {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(700)).await;
+            }
+            engine
+                .gui_watches
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&session.id);
+            engine
+                .gui_turns
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&session.id);
+            engine.remove_gui_approvals(&session.id);
+        });
+    }
+
+    /// Fold one desktop conversation snapshot into session state and approvals.
+    fn apply_gui_snapshot(&self, session: &SessionKey, state: &Value) -> bool {
+        let turns = state.get("turns").and_then(Value::as_array);
+        let running = turns
+            .map(|turns| {
+                turns
+                    .iter()
+                    .any(|turn| turn.get("status").and_then(Value::as_str) == Some("inProgress"))
+            })
+            .unwrap_or(false);
+
+        let mut active = HashSet::new();
+        for request in state
+            .get("requests")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            let Some(request_id) = request.get("id") else {
+                continue;
+            };
+            let Some(method) = request.get("method").and_then(Value::as_str) else {
+                continue;
+            };
+            let is_question = method == "item/tool/requestUserInput";
+            if !method.ends_with("requestApproval") && !is_question {
+                continue;
+            }
+            let id_text = request_id
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| request_id.to_string());
+            let local = format!("gui-{id_text}");
+            active.insert(local.clone());
+            let (questions, question_ids) = if is_question {
+                gui_questions(request.get("params"))
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            let already = {
+                let mut approvals = self
+                    .gui_approvals
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if approvals.contains_key(&local) {
+                    true
+                } else {
+                    approvals.insert(
+                        local.clone(),
+                        GuiApproval {
+                            session: session.clone(),
+                            request_id: request_id.clone(),
+                            method: method.to_string(),
+                            questions: is_question.then_some(question_ids),
+                        },
+                    );
+                    false
+                }
+            };
+            if !already {
+                let kind = if is_question {
+                    InteractionKind::Question
+                } else {
+                    InteractionKind::Approval
+                };
+                let title = if is_question {
+                    questions
+                        .first()
+                        .map(|question| question.text.clone())
+                        .unwrap_or_else(|| "question".to_string())
+                } else {
+                    gui_approval_title(method)
+                };
+                self.emit(EngineEvent::InteractionRequested(Interaction {
+                    id: local,
+                    session: Some(session.clone()),
+                    kind,
+                    title,
+                    detail: gui_approval_detail(request.get("params")),
+                    requested_at: now_ms(),
+                    questions,
+                }));
+            }
+        }
+
+        let stale = {
+            let approvals = self
+                .gui_approvals
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            approvals
+                .iter()
+                .filter(|(id, pending)| pending.session.id == session.id && !active.contains(*id))
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>()
+        };
+        for id in stale {
+            self.gui_approvals
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&id);
+            self.emit(EngineEvent::InteractionResolved { id });
+        }
+
+        // Keep a snapshot-derived record cache for a live GUI turn. The
+        // app-server copy appears after the turn is written, so a phone that
+        // opens the conversation mid-turn would otherwise see nothing.
+        if let Some(turns) = turns.filter(|turns| !turns.is_empty()) {
+            let incoming = projection::records_from_turns(turns);
+            let new_records = {
+                let mut cache = self
+                    .gui_records
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let last = cache
+                    .get(&session.id)
+                    .and_then(|records| records.last())
+                    .map(|record| record.seq)
+                    .unwrap_or(0);
+                let fresh = incoming
+                    .iter()
+                    .filter(|record| record.seq > last)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                cache.insert(session.id.clone(), incoming);
+                fresh
+            };
+            for record in new_records {
+                self.emit(EngineEvent::RecordAppended {
+                    session: session.clone(),
+                    record,
+                });
+            }
+        }
+
+        let active_approvals = !active.is_empty();
+        if !running && !active_approvals {
+            self.gui_turns
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&session.id);
+        }
+
+        let changed = {
+            let mut state = self.state();
+            state.sessions.get_mut(&session.id).and_then(|row| {
+                if row.running == running {
+                    None
+                } else {
+                    row.running = running;
+                    row.updated_at = now_ms();
+                    Some(row.clone())
+                }
+            })
+        };
+        if let Some(row) = changed {
+            self.emit(EngineEvent::SessionUpdated(row));
+        }
+        running || active_approvals
+    }
+
+    fn remove_gui_approvals(&self, session_id: &str) {
+        let removed = {
+            let mut approvals = self
+                .gui_approvals
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let ids = approvals
+                .iter()
+                .filter(|(_, pending)| pending.session.id == session_id)
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            for id in &ids {
+                approvals.remove(id);
+            }
+            ids
+        };
+        for id in removed {
+            self.emit(EngineEvent::InteractionResolved { id });
+        }
+    }
 }
 
 /// Read `thread/list` into the shared model.
-async fn list_threads(server: &AppServer) -> Result<Vec<Session>, EngineError> {
+///
+/// `archived` asks the other half of the list. Codex keeps archived threads out
+/// of the live list on purpose; the dataset backfill is the one caller that
+/// wants them, so it asks directly instead of changing what the window shows.
+async fn list_threads(server: &AppServer, archived: bool) -> Result<Vec<Session>, EngineError> {
     let page = server
         .call(
             "thread/list",
@@ -602,7 +963,7 @@ async fn list_threads(server: &AppServer) -> Result<Vec<Session>, EngineError> {
                 "limit": THREAD_PAGE,
                 "sortKey": "updated_at",
                 "sortDirection": "desc",
-                "archived": false,
+                "archived": archived,
             }),
         )
         .await
@@ -617,6 +978,15 @@ async fn list_threads(server: &AppServer) -> Result<Vec<Session>, EngineError> {
                 .collect()
         })
         .unwrap_or_default())
+}
+
+/// Remember the turn id a CLI `turn/start` produced.
+fn remember_cli_turn(engine: &CodexEngine, session: &SessionKey, turn: &str) {
+    engine
+        .cli_turns
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(session.id.clone(), turn.to_string());
 }
 
 /// Translate a transport failure into an engine failure.
@@ -660,9 +1030,9 @@ impl Engine for CodexEngine {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            attachments: false,
+            attachments: true,
             file_preview: true,
-            fork: false,
+            fork: true,
             archive: true,
             activity: true,
             balance: false,
@@ -686,6 +1056,11 @@ impl Engine for CodexEngine {
         self.refresh_sessions().await
     }
 
+    /// The threads the live list hides, for the one-year dataset backfill.
+    async fn archived_sessions(&self) -> Result<Vec<Session>, EngineError> {
+        list_threads(&self.server, true).await
+    }
+
     async fn records(
         &self,
         session: &SessionKey,
@@ -694,6 +1069,21 @@ impl Engine for CodexEngine {
     ) -> Result<Vec<Record>, EngineError> {
         if session.engine != EngineId::Codex {
             return Err(EngineError::UnknownSession(session.clone()));
+        }
+
+        // A live GUI turn has not necessarily been written to the app-server's
+        // turn list yet; the watcher snapshot is the freshest view.
+        if self.is_desktop_session(session) {
+            let cached = self
+                .gui_records
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&session.id)
+                .cloned()
+                .unwrap_or_default();
+            if !cached.is_empty() {
+                return Ok(page_records(cached, limit, before));
+            }
         }
 
         let page = self
@@ -1041,6 +1431,20 @@ impl Engine for CodexEngine {
         Ok(())
     }
 
+    async fn compact(&self, session: &SessionKey) -> Result<(), EngineError> {
+        if session.engine != EngineId::Codex {
+            return Err(EngineError::UnknownSession(session.clone()));
+        }
+        // Codex owns compaction as an app-server thread operation. It installs
+        // a compaction item and drives the context rewrite itself; there is no
+        // prompt to send and no transcript file this process may rewrite.
+        self.server
+            .call("thread/compact/start", json!({ "threadId": session.raw() }))
+            .await
+            .map_err(engine_error)?;
+        Ok(())
+    }
+
     async fn archive(&self, session: &SessionKey, _stop_activity: bool) -> Result<(), EngineError> {
         if session.engine != EngineId::Codex {
             return Err(EngineError::UnknownSession(session.clone()));
@@ -1058,6 +1462,23 @@ impl Engine for CodexEngine {
                 if message.contains("no rollout found") =>
             {
                 Ok(())
+            }
+            // The GUI owns the writer while a thread is open. The desktop's
+            // own archive action is still reachable through the optional CDP
+            // bridge; without it, return the original writer-held error.
+            Err(crate::rpc::RpcError::Upstream { message, .. })
+                if error_is_writer_held(&message) =>
+            {
+                match crate::cdp::archive(session.raw()).await {
+                    Ok(()) => Ok(()),
+                    Err(cdp) => Err(EngineError::Upstream {
+                        code: "CODEX_ARCHIVE_CDP".to_string(),
+                        message: format!(
+                            "Codex Desktop owns this thread ({message}); CDP fallback: {cdp}"
+                        ),
+                        details: None,
+                    }),
+                }
             }
             Err(error) => Err(engine_error(error)),
         }
@@ -1104,6 +1525,19 @@ impl Engine for CodexEngine {
             return Err(EngineError::UnknownSession(session.clone()));
         }
 
+        if self.is_desktop_session(session) {
+            let turn = crate::gui_ipc::start_turn(session.raw(), text, &[])
+                .await
+                .map_err(Self::gui_error)?;
+            self.gui_turns
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(session.id.clone(), turn);
+            self.mark_gui_running(session, true);
+            self.spawn_gui_watch(session.clone());
+            return Ok(());
+        }
+
         // A thread has to be loaded before it can take a turn, and resuming first
         // is what turns "another window owns this" into a clear error instead of
         // an opaque refusal from `turn/start`.
@@ -1130,7 +1564,8 @@ impl Engine for CodexEngine {
             Err(_) => {}
         }
 
-        self.server
+        let started = self
+            .server
             .call(
                 "turn/start",
                 json!({
@@ -1141,12 +1576,181 @@ impl Engine for CodexEngine {
             )
             .await
             .map_err(engine_error)?;
+        if let Some(turn) = started
+            .get("turn")
+            .and_then(|turn| turn.get("id"))
+            .and_then(Value::as_str)
+        {
+            remember_cli_turn(self, session, turn);
+        }
         Ok(())
+    }
+
+    fn supports_attachments(&self) -> bool {
+        true
+    }
+
+    async fn prompt_with(
+        &self,
+        session: &SessionKey,
+        text: &str,
+        attachments: &[agi_protocol::domain::PromptAttachment],
+    ) -> Result<(), EngineError> {
+        if attachments.is_empty() {
+            return self.prompt(session, text).await;
+        }
+        if session.engine != EngineId::Codex {
+            return Err(EngineError::UnknownSession(session.clone()));
+        }
+        let values = attachment_values(attachments);
+        if values.is_empty() {
+            return Err(EngineError::upstream(
+                "Codex attachments need a local path; the upload had none",
+            ));
+        }
+        if self.is_desktop_session(session) {
+            let turn = crate::gui_ipc::start_turn(session.raw(), text, &values)
+                .await
+                .map_err(Self::gui_error)?;
+            self.gui_turns
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(session.id.clone(), turn);
+            self.mark_gui_running(session, true);
+            self.spawn_gui_watch(session.clone());
+            return Ok(());
+        }
+
+        // The CLI app-server path is the same as prompt, with extra input parts.
+        match self
+            .server
+            .call(
+                "thread/resume",
+                json!({ "threadId": session.raw(), "excludeTurns": true }),
+            )
+            .await
+        {
+            Ok(_) => {}
+            Err(crate::rpc::RpcError::Upstream { message, .. })
+                if error_is_writer_held(&message) =>
+            {
+                return Err(EngineError::Upstream {
+                    code: "WRITER_HELD".to_string(),
+                    message,
+                    details: None,
+                });
+            }
+            Err(_) => {}
+        }
+        let mut input = vec![json!({
+            "type": "text",
+            "text": text,
+            "text_elements": [],
+        })];
+        input.extend(values);
+        let started = self
+            .server
+            .call(
+                "turn/start",
+                json!({
+                    "threadId": session.raw(),
+                    "input": input,
+                    "clientUserMessageId": format!("agi-{}", now_ms()),
+                }),
+            )
+            .await
+            .map_err(engine_error)?;
+        if let Some(turn) = started
+            .get("turn")
+            .and_then(|turn| turn.get("id"))
+            .and_then(Value::as_str)
+        {
+            remember_cli_turn(self, session, turn);
+        }
+        Ok(())
+    }
+
+    async fn steer(&self, session: &SessionKey, text: &str) -> Result<(), EngineError> {
+        if session.engine != EngineId::Codex {
+            return Err(EngineError::UnknownSession(session.clone()));
+        }
+        if self.is_desktop_session(session) {
+            let cwd = self
+                .state()
+                .sessions
+                .get(&session.id)
+                .and_then(|row| row.cwd.clone());
+            crate::gui_ipc::steer(session.raw(), text, cwd.as_deref())
+                .await
+                .map_err(Self::gui_error)?;
+            return Ok(());
+        }
+        let expected = self
+            .cli_turns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&session.id)
+            .cloned()
+            .ok_or_else(|| EngineError::upstream("no running Codex CLI turn to steer"))?;
+        self.server
+            .call(
+                "turn/steer",
+                json!({
+                    "threadId": session.raw(),
+                    "expectedTurnId": expected,
+                    "input": [{ "type": "text", "text": text, "text_elements": [] }],
+                    "clientUserMessageId": format!("agi-steer-{}", now_ms()),
+                }),
+            )
+            .await
+            .map_err(engine_error)?;
+        Ok(())
+    }
+
+    async fn fork(&self, session: &SessionKey, _at_seq: i64) -> Result<SessionKey, EngineError> {
+        if session.engine != EngineId::Codex {
+            return Err(EngineError::UnknownSession(session.clone()));
+        }
+        let value = self
+            .server
+            .call("thread/fork", json!({ "threadId": session.raw() }))
+            .await
+            .map_err(engine_error)?;
+        let thread = value.get("thread").cloned().unwrap_or(Value::Null);
+        let forked = projection::session_from_thread(&thread)
+            .ok_or_else(|| EngineError::upstream("thread/fork answered without a thread"))?;
+        let key = forked.key.clone();
+        self.state().sessions.insert(key.id.clone(), forked.clone());
+        self.emit(EngineEvent::SessionUpdated(forked));
+        Ok(key)
     }
 
     async fn cancel(&self, session: &SessionKey) -> Result<(), EngineError> {
         if session.engine != EngineId::Codex {
             return Err(EngineError::UnknownSession(session.clone()));
+        }
+        if self.is_desktop_session(session) {
+            let turn = self
+                .gui_turns
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&session.id)
+                .cloned();
+            let Some(turn) = turn else {
+                return Err(Self::gui_error(
+                    "this Codex desktop turn was not started by AGI Mizar",
+                ));
+            };
+            crate::gui_ipc::interrupt(session.raw(), &turn)
+                .await
+                .map_err(Self::gui_error)?;
+            self.gui_turns
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&session.id);
+            self.mark_gui_running(session, false);
+            self.remove_gui_approvals(&session.id);
+            return Ok(());
         }
 
         let page = self
@@ -1191,6 +1795,57 @@ impl Engine for CodexEngine {
     }
 
     async fn answer(&self, id: &str, answer: Answer) -> Result<(), EngineError> {
+        if id.starts_with("gui-") {
+            let pending = self
+                .gui_approvals
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(id);
+            let Some(pending) = pending else {
+                return Err(EngineError::upstream(format!(
+                    "no pending Codex desktop approval {id}"
+                )));
+            };
+            if pending.method == "item/tool/requestUserInput" {
+                let response = gui_user_input_response(
+                    pending.questions.as_deref().unwrap_or_default(),
+                    answer.answers.as_deref().unwrap_or_default(),
+                );
+                crate::gui_ipc::answer_user_input(
+                    pending.session.raw(),
+                    &pending.request_id,
+                    response,
+                )
+                .await
+                .map_err(Self::gui_error)?;
+                self.emit(EngineEvent::InteractionResolved { id: id.to_string() });
+                return Ok(());
+            }
+            if !matches!(
+                pending.method.as_str(),
+                "item/commandExecution/requestApproval" | "item/fileChange/requestApproval"
+            ) {
+                return Err(EngineError::Unsupported {
+                    engine: EngineId::Codex,
+                    feature: "answering this Codex desktop request",
+                });
+            }
+            let decision = if answer.outcome.as_deref() == Some("allowed-once") {
+                "accept"
+            } else {
+                "cancel"
+            };
+            crate::gui_ipc::answer(
+                pending.session.raw(),
+                &pending.request_id,
+                &pending.method,
+                decision,
+            )
+            .await
+            .map_err(Self::gui_error)?;
+            self.emit(EngineEvent::InteractionResolved { id: id.to_string() });
+            return Ok(());
+        }
         let Some(pending) = self.approvals().remove(id) else {
             return Err(EngineError::upstream(format!("no pending approval {id}")));
         };
@@ -1261,6 +1916,12 @@ impl Engine for CodexEngine {
         if session.engine != EngineId::Codex {
             return Err(EngineError::UnknownSession(session.clone()));
         }
+        if self.is_desktop_session(session) {
+            crate::gui_ipc::set_model(session.raw(), model)
+                .await
+                .map_err(Self::gui_error)?;
+            return Ok(());
+        }
         self.server
             .call(
                 "thread/settings/update",
@@ -1274,6 +1935,12 @@ impl Engine for CodexEngine {
     async fn set_permission(&self, session: &SessionKey, preset: &str) -> Result<(), EngineError> {
         if session.engine != EngineId::Codex {
             return Err(EngineError::UnknownSession(session.clone()));
+        }
+        if self.is_desktop_session(session) {
+            crate::gui_ipc::set_permission(session.raw(), preset)
+                .await
+                .map_err(Self::gui_error)?;
+            return Ok(());
         }
         // Codex names a profile with a leading colon; accept both spellings so a
         // caller that already has the raw id is not punished for it.
@@ -1315,5 +1982,268 @@ fn kind_slug(kind: ActivityKind) -> &'static str {
         ActivityKind::Command => "command",
         ActivityKind::Output => "output",
         ActivityKind::Tool => "tool",
+    }
+}
+
+/// A short label for a desktop approval request.
+fn gui_approval_title(method: &str) -> String {
+    if method.contains("commandExecution") {
+        "command".to_string()
+    } else if method.contains("fileChange") {
+        "file change".to_string()
+    } else {
+        "approval".to_string()
+    }
+}
+
+/// A command or reason from a desktop approval request.
+fn gui_approval_detail(params: Option<&Value>) -> Option<String> {
+    let params = params?;
+    params
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            params.get("command").map(|command| match command {
+                Value::String(text) => text.clone(),
+                Value::Array(parts) => parts
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                other => other.to_string(),
+            })
+        })
+}
+
+/// Parse the questions of a desktop `requestUserInput` request.
+/// Parse the questions of a desktop `requestUserInput` request.
+fn gui_questions(params: Option<&Value>) -> (Vec<Question>, Vec<String>) {
+    let mut questions = Vec::new();
+    let mut ids = Vec::new();
+    for raw in params
+        .and_then(|params| params.get("questions"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        let Some(question_id) = raw.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        ids.push(question_id.to_string());
+        questions.push(Question {
+            id: question_id.to_string(),
+            text: raw
+                .get("question")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            header: raw
+                .get("header")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            detail: None,
+            options: raw
+                .get("options")
+                .and_then(Value::as_array)
+                .map(|options| {
+                    options
+                        .iter()
+                        .filter_map(|option| {
+                            option
+                                .get("label")
+                                .or_else(|| option.get("value"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            multi_select: false,
+        });
+    }
+    (questions, ids)
+}
+
+/// Turn the shared `Answer` shape into Codex's `{answers: {id: {answers: []}}}`.
+fn gui_user_input_response(question_ids: &[String], given: &[Value]) -> Value {
+    let mut mapped = serde_json::Map::new();
+    for (index, question_id) in question_ids.iter().enumerate() {
+        let entry = given
+            .iter()
+            .find(|entry| {
+                entry
+                    .get("id")
+                    .or_else(|| entry.get("questionId"))
+                    .and_then(Value::as_str)
+                    == Some(question_id.as_str())
+            })
+            .or_else(|| given.get(index));
+        let values = entry
+            .and_then(|entry| entry.get("answers"))
+            .and_then(Value::as_array)
+            .cloned()
+            .or_else(|| entry.and_then(Value::as_str).map(|text| vec![json!(text)]))
+            .unwrap_or_default();
+        mapped.insert(question_id.clone(), json!({ "answers": values }));
+    }
+    json!({ "answers": mapped })
+}
+
+fn page_records(mut records: Vec<Record>, limit: usize, before: Option<i64>) -> Vec<Record> {
+    if let Some(before) = before {
+        records.retain(|record| record.seq < before);
+    }
+    let start = records.len().saturating_sub(limit);
+    records.split_off(start)
+}
+
+fn attachment_values(attachments: &[agi_protocol::domain::PromptAttachment]) -> Vec<Value> {
+    attachments
+        .iter()
+        .filter_map(|attachment| {
+            let path = attachment.path.as_deref()?;
+            match attachment.kind {
+                agi_protocol::domain::AttachmentKind::Image => {
+                    Some(json!({ "type": "localImage", "path": path }))
+                }
+                agi_protocol::domain::AttachmentKind::File => Some(json!({
+                    "type": "mention",
+                    "name": attachment.name,
+                    "path": path,
+                })),
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn engine() -> Arc<CodexEngine> {
+        CodexEngine::new(AppServerConfig {
+            binary: "/bin/false".to_string(),
+            args: Vec::new(),
+            cwd: None,
+        })
+    }
+
+    fn desktop_session(engine: &CodexEngine) -> SessionKey {
+        let key = SessionKey::new(EngineId::Codex, "gui-1");
+        let mut session = Session::bare(key.clone(), 1);
+        session.source = Some("codex_desktop".to_string());
+        session.running = true;
+        engine.state().sessions.insert(key.id.clone(), session);
+        key
+    }
+
+    #[tokio::test]
+    async fn gui_snapshot_records_are_readable_mid_turn() {
+        let engine = engine();
+        let key = desktop_session(&engine);
+        let snapshot = json!({
+            "turns": [{
+                "id": "t1",
+                "status": "inProgress",
+                "startedAtMs": 1_700_000_000_000_i64,
+                "items": [{
+                    "type": "userMessage",
+                    "id": "m1",
+                    "content": [{ "type": "text", "text": "hello" }]
+                }]
+            }],
+            "requests": []
+        });
+        engine.apply_gui_snapshot(&key, &snapshot);
+        let records = engine.records(&key, 100, None).await.unwrap();
+        assert!(records.iter().any(|record| {
+            record.kind == RecordKind::UserMessage && record.text.as_deref() == Some("hello")
+        }));
+    }
+
+    #[test]
+    fn a_gui_snapshot_becomes_a_question_with_ids() {
+        let engine = engine();
+        let key = desktop_session(&engine);
+        let mut events = engine.events.subscribe();
+        let snapshot = json!({
+            "turns": [{ "status": "inProgress" }],
+            "requests": [{
+                "id": 1,
+                "method": "item/tool/requestUserInput",
+                "params": {
+                    "questions": [{
+                        "id": "q1",
+                        "header": "Choice",
+                        "question": "Which one?",
+                        "options": [{ "label": "A" }, { "label": "B" }]
+                    }]
+                }
+            }]
+        });
+        assert!(engine.apply_gui_snapshot(&key, &snapshot));
+        let event = events.try_recv().expect("question event");
+        match event {
+            EngineEvent::InteractionRequested(interaction) => {
+                assert_eq!(interaction.id, "gui-1");
+                assert_eq!(interaction.kind, InteractionKind::Question);
+                assert_eq!(interaction.questions[0].id, "q1");
+                assert_eq!(interaction.questions[0].options, vec!["A", "B"]);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        let response = gui_user_input_response(
+            &["q1".to_string()],
+            &[json!({ "id": "q1", "answers": ["A"] })],
+        );
+        assert_eq!(response["answers"]["q1"]["answers"][0], "A");
+    }
+
+    #[test]
+    fn a_gui_snapshot_becomes_an_approval_once() {
+        let engine = engine();
+        let key = desktop_session(&engine);
+        let mut events = engine.events.subscribe();
+        let snapshot = json!({
+            "turns": [{ "status": "inProgress" }],
+            "requests": [{
+                "id": 0,
+                "method": "item/commandExecution/requestApproval",
+                "params": { "command": "echo hi" }
+            }]
+        });
+        assert!(engine.apply_gui_snapshot(&key, &snapshot));
+        let event = events.try_recv().expect("approval event");
+        match event {
+            EngineEvent::InteractionRequested(interaction) => {
+                assert_eq!(interaction.id, "gui-0");
+                assert_eq!(interaction.kind, InteractionKind::Approval);
+                assert_eq!(interaction.detail.as_deref(), Some("echo hi"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        // The same snapshot must not produce a second card. The first pass may
+        // also have emitted snapshot-derived records; drain those.
+        assert!(engine.apply_gui_snapshot(&key, &snapshot));
+        let mut another_card = false;
+        while let Ok(event) = events.try_recv() {
+            if matches!(event, EngineEvent::InteractionRequested(_)) {
+                another_card = true;
+            }
+        }
+        assert!(!another_card);
+
+        let finished = json!({ "turns": [{ "status": "completed" }], "requests": [] });
+        assert!(!engine.apply_gui_snapshot(&key, &finished));
+        let mut saw_resolved = false;
+        while let Ok(event) = events.try_recv() {
+            if let EngineEvent::InteractionResolved { id } = event {
+                assert_eq!(id, "gui-0");
+                saw_resolved = true;
+            }
+        }
+        assert!(saw_resolved);
+        assert!(engine.gui_approvals.lock().unwrap().is_empty());
     }
 }

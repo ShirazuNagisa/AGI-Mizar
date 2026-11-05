@@ -60,10 +60,12 @@ export function TrayPanel({ kernel }: { kernel: Kernel }) {
       <div className="flex flex-col">
         {AGENTS.map(({ engine, name }) => {
           const status = engines.find((entry) => entry.engine === engine)
-          const connected = status?.connected === true
+          // Same rule as the sidebar: enabled here and live now, not merely
+          // "the adapter could accept a prompt".
+          const engaged = status?.engaged === true
           const Mark = ENGINE_MARKS[engine]
           return (
-            <Row key={engine} label={name} connected={connected}>
+            <Row key={engine} label={name} connected={engaged}>
               <Mark size={15} className="shrink-0 text-muted" />
             </Row>
           )
@@ -124,7 +126,7 @@ function Row({
           aria-hidden
           className={cn(
             'size-2 shrink-0 rounded-full',
-            connected ? 'bg-emerald-500' : 'ring-1 ring-inset ring-muted/60',
+            connected ? 'bg-fg' : 'border border-fg bg-transparent',
           )}
         />
       )}

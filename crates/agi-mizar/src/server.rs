@@ -791,6 +791,7 @@ impl MizarServer {
                         parent_session_id: session.parent.clone(),
                         origin: session.origin.clone(),
                         engine: session.key.engine.as_str().to_string(),
+                        source: session.source.clone(),
                     })
                     .collect();
                 ServerFrame::ok(id, json!({ "items": items }))
@@ -1793,6 +1794,27 @@ impl MizarServer {
                 };
                 match engine.cancel(&key).await {
                     Ok(()) => ServerFrame::ok(id, json!({ "accepted": true })),
+                    Err(error) => ServerFrame::error(
+                        Some(id),
+                        ErrorCode::from_engine(error.code()),
+                        error.to_string(),
+                    ),
+                }
+            }
+
+            "session.compact" => {
+                let Some(key) = self.scoped_session_of(scope, frame) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "session.compact needs a sessionId",
+                    );
+                };
+                let Some(engine) = self.core.engine(key.engine) else {
+                    return ServerFrame::error(Some(id), ErrorCode::RemoteError, "no such engine");
+                };
+                match engine.compact(&key).await {
+                    Ok(()) => ServerFrame::ok(id, json!({ "compacted": true })),
                     Err(error) => ServerFrame::error(
                         Some(id),
                         ErrorCode::from_engine(error.code()),

@@ -10,7 +10,10 @@
 //! - [`engine`] is the [`agi_engine::Engine`] implementation: requests, approvals,
 //!   and the supervisor that keeps the child alive.
 
+mod cdp;
 pub mod engine;
+mod gui_ipc;
+mod gui_state;
 pub mod projection;
 pub mod rpc;
 pub mod usage;

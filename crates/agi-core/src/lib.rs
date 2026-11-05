@@ -25,8 +25,11 @@
 #![allow(clippy::items_after_test_module)]
 
 pub mod account;
+pub mod dataset;
+pub mod dependencies;
 pub mod endpoint;
 pub mod models;
+pub mod plugin;
 pub mod server;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -38,7 +41,8 @@ use agi_engine::{Engine, EngineError, EngineEvent};
 use agi_layout::model::{Backend, LabelMap, ModelManifest};
 use agi_layout::{facts_from_turn, Item, JournalEntry, Layout, LayoutService, Live, StateMachine};
 use agi_protocol::api::{
-    ApiEvent, Command, CommandResponse, EngineStatus, OnboardingView, StateSnapshot, UsageOverview,
+    ApiEvent, Command, CommandResponse, DshPluginView, EngineStatus, OnboardingView, StateSnapshot,
+    UsageOverview, DSH_PLUGIN_MIN_VERSION,
 };
 use agi_protocol::domain::{Interaction, Record, RecordKind, Session, SessionKey};
 use agi_protocol::engine::EngineId;
@@ -55,6 +59,21 @@ const EVENT_BUFFER: usize = 1_024;
 
 /// Records kept per session in the aggregated view.
 const MAX_RECORDS: usize = 2_000;
+
+/// How often the background task asks npm for a new `dsh-mizar`.
+///
+/// Six hours: a plugin release is not a security patch, and every launch already
+/// checks once. The number is small enough that a laptop left open for a day
+/// notices, large enough that a window polled every five seconds never does.
+const DSH_PLUGIN_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Epoch milliseconds, for the plugin view's "last checked".
+fn epoch_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 /// The state every client reads.
 #[derive(Default)]
@@ -82,6 +101,40 @@ pub struct Preferences {
     /// Which agents the operator said yes to.
     #[serde(default)]
     pub engines: EnginePrefs,
+    /// Whether this install shares its turns to improve Mizarllm.
+    #[serde(default)]
+    pub dataset: DatasetPrefs,
+}
+
+/// What the operator chose about anonymous session sharing.
+///
+/// Off by default for every install that never saw the guide step: an existing
+/// machine upgrading into this build must not start uploading because a field
+/// defaulted the wrong way.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatasetPrefs {
+    /// The operator's answer. The guide writes `true` when the (pre-ticked)
+    /// switch is left on, and the settings page can turn it off later.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Which version of the consent copy they saw; `0` means never asked.
+    #[serde(default)]
+    pub policy_version: u32,
+    /// When the answer last changed, epoch milliseconds.
+    #[serde(default)]
+    pub since: Option<i64>,
+    /// Random per-install id, never derived from the account. It keys the
+    /// pseudonym of every session and is the only way two uploaded turns can be
+    /// known to belong to the same session.
+    #[serde(default)]
+    pub install_id: String,
+    /// Project names (the last path component) never shared.
+    #[serde(default)]
+    pub excluded_projects: Vec<String>,
+    /// Engine-scoped session ids whose history has already been walked.
+    #[serde(default)]
+    pub backfilled: Vec<String>,
 }
 
 /// The guide's own state.
@@ -130,6 +183,7 @@ impl Default for Preferences {
             theme: default_theme(),
             onboarding: Onboarding::default(),
             engines: EnginePrefs::default(),
+            dataset: DatasetPrefs::default(),
         }
     }
 }
@@ -235,6 +289,19 @@ pub struct Core {
     phone_last_seen: Mutex<Instant>,
     /// Whether the task that watches for an idle desktop is already running.
     lease_guard: std::sync::atomic::AtomicBool,
+    /// Anonymous dataset sharing: the spool, the ledger, and the wake-up signal.
+    dataset: dataset::Dataset,
+    /// The DSH helper plugin's last known version, and npm's answer.
+    ///
+    /// Kept in the kernel rather than read on every snapshot: a window polls the
+    /// snapshot every five seconds, and a registry request on that cadence would
+    /// be both slow and rude. The watcher and the explicit check write it.
+    dsh_plugin: RwLock<DshPluginView>,
+    /// One npm check or install at a time.
+    ///
+    /// A background check landing during a one-click update would otherwise
+    /// overwrite the view with the version that is half installed.
+    plugin_lock: tokio::sync::Mutex<()>,
 }
 
 /// How long a desktop may sit with no phone attached before the judge is let go.
@@ -281,6 +348,9 @@ impl Core {
             phone_sockets: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             phone_last_seen: Mutex::new(Instant::now()),
             lease_guard: std::sync::atomic::AtomicBool::new(false),
+            dataset: dataset::Dataset::default(),
+            dsh_plugin: RwLock::new(plugin::initial_view()),
+            plugin_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -715,6 +785,123 @@ impl Core {
         }
     }
 
+    /// The DSH helper plugin's last known state.
+    pub fn dsh_plugin_view(&self) -> DshPluginView {
+        self.dsh_plugin
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Re-read the installed plugin and, when asked, npm's newest release.
+    ///
+    /// The installed half is a file read and always happens, so a repair that
+    /// just finished is visible immediately. The network half is optional: the
+    /// background watcher and the explicit check ask for it, while a snapshot
+    /// rebuild does not.
+    pub async fn refresh_dsh_plugin(&self, force: bool) -> DshPluginView {
+        let _one_at_a_time = self.plugin_lock.lock().await;
+        let home = plugin::dsh_home();
+        let installed =
+            plugin::installed_version(&home.join("profiles").join(plugin::profile_name(&home)));
+        let current = self.dsh_plugin_view();
+        let (latest, error, last_checked) = if force {
+            match plugin::latest_version().await {
+                Ok(latest) => (Some(latest), None, Some(epoch_ms())),
+                Err(reason) => (None, Some(reason), current.last_checked),
+            }
+        } else {
+            (current.latest, current.error, current.last_checked)
+        };
+        let view = plugin::view(installed, latest, error, last_checked);
+        *self
+            .dsh_plugin
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = view.clone();
+        self.publish(ApiEvent::DshPluginChanged {
+            plugin: view.clone(),
+        });
+        view
+    }
+
+    /// Install or update `dsh-mizar`, optionally pinning a version.
+    ///
+    /// `None` means "whatever npm says is newest", which is what the update
+    /// popup asks for. A repair passes the version it already decided on, so a
+    /// second registry answer cannot change what it is about to install. A
+    /// target older than the installed one is replaced by the installed one:
+    /// this button repairs and updates, it never downgrades.
+    pub async fn install_dsh_plugin(
+        &self,
+        version: Option<String>,
+    ) -> Result<DshPluginView, String> {
+        let _one_at_a_time = self.plugin_lock.lock().await;
+        let current = self.dsh_plugin_view();
+        let mut fetched: Option<String> = None;
+        let requested = match version {
+            Some(version) => version,
+            None => match current.latest.clone() {
+                Some(latest) => latest,
+                None => {
+                    let latest = plugin::latest_version().await?;
+                    fetched = Some(latest.clone());
+                    latest
+                }
+            },
+        };
+        let target = match current.installed.as_deref() {
+            Some(installed) if plugin::release_is_newer(installed, &requested) => {
+                installed.to_string()
+            }
+            _ => requested,
+        };
+        if plugin::release_is_newer(DSH_PLUGIN_MIN_VERSION, &target) {
+            return Err(format!(
+                "npm 上的 {target} 低于本应用要求的 {}，暂时不能自动安装",
+                DSH_PLUGIN_MIN_VERSION
+            ));
+        }
+
+        plugin::install(&target).await?;
+        let home = plugin::dsh_home();
+        let installed =
+            plugin::installed_version(&home.join("profiles").join(plugin::profile_name(&home)));
+        let latest = fetched.or(current.latest);
+        let view = plugin::view(installed, latest, None, Some(epoch_ms()));
+        *self
+            .dsh_plugin
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = view.clone();
+        self.publish(ApiEvent::DshPluginChanged {
+            plugin: view.clone(),
+        });
+        Ok(view)
+    }
+
+    /// Start the once-at-launch and every-few-hours plugin check.
+    ///
+    /// Lives here but is started by the boot sequence rather than by
+    /// [`Core::start`]: a test kernel has no registry to ask and no window to
+    /// pop a dialog in, and `cargo test` must not depend on npm being reachable.
+    pub fn start_dsh_plugin_watch(self: &Arc<Self>) {
+        let core = Arc::clone(self);
+        tokio::spawn(async move {
+            // Let the window draw before the first request competes with the
+            // boot traffic; four seconds is under a person's patience for a
+            // popup and over the burst of session listings.
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            loop {
+                if core
+                    .status_of(EngineId::Dsh)
+                    .is_some_and(|status| status.available)
+                {
+                    core.refresh_dsh_plugin(true).await;
+                }
+                tokio::time::sleep(DSH_PLUGIN_CHECK_INTERVAL).await;
+            }
+        });
+    }
+
     /// Hand the kernel a way to look for agents again.
     pub fn set_rescan(&self, rescan: RescanFn) {
         *self
@@ -820,6 +1007,11 @@ impl Core {
                 }
             });
         }
+
+        // The dataset uploader and the one-year backfill. It is a single task,
+        // asleep most of the time: consent is off by default, and a machine
+        // that never opted in should pay one timer, not a thread.
+        dataset::spawn(Arc::downgrade(self));
     }
 
     fn store_read(&self) -> std::sync::RwLockReadGuard<'_, Store> {
@@ -1074,6 +1266,10 @@ impl Core {
             let Some((turn, slice)) = last_finished_turn(&records) else {
                 return;
             };
+            // The dataset capture happens before the judge, and independently of
+            // it: a machine with no model still has turns worth sharing.
+            let facts = facts_for(&session, turn, &slice);
+            core.capture_dataset_turn(&session, &facts, &slice);
             core.judge_turn(session, Some(turn), slice);
         });
     }
@@ -1102,12 +1298,20 @@ impl Core {
                     .and_then(|store| store.sessions.get(&session.key).map(|old| old.running))
                     .unwrap_or(false);
                 let finished = was_running && !session.running;
+                let now_running = session.running;
                 let key = session.key.clone();
                 {
                     let mut store = self.store_write();
                     store.sessions.insert(session.key.clone(), session.clone());
                 }
                 self.publish(ApiEvent::SessionUpdated { session });
+                // The lamp is derived from "is a turn running", so a start or a
+                // stop has to move it before the next snapshot poll would.
+                if was_running != now_running {
+                    if let Some(status) = self.status_of(engine) {
+                        self.publish(ApiEvent::EngineStatus { status });
+                    }
+                }
                 // DSH reports the same finish through `RecordAppended`, which
                 // already runs the judge; asking twice would judge one turn twice.
                 if finished && key.engine != EngineId::Dsh {
@@ -1121,6 +1325,10 @@ impl Core {
                     store.records.remove(&key);
                 }
                 self.publish(ApiEvent::SessionRemoved { session: key });
+                // An archived session may have been the only running one.
+                if let Some(status) = self.status_of(engine) {
+                    self.publish(ApiEvent::EngineStatus { status });
+                }
             }
             EngineEvent::RecordAppended { session, record } => {
                 let turn_slice = {
@@ -1143,6 +1351,7 @@ impl Core {
                     // model verdict can correct it a moment later; an agreeing
                     // verdict sends nothing.
                     let facts = facts_for(&session, turn.unwrap_or(0), &slice);
+                    self.capture_dataset_turn(&session, &facts, &slice);
                     self.settle(&session, &facts, None);
                     self.judge_turn(session.clone(), turn, slice);
                 }
@@ -1190,12 +1399,18 @@ impl Core {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&id)
             .cloned();
-        let sessions = self
-            .store_read()
-            .sessions
-            .keys()
-            .filter(|key| key.engine == id)
-            .count();
+        let (sessions, running) = {
+            let store = self.store_read();
+            let mut sessions = 0usize;
+            let mut running = false;
+            for (key, session) in &store.sessions {
+                if key.engine == id {
+                    sessions += 1;
+                    running |= session.running;
+                }
+            }
+            (sessions, running)
+        };
 
         match self.engine(id) {
             Some(engine) => {
@@ -1207,6 +1422,11 @@ impl Core {
                     // against transcripts even when its CLI is nowhere.
                     available: missing.is_none(),
                     configured,
+                    // Claude and Codex have no standing socket: their engine
+                    // status is "the adapter can take a prompt", not "something
+                    // is attached". A lamp that stayed on for a machine that was
+                    // never opened is why the running turn is the evidence.
+                    engaged: configured && connected && (id == EngineId::Dsh || running),
                     capabilities: engine.capabilities(),
                     detail,
                     sessions,
@@ -1222,6 +1442,7 @@ impl Core {
                     connected: false,
                     available: false,
                     configured,
+                    engaged: false,
                     capabilities: agi_protocol::engine::Capabilities::default(),
                     detail: Some(reason),
                     sessions,
@@ -1256,6 +1477,8 @@ impl Core {
             },
             model: self.model_service.state(),
             devices: self.device_views(),
+            dataset: dataset::view(self),
+            dsh_plugin: self.dsh_plugin_view(),
         }
     }
 
@@ -1583,8 +1806,25 @@ impl Core {
                 self.set_engine_configured(engine, enabled);
                 CommandResponse::ok(self.engine_configured(engine))
             }
+            Command::Dependencies { engine } => {
+                CommandResponse::ok(dependencies::check(self, engine))
+            }
+            Command::DependenciesRepair { engine } => {
+                CommandResponse::ok(dependencies::repair(self, engine).await)
+            }
+            Command::DshPluginCheck => CommandResponse::ok(self.refresh_dsh_plugin(true).await),
+            Command::DshPluginUpdate => match self.install_dsh_plugin(None).await {
+                Ok(view) => CommandResponse::ok(view),
+                Err(error) => CommandResponse::error("DSH_PLUGIN_UPDATE_FAILED", error),
+            },
             Command::OnboardingComplete => CommandResponse::ok(self.set_onboarding_done(true)),
             Command::OnboardingReset => CommandResponse::ok(self.set_onboarding_done(false)),
+            Command::DatasetShare { enabled } => {
+                CommandResponse::ok(dataset::set_enabled(self, enabled))
+            }
+            Command::DatasetExclude { projects } => {
+                CommandResponse::ok(dataset::set_excluded(self, projects))
+            }
             Command::Ping => CommandResponse::done(),
             Command::Messages {
                 session,
@@ -1610,12 +1850,42 @@ impl Core {
                     Err(error) => failure(error),
                 }
             }
+            Command::Steer { session, text } => {
+                let engine = match self.engine(session.engine) {
+                    Some(engine) => engine,
+                    None => return CommandResponse::error("UNKNOWN_ENGINE", "no such engine"),
+                };
+                match engine.steer(&session, &text).await {
+                    Ok(()) => CommandResponse::done(),
+                    Err(error) => failure(error),
+                }
+            }
+            Command::Fork { session, at_seq } => {
+                let engine = match self.engine(session.engine) {
+                    Some(engine) => engine,
+                    None => return CommandResponse::error("UNKNOWN_ENGINE", "no such engine"),
+                };
+                match engine.fork(&session, at_seq).await {
+                    Ok(key) => CommandResponse::ok(key),
+                    Err(error) => failure(error),
+                }
+            }
             Command::Cancel { session } => {
                 let engine = match self.engine(session.engine) {
                     Some(engine) => engine,
                     None => return CommandResponse::error("UNKNOWN_ENGINE", "no such engine"),
                 };
                 match engine.cancel(&session).await {
+                    Ok(()) => CommandResponse::done(),
+                    Err(error) => failure(error),
+                }
+            }
+            Command::Compact { session } => {
+                let engine = match self.engine(session.engine) {
+                    Some(engine) => engine,
+                    None => return CommandResponse::error("UNKNOWN_ENGINE", "no such engine"),
+                };
+                match engine.compact(&session).await {
                     Ok(()) => CommandResponse::done(),
                     Err(error) => failure(error),
                 }
@@ -1858,6 +2128,55 @@ mod tests {
         assert_eq!(next.turn, Some(5));
         assert_eq!(next.entries.len(), 1, "{:?}", next.entries);
         assert_eq!(next.entries[0].state, SessionState::Thinking);
+    }
+
+    #[test]
+    fn the_lamp_needs_enabled_plus_a_live_turn_without_a_standing_socket() {
+        let core = Core::new(vec![
+            Fake::new(EngineId::Codex, Vec::new(), None) as Arc<dyn Engine>
+        ]);
+        // Not enabled here: even a connected adapter must not light up.
+        let idle = core.status_of(EngineId::Codex).unwrap();
+        assert!(idle.connected, "the fake adapter can take a prompt");
+        assert!(!idle.engaged, "but the operator never switched it on");
+
+        core.set_engine_configured(EngineId::Codex, true);
+        let idle = core.status_of(EngineId::Codex).unwrap();
+        assert!(idle.connected);
+        assert!(!idle.engaged, "connected is not the same as a live turn");
+
+        {
+            let mut store = core.store_write();
+            let mut session = Session::bare(SessionKey::new(EngineId::Codex, "c-1"), 0);
+            session.running = true;
+            store.sessions.insert(session.key.clone(), session);
+        }
+        let live = core.status_of(EngineId::Codex).unwrap();
+        assert!(
+            live.engaged,
+            "a running turn is the evidence the lamp wants"
+        );
+
+        // DSH is the exception: its plugin is the standing link, so the lamp is
+        // on while attached even when no turn is running.
+        let dsh = Core::new(vec![
+            Fake::new(EngineId::Dsh, Vec::new(), None) as Arc<dyn Engine>
+        ]);
+        dsh.set_engine_configured(EngineId::Dsh, true);
+        let attached = dsh.status_of(EngineId::Dsh).unwrap();
+        assert!(attached.connected);
+        assert!(attached.engaged);
+    }
+
+    #[tokio::test]
+    async fn a_healthy_codex_link_is_not_reconnected_by_the_dependency_button() {
+        let core = Core::new(vec![
+            Fake::new(EngineId::Codex, Vec::new(), None) as Arc<dyn Engine>
+        ]);
+        let report = crate::dependencies::repair(&core, EngineId::Codex).await;
+        assert!(report.ok, "{:?}", report.items);
+        assert!(report.changed.is_empty(), "{:?}", report.changed);
+        assert!(report.error.is_none(), "{:?}", report.error);
     }
 
     #[test]

@@ -279,7 +279,10 @@ pub fn command(binary: &Path) -> tokio::process::Command {
 pub fn open_url(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open").arg(url).spawn().map(|_| ())
+        std::process::Command::new("open")
+            .arg(url)
+            .spawn()
+            .map(|_| ())
     }
     #[cfg(windows)]
     {

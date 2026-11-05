@@ -419,6 +419,9 @@ pub struct SessionRow {
     pub origin: Option<String>,
     /// Which product this row belongs to. Additive: an old client ignores it.
     pub engine: String,
+    /// `claude_desktop` / `codex_desktop` for GUI transcripts, `null` for CLI.
+    /// Additive: an old client ignores it.
+    pub source: Option<String>,
 }
 
 /// Build the pairing URI the desktop shows as a QR code.

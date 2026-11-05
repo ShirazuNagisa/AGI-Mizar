@@ -134,7 +134,25 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
         }
     }
     core.start().await;
+
+    // Claude has no socket that pushes a desktop Code tab's new transcript. A
+    // ten-second disk refresh is the fallback: it reads files that are already
+    // the source of truth and emits only rows whose title/state changed.
+    let claude_refresh = Arc::clone(&claude);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(10));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            claude_refresh.refresh_from_disk();
+        }
+    });
+
     core.refresh_account_in_background();
+    // The DSH plugin lives in DSH's own profile, so the kernel cannot discover
+    // it the way it discovers a binary. This asks npm once at launch and every
+    // six hours after; the window turns an available update into a popup.
+    core.start_dsh_plugin_watch();
 
     // The DSH home, decided the way the DSH CLI itself decides it: the CLI's own
     // override first, then a `.dsh` under the user's home. `home()` is the
@@ -307,13 +325,34 @@ fn install_hooks() -> Result<(), String> {
     }
 }
 
+/// Find the Claude Code CLI.
+///
+/// `which` is the normal path, but a Finder-launched app does not inherit the
+/// shell PATH and npm sometimes installs the platform binary without a working
+/// `.bin` shim. The last two candidates cover those machines without requiring
+/// `AGI_CLAUDE_BIN` in launchd.
+fn claude_binary() -> Option<std::path::PathBuf> {
+    let configured = std::env::var("AGI_CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string());
+    if let Some(found) = which(&configured) {
+        return Some(found);
+    }
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+    [
+        home.join(".local/bin/claude"),
+        home.join(".local/node_modules/@anthropic-ai/claude-code-darwin-arm64/claude"),
+        home.join(".claude/local/claude"),
+        home.join(".cargo/bin/claude"),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file())
+}
+
 /// The Claude engine, discovered or transcript-only.
 ///
 /// Always built: with no `claude` executable there are still transcripts to
 /// read, and a list is useful without the ability to prompt.
 fn build_claude() -> Arc<ClaudeEngine> {
-    let claude_binary = std::env::var("AGI_CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string());
-    match which(&claude_binary) {
+    match claude_binary() {
         Some(path) => {
             tracing::info!("claude at {}", path.display());
             // The discovered path, not the bare name: a Finder-launched app's
@@ -351,8 +390,20 @@ fn discover_local(already: &[EngineId]) -> (Vec<Arc<dyn Engine>>, HashMap<Engine
     let codex_path = {
         #[cfg(target_os = "macos")]
         {
-            which(&codex_binary)
-                .or_else(|| which("/Applications/ChatGPT.app/Contents/Resources/codex"))
+            // ChatGPT 26.1029 moved the bundled CLI from `Resources/codex` to
+            // `Resources/codex-cli`. Keep the old path as a fallback: people
+            // update the desktop app independently of this binary, and either
+            // layout can be present during the transition.
+            which(&codex_binary).or_else(|| {
+                [
+                    "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+                    "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+                    "/Applications/ChatGPT.app/Contents/Resources/codex",
+                ]
+                .into_iter()
+                .find(|path| std::path::Path::new(path).is_file())
+                .map(std::path::PathBuf::from)
+            })
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -384,11 +435,10 @@ fn discover_local(already: &[EngineId]) -> (Vec<Arc<dyn Engine>>, HashMap<Engine
 
     // Claude Code is always hosted: with no `claude` executable there are still
     // transcripts to read, and a list is useful without the ability to prompt.
-    let claude_binary = std::env::var("AGI_CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string());
     if !already.contains(&EngineId::Claude) {
         hosted.push(Arc::clone(&build_claude()) as Arc<dyn Engine>);
     }
-    if which(&claude_binary).is_none() {
+    if claude_binary().is_none() {
         missing.insert(
             EngineId::Claude,
             "the claude CLI was not found; transcripts are still readable".to_string(),

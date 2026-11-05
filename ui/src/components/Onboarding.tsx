@@ -1,5 +1,13 @@
 import { useEffect, useState } from 'react'
-import type { AccountUser, EngineId, EngineStatus, Kernel, ModelCheck, ModelState } from '../api'
+import type {
+  AccountUser,
+  DatasetState,
+  EngineId,
+  EngineStatus,
+  Kernel,
+  ModelCheck,
+  ModelState,
+} from '../api'
 import { AGENTS } from '../navigation'
 import { ENGINE_INSTALL_HINTS } from '../engines'
 import { formatGigabytes, formatModelVersion } from '../format'
@@ -8,21 +16,23 @@ import { type DesktopPlatform } from '../platform'
 import { quitApp, shellAvailable, shellFailure } from '../shell'
 import { Button } from './ui/button'
 import { Progress } from './ui/progress'
+import { Switch } from './ui/switch'
 import { CheckIcon, ENGINE_MARKS, Spinner, StarMark } from '../icons'
 import { DshPluginHint } from './DshPluginHint'
 import { useIsOled } from '../lib/oled'
 import { ShellSettingsList } from './ShellSettingsList'
 import { cn, failureMessage } from '../lib/utils'
 
-/** The six steps, in the order the guide walks them. */
-const STEP_TITLES = ['欢迎', '登录', '选择 Agent', '下载模型', '偏好', '完成'] as const
+/** The seven steps, in the order the guide walks them. */
+const STEP_TITLES = ['欢迎', '登录', '选择 Agent', '下载模型', '偏好', '共享会话数据', '完成'] as const
 
 const WELCOME = 0
 const LOGIN = 1
 const CHOOSE = 2
 const MODEL = 3
 const PREFERENCES = 4
-const FINISH = 5
+const SHARING = 5
+const FINISH = 6
 
 interface OnboardingProps {
   kernel: Kernel
@@ -30,6 +40,8 @@ interface OnboardingProps {
   serverConnected: boolean
   engines: EngineStatus[]
   model: ModelState | null
+  /** The operator's current answer about anonymous session sharing. */
+  dataset: DatasetState
   /** Which desktop the words and the window chrome belong to. */
   platform: DesktopPlatform
   accountBusy: boolean
@@ -45,12 +57,17 @@ interface OnboardingProps {
 }
 
 /**
- * The first-run guide: six steps, full window, no sidebar.
+ * The first-run guide: seven steps, full window, no sidebar.
  *
  * It cannot be skipped — the account is what makes the phone side work, so the
  * login step will not let the window past until it has one. The two deliberate
  * ways out are 退出应用 on the login step (this guide is not for you right now)
  * and 稍后再下载 on the model step (1 GB is not a decision to force).
+ *
+ * The sharing step is the one place this guide asks for something that is not
+ * needed to use the product. It arrives pre-ticked, because that is the
+ * operator's product decision; the copy says exactly what leaves the machine and
+ * the settings page can stop it at any time.
  *
  * State lives where it is used: the account comes down from the window, the
  * engines from the snapshot, a download's progress from the kernel's events, and
@@ -63,6 +80,7 @@ export function Onboarding({
   serverConnected,
   engines,
   model,
+  dataset,
   platform,
   accountBusy,
   accountError,
@@ -77,6 +95,9 @@ export function Onboarding({
   const [step, setStep] = useState(WELCOME)
   const [selected, setSelected] = useState<Set<EngineId>>(
     () => new Set(engines.filter((engine) => engine.configured).map((engine) => engine.engine)),
+  )
+  const [share, setShare] = useState(() =>
+    dataset.policyVersion > 0 ? dataset.enabled : true,
   )
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -117,6 +138,18 @@ export function Onboarding({
         setStep(MODEL)
       } catch (failure) {
         setError(failureMessage(failure, '没有记住所选的 Agent'))
+      } finally {
+        setBusy(false)
+      }
+      return
+    }
+    if (step === SHARING) {
+      setBusy(true)
+      try {
+        await kernel.send({ op: 'dataset_share', enabled: share })
+        setStep(FINISH)
+      } catch (failure) {
+        setError(failureMessage(failure, '没有记住共享选择'))
       } finally {
         setBusy(false)
       }
@@ -206,6 +239,9 @@ export function Onboarding({
               />
             ) : null}
             {step === PREFERENCES ? <PreferenceStep shell={shell} platform={platform} /> : null}
+            {step === SHARING ? (
+              <SharingStep kernel={kernel} share={share} onChange={setShare} />
+            ) : null}
             {step === FINISH ? (
               <DoneStep
                 account={account}
@@ -214,6 +250,7 @@ export function Onboarding({
                 model={model}
                 shell={shell}
                 platform={platform}
+                sharing={share}
               />
             ) : null}
           </div>
@@ -557,7 +594,9 @@ function AgentStep({ kernel, engines, selected, onToggle, onRefreshState }: Agen
         })}
       </div>
 
-      {selected.has('dsh') ? <DshPluginHint className="mt-3" /> : null}
+      {selected.has('dsh') ? (
+        <DshPluginHint className="mt-3" kernel={kernel} />
+      ) : null}
 
       {missing.length === 0 ? null : (
         <div className="mt-4 flex flex-col gap-1">
@@ -792,6 +831,67 @@ function PreferenceStep({
   )
 }
 
+/**
+ * The one question in the guide that is not about this machine working.
+ *
+ * Pre-ticked on a first run, because the operator asked for that. The copy is
+ * the consent: what is shared, what was removed first, and the fact that it is
+ * only for Mizarllm. Un-ticking it is one click and sends the same command the
+ * settings page sends.
+ */
+function SharingStep({
+  kernel,
+  share,
+  onChange,
+}: {
+  kernel: Kernel
+  share: boolean
+  onChange: (next: boolean) => void
+}) {
+  return (
+    <section>
+      <h2 className="text-[24px] leading-8">共享会话数据</h2>
+      <p className="mt-1.5 text-[12px] leading-5 text-muted">
+        帮助改进 Mizarllm：匿名共享这台电脑上最近 12 个月的会话轮次，包括已归档的对话。
+        每个轮次只包含你的指令、用到的工具、失败调用和最后几条回复。
+      </p>
+
+      <div className="mt-4 mz-border">
+        <div className="flex items-start justify-between gap-6 px-4 py-3">
+          <div className="min-w-0">
+            <div className="text-[12px] text-fg">匿名共享会话数据以帮助我们改善</div>
+            <p className="mt-0.5 text-[12px] leading-5 text-muted">
+              上传前会在本机去掉账户、设备名、路径、邮箱和密钥；数据不公开、不出售、
+              不与你的账户关联，只用于训练 Mizarllm 的轮次判定能力。
+            </p>
+          </div>
+          <Switch
+            className="mt-0.5"
+            label="匿名共享会话数据以帮助我们改善"
+            checked={share}
+            onCheckedChange={onChange}
+          />
+        </div>
+        <div className="mz-divide-t flex items-center justify-between gap-4 px-4 py-2">
+          <span className="text-[12px] text-muted">默认开启，之后可以在设置里随时关闭。</span>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() =>
+              void kernel.send({
+                op: 'open_external',
+                url: 'https://dsh-mizar.shirazu-nagisa.com/privacy/',
+              })
+            }
+          >
+            查看隐私政策
+          </Button>
+        </div>
+      </div>
+    </section>
+  )
+}
+
 interface DoneStepProps {
   account: AccountUser | null
   engines: EngineStatus[]
@@ -799,10 +899,11 @@ interface DoneStepProps {
   model: ModelState | null
   shell: ShellSettingsState
   platform: DesktopPlatform
+  sharing: boolean
 }
 
 /** What is in place, so the window does not leave the guide quietly wrong. */
-function DoneStep({ account, engines, selected, model, shell, platform }: DoneStepProps) {
+function DoneStep({ account, engines, selected, model, shell, platform, sharing }: DoneStepProps) {
   const configured = AGENTS.filter(
     ({ engine }) =>
       selected.has(engine) ||
@@ -841,6 +942,7 @@ function DoneStep({ account, engines, selected, model, shell, platform }: DoneSt
         />
         <DoneRow label="模型" value={active === null ? '未下载' : `Mizarllm ${active.version}`} />
         <DoneRow label="偏好" value={preferenceText} />
+        <DoneRow label="会话数据" value={sharing ? '匿名共享中' : '仅保留在本机'} />
       </div>
     </section>
   )

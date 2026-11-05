@@ -296,7 +296,9 @@ mod tests {
     #[test]
     fn a_running_session_becomes_the_first_row() {
         let mut tracker = Tracker::default();
-        let card = tracker.running(&session("a", Some("Fix the tests")), 1_000).unwrap();
+        let card = tracker
+            .running(&session("a", Some("Fix the tests")), 1_000)
+            .unwrap();
         assert_eq!(card.rows.len(), 1);
         assert_eq!(card.rows[0].session_id, "dsh:a");
         assert_eq!(card.rows[0].title, "Fix the tests");
@@ -320,7 +322,10 @@ mod tests {
         let card = tracker.finished(&key("b")).unwrap();
         assert_eq!(card.rows.len(), 1);
         assert_eq!(card.rows[0].session_id, "dsh:a");
-        assert_eq!(card.rows[0].running_since, 1_000, "the first row's clock is untouched");
+        assert_eq!(
+            card.rows[0].running_since, 1_000,
+            "the first row's clock is untouched"
+        );
     }
 
     #[test]
@@ -329,7 +334,10 @@ mod tests {
         tracker.running(&session("a", None), 1_000);
         let card = tracker.finished(&key("a")).unwrap();
         assert!(card.is_empty(), "an empty card is what ends the activity");
-        assert!(tracker.finished(&key("a")).is_none(), "a second end is not news");
+        assert!(
+            tracker.finished(&key("a")).is_none(),
+            "a second end is not news"
+        );
     }
 
     #[test]
@@ -354,12 +362,19 @@ mod tests {
         assert_eq!(card.approvals.len(), 1);
         assert_eq!(card.approvals[0].request_id, "r1");
         assert_eq!(card.approvals[0].tool, "Bash");
-        assert_eq!(card.rows.len(), 1, "the row stays: the turn is blocked, not over");
+        assert_eq!(
+            card.rows.len(),
+            1,
+            "the row stays: the turn is blocked, not over"
+        );
 
         let card = tracker.approval_resolved("r1").unwrap();
         assert!(card.approvals.is_empty());
         assert_eq!(card.rows.len(), 1);
-        assert!(tracker.approval_resolved("r1").is_none(), "answered twice is not news");
+        assert!(
+            tracker.approval_resolved("r1").is_none(),
+            "answered twice is not news"
+        );
     }
 
     #[test]
@@ -368,7 +383,10 @@ mod tests {
         tracker.running(&session("a", None), 1_000);
         tracker.approval_requested(&approval("r1", "a"));
         let card = tracker.finished(&key("a")).unwrap();
-        assert!(card.is_empty(), "an approval for a session that is gone is not actionable");
+        assert!(
+            card.is_empty(),
+            "an approval for a session that is gone is not actionable"
+        );
     }
 
     #[test]

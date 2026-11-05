@@ -93,6 +93,11 @@ pub fn session_from_thread(thread: &Value) -> Option<Session> {
             .get("forkedFromId")
             .and_then(Value::as_str)
             .map(|_| "fork".to_string()),
+        source: thread
+            .get("originator")
+            .and_then(Value::as_str)
+            .filter(|originator| *originator == "Codex Desktop")
+            .map(|_| "codex_desktop".to_string()),
         turns: thread
             .get("turns")
             .and_then(Value::as_array)
@@ -113,7 +118,12 @@ pub fn records_from_turns(turns: &[Value]) -> Vec<Record> {
     for (index, turn) in turns.iter().enumerate() {
         let turn_number = (index + 1) as u32;
         let base = (index as i64 + 1) * 1_000_000;
-        let started_ms = turn.get("startedAt").and_then(Value::as_i64).unwrap_or(0) * 1_000;
+        let started_ms = turn
+            .get("startedAt")
+            .and_then(Value::as_i64)
+            .map(|seconds| seconds * 1_000)
+            .or_else(|| turn.get("startedAtMs").and_then(Value::as_i64))
+            .unwrap_or(0);
 
         records.push(Record {
             seq: base,
@@ -337,6 +347,23 @@ mod tests {
         assert_eq!(session.title.as_deref(), Some("Fix the parser"));
         assert_eq!(session.updated_at, 1_700_000_000_000);
         assert!(session.running);
+    }
+
+    #[test]
+    fn marks_a_thread_created_by_the_codex_desktop_window() {
+        let desktop = session_from_thread(&json!({
+            "id": "th_desktop", "title": "From the app", "originator": "Codex Desktop",
+            "status": { "type": "notLoaded" }
+        }))
+        .unwrap();
+        assert_eq!(desktop.source.as_deref(), Some("codex_desktop"));
+
+        let cli = session_from_thread(&json!({
+            "id": "th_cli", "title": "From the CLI", "originator": "agi-mizar",
+            "status": { "type": "idle" }
+        }))
+        .unwrap();
+        assert!(cli.source.is_none());
     }
 
     #[test]

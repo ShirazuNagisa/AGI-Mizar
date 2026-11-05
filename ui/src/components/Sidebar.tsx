@@ -1,5 +1,5 @@
 import type { EngineStatus } from '../api'
-import { AGENTS, type Page, samePage } from '../navigation'
+import { AGENT_TABS, type AgentTab, type Page, samePage } from '../navigation'
 import { ENGINE_MARKS, GearIcon, PersonIcon } from '../icons'
 import { cn } from '../lib/utils'
 import { isMac } from '../platform'
@@ -21,13 +21,15 @@ interface SidebarProps {
 function Lamp({ state, label }: { state: 'on' | 'off' | 'absent'; label?: string }) {
   const oled = useIsOled()
   if (!oled) {
-    // The classic window has colour and opacity, so presence is a dot.
+    // One colour for both states: filled means connected, an outline means
+    // not. In the dark window `--fg` is white; in the light one it is ink, so
+    // the dot stays visible instead of becoming a white spot on white.
     const tone =
       state === 'on'
-        ? 'bg-emerald-500'
+        ? 'bg-fg'
         : state === 'off'
-          ? 'bg-transparent ring-1 ring-inset ring-muted/60'
-          : 'bg-muted/35'
+          ? 'border border-fg bg-transparent'
+          : 'border border-fg/40 bg-transparent'
     return <span role="img" aria-label={label} title={label} className={cn('size-2 shrink-0 rounded-full', tone)} />
   }
   if (state === 'on') {
@@ -61,13 +63,27 @@ function Star() {
   )
 }
 
+/** A CLI surface keeps its engine mark and adds a `>_` stamp at the corner. */
+function AgentMark({ tab }: { tab: AgentTab }) {
+  const Mark = ENGINE_MARKS[tab.engine]
+  if (tab.surface !== 'cli') return <Mark size={18} />
+  return (
+    <span className="relative inline-flex size-[18px] shrink-0 items-center justify-center" aria-hidden>
+      <Mark size={18} />
+      <span className="absolute -bottom-1 -right-1 font-mono text-[6px] font-bold leading-none tracking-[-1px]">
+        &gt;_
+      </span>
+    </span>
+  )
+}
+
 /** The label box every row shares, so the sweep and the rest state line up. */
 const ROW_LABEL = 'flex w-full items-center gap-2.5 px-2'
 
 /**
- * The window's left column: the mark that goes home, the three agents, and the
- * two places that are not agents. No rules between sections — spacing is the
- * separation.
+ * The window's left column: the mark that goes home, the five agent surfaces,
+ * and the two places that are not agents. No rules between sections — spacing
+ * is the separation.
  *
  * Only the current page is filled. Inverting every row would turn eight
  * navigation items into eight boxes.
@@ -102,25 +118,28 @@ export function Sidebar({ engines, page, serverConnected, loggedIn, onNavigate }
       </WipeButton>
 
       <nav className="mt-3 flex flex-col px-2">
-        {AGENTS.map(({ engine, name }) => {
-          const status = engines.find((candidate) => candidate.engine === engine)
-          const connected = status?.connected ?? false
+        {AGENT_TABS.map((tab) => {
+          const status = engines.find((candidate) => candidate.engine === tab.engine)
+          // The lamp is not "the adapter can work": it is "this agent is
+          // enabled here and is live now". Claude and Codex have no standing
+          // socket, so their status is true all the time; `engaged` is what
+          // goes out when nobody has a turn running.
+          const engaged = status?.engaged === true
           // Only an explicit "not installed" changes the lamp; a snapshot that
           // does not mention the engine at all keeps the plain hollow look.
           const installed = status?.available ?? true
-          const active = samePage(page, { kind: 'agent', engine })
-          const Mark = ENGINE_MARKS[engine]
-          const lamp = connected ? '已连接' : installed ? '未连接' : '本机未安装'
+          const active = samePage(page, { kind: 'agent', tab: tab.id })
+          const lamp = engaged ? '已连接' : installed ? '未连接' : '本机未安装'
           return (
             <WipeButton
-              key={engine}
-              onClick={() => onNavigate({ kind: 'agent', engine })}
+              key={tab.id}
+              onClick={() => onNavigate({ kind: 'agent', tab: tab.id })}
               className={cn('flex h-9 items-center text-left', active && 'bg-ink text-bg')}
               contentClassName={ROW_LABEL}
             >
-              <Mark size={18} />
-              <span className="flex-1 truncate text-[12px]">{name}</span>
-              <Lamp state={connected ? 'on' : installed ? 'off' : 'absent'} label={lamp} />
+              <AgentMark tab={tab} />
+              <span className="flex-1 truncate text-[12px]">{tab.name}</span>
+              <Lamp state={engaged ? 'on' : installed ? 'off' : 'absent'} label={lamp} />
             </WipeButton>
           )
         })}

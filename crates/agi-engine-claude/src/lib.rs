@@ -18,11 +18,13 @@
 //! process per turn. That is why this adapter has no supervisor and no reconnect
 //! loop — there is nothing to keep alive.
 
+pub mod desktop;
 pub mod engine;
 pub mod installer;
 pub mod paths;
 pub mod transcript;
 pub mod usage;
 
+pub use desktop::DesktopSession;
 pub use engine::ClaudeEngine;
-pub use installer::{install, uninstall, InstallOutcome, HOOK_EVENTS};
+pub use installer::{install, installed_count, uninstall, InstallOutcome, HOOK_EVENTS};

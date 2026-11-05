@@ -43,7 +43,9 @@ struct Dialer {
 
 /// Punch at the engine and settle the session.
 async fn punch(engine: std::net::SocketAddr, engine_endpoint_id: &str) -> Dialer {
-    let socket = UdpSocket::bind(("127.0.0.1", 0)).await.expect("a phone socket");
+    let socket = UdpSocket::bind(("127.0.0.1", 0))
+        .await
+        .expect("a phone socket");
     let identity = Identity::derive(b"the device token", Purpose::Device);
     let (local_secret, local_public) = crypto::ephemeral_keypair();
     let connection_id = 0x1122_3344_5566_7788;
@@ -206,7 +208,10 @@ async fn host_info_offers_the_direct_path_only_when_one_is_bound() {
         .iter()
         .filter_map(|candidate| candidate["kind"].as_str())
         .collect();
-    assert!(kinds.contains(&"srflx"), "the outside address is published: {kinds:?}");
+    assert!(
+        kinds.contains(&"srflx"),
+        "the outside address is published: {kinds:?}"
+    );
     for candidate in &candidates {
         assert!(candidate["priority"].as_u64().unwrap_or(0) > 0);
         assert!(candidate["port"].as_u64().unwrap_or(0) > 0);

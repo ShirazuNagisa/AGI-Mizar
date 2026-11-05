@@ -43,6 +43,112 @@ pub struct StateSnapshot {
     pub model: ModelView,
     /// The phones paired with this computer, and which of them are connected.
     pub devices: Vec<DeviceView>,
+    /// Whether this install anonymously shares turns to improve Mizarllm.
+    pub dataset: DatasetView,
+    /// The DSH helper plugin's version, and whether npm has a newer one.
+    #[serde(rename = "dshPlugin")]
+    pub dsh_plugin: DshPluginView,
+}
+
+/// What this install knows about the DSH helper plugin.
+///
+/// The plugin is a package inside DSH's profile, not a binary this app owns, so
+/// its version has to be read from DSH's own directory and compared with the
+/// registry. The window uses this both for the plugin card on the DSH page and
+/// for the one popup that asks to update it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DshPluginView {
+    /// The version found in the DSH profile, when the plugin is installed.
+    pub installed: Option<String>,
+    /// The newest version npm published, once a check has succeeded.
+    pub latest: Option<String>,
+    /// The oldest plugin version this app speaks to.
+    pub minimum: String,
+    /// Whether npm has a newer, compatible version than the installed one.
+    pub update_available: bool,
+    /// The DSH profile the plugin is (or would be) installed in.
+    pub profile: String,
+    /// Whether a `dsh` command was found, so the one-click install can work.
+    pub cli: bool,
+    /// Why the last npm check failed, when it did.
+    pub error: Option<String>,
+    /// Epoch milliseconds of the last successful check.
+    pub last_checked: Option<i64>,
+}
+
+impl Default for DshPluginView {
+    fn default() -> Self {
+        Self {
+            installed: None,
+            latest: None,
+            minimum: DSH_PLUGIN_MIN_VERSION.to_string(),
+            update_available: false,
+            profile: "desktop".to_string(),
+            cli: false,
+            error: None,
+            last_checked: None,
+        }
+    }
+}
+
+/// The oldest `dsh-mizar` this build understands.
+///
+/// Kept next to the wire types because it is a fact about the contract, not
+/// about one platform: the plugin's 0.9.0 release is the first one that speaks
+/// DSH Link v1 and dials the desktop instead of listening itself.
+pub const DSH_PLUGIN_MIN_VERSION: &str = "0.9.0";
+
+/// One dependency the agent needs before this app can talk to it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DependencyItem {
+    /// Stable id, for tests and for the window's `key`.
+    pub id: String,
+    pub label: String,
+    /// `ok`, `missing`, `outdated`, or `unknown`.
+    pub status: String,
+    /// One sentence a person can act on.
+    pub detail: String,
+    /// What the one-click repair would do, when it can do anything.
+    pub fix: Option<String>,
+}
+
+/// Whether one agent's side of the connection is complete.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DependencyReport {
+    pub engine: EngineId,
+    /// Whether no item needs attention (`missing` or `outdated`).
+    ///
+    /// `unknown` is tolerated: an offline registry is not a broken connection.
+    pub ok: bool,
+    /// The sentence the agent page shows above the list.
+    pub summary: String,
+    pub items: Vec<DependencyItem>,
+    /// What a repair changed; empty for a read-only check.
+    pub changed: Vec<String>,
+    /// Why a repair could not finish, when it could not.
+    pub error: Option<String>,
+}
+
+/// Whether this install anonymously shares its turns to help train Mizarllm.
+///
+/// The choice is per machine, stored beside the window's other preferences. The
+/// kernel answers with the stored value and the copy version the operator
+/// agreed to; nothing about the upload itself (counts, progress) is published,
+/// because the sharing is meant to be invisible in normal use.
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DatasetView {
+    /// The operator's choice right now.
+    pub enabled: bool,
+    /// The consent copy they accepted; `0` means they never chose.
+    pub policy_version: u32,
+    /// Epoch milliseconds of the last change to `enabled`.
+    pub since: Option<i64>,
+    /// Project names whose turns are never shared.
+    pub excluded_projects: Vec<String>,
 }
 
 /// One paired phone, as the menu bar lists it.
@@ -76,6 +182,14 @@ pub struct EngineStatus {
     /// Whether the operator picked this agent in the guide (or configured it
     /// later) and its dependencies are in place.
     pub configured: bool,
+    /// The lamp's answer: enabled here *and* live now.
+    ///
+    /// `connected` is the send-gate ("can a prompt go through"); this is the
+    /// narrower claim the window draws. DSH is live while its plugin is
+    /// attached; Claude Code and Codex have no standing socket of their own, so
+    /// they are live only while a turn is running. Keeping the two apart means
+    /// the lamp can go out without turning off prompting.
+    pub engaged: bool,
     pub capabilities: Capabilities,
     /// A short human-readable fact: the plugin version, the app-server version,
     /// or why the engine is not usable.
@@ -233,8 +347,14 @@ pub enum Command {
     },
     /// Send a prompt to a session.
     Prompt { session: SessionKey, text: String },
+    /// Add a message to the turn that is already running.
+    Steer { session: SessionKey, text: String },
+    /// Fork a session into a new one at a completed turn boundary.
+    Fork { session: SessionKey, at_seq: i64 },
     /// Stop the running turn.
     Cancel { session: SessionKey },
+    /// Compact this session's context using the engine's own mechanism.
+    Compact { session: SessionKey },
     /// Answer a pending approval or question batch.
     Answer {
         id: String,
@@ -345,10 +465,29 @@ pub enum Command {
     /// Remember whether an agent is configured on this machine.
     EngineConfigure { engine: EngineId, enabled: bool },
 
+    /// Read one agent's connection dependencies without changing anything.
+    Dependencies { engine: EngineId },
+    /// Check one agent's dependencies and repair what can be repaired.
+    DependenciesRepair { engine: EngineId },
+    /// Ask npm what the newest `dsh-mizar` is.
+    DshPluginCheck,
+    /// Install or update `dsh-mizar` in the DSH profile npm reports as current.
+    DshPluginUpdate,
+
     /// The guide finished; do not show it again.
     OnboardingComplete,
     /// Show the guide again on the next snapshot.
     OnboardingReset,
+
+    /// Turn anonymous session-data sharing on or off.
+    ///
+    /// Enabling starts the background backfill of the last year's turns and the
+    /// uploader; disabling stops both immediately. Nothing is ever deleted from
+    /// the server, because the server never learns which account the turns came
+    /// from.
+    DatasetShare { enabled: bool },
+    /// Replace the list of projects whose turns are never shared.
+    DatasetExclude { projects: Vec<String> },
 
     /// Liveness probe, used by the shell before it shows a window.
     Ping,
@@ -441,6 +580,8 @@ pub enum ApiEvent {
     ModelChanged { model: ModelView },
     /// The first-run guide was finished or re-armed.
     OnboardingChanged { done: bool },
+    /// The DSH helper plugin's version, or npm's newest, changed.
+    DshPluginChanged { plugin: DshPluginView },
     /// Something the operator should see but that is not an error.
     Notice { level: String, message: String },
 }
@@ -517,5 +658,55 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(command, Command::UsageOverview));
+    }
+
+    #[test]
+    fn the_plugin_view_is_camel_case_and_names_its_floor() {
+        let wire = serde_json::to_value(DshPluginView {
+            installed: Some("0.9.0".to_string()),
+            latest: Some("0.9.2".to_string()),
+            minimum: DSH_PLUGIN_MIN_VERSION.to_string(),
+            update_available: true,
+            profile: "desktop".to_string(),
+            cli: true,
+            error: None,
+            last_checked: Some(1),
+        })
+        .unwrap();
+        for key in [
+            "installed",
+            "latest",
+            "minimum",
+            "updateAvailable",
+            "profile",
+            "cli",
+            "error",
+            "lastChecked",
+        ] {
+            assert!(wire.get(key).is_some(), "missing {key} in {wire}");
+        }
+        assert!(wire.get("update_available").is_none());
+        assert!(wire.get("last_checked").is_none());
+        assert_eq!(wire["minimum"], DSH_PLUGIN_MIN_VERSION);
+    }
+
+    #[test]
+    fn the_dependency_commands_parse_with_their_engine() {
+        let command: Command = serde_json::from_value(serde_json::json!({
+            "op": "dependencies_repair",
+            "engine": "dsh"
+        }))
+        .unwrap();
+        assert!(matches!(
+            command,
+            Command::DependenciesRepair {
+                engine: EngineId::Dsh
+            }
+        ));
+        let command: Command = serde_json::from_value(serde_json::json!({
+            "op": "dsh_plugin_update"
+        }))
+        .unwrap();
+        assert!(matches!(command, Command::DshPluginUpdate));
     }
 }

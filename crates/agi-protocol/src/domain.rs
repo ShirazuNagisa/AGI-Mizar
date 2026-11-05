@@ -112,6 +112,15 @@ pub struct Session {
     pub parent: Option<String>,
     /// `subagent`, `fork`, or whatever the engine calls it. Opaque to the UI.
     pub origin: Option<String>,
+    /// Which surface created the session, when it is not the engine's own CLI.
+    ///
+    /// `None` is the terminal/CLI surface. `claude_desktop` and `codex_desktop`
+    /// mean the same transcript or thread was created by the GUI app; the
+    /// window can then say where it came from without inventing a second
+    /// session list. This is deliberately separate from `origin`: `origin`
+    /// makes a row a child row, `source` does not.
+    #[serde(default)]
+    pub source: Option<String>,
     /// How many turns the engine has recorded.
     pub turns: u32,
     /// How full the model's context window is, when the engine can say.
@@ -145,6 +154,7 @@ impl Session {
             running: false,
             parent: None,
             origin: None,
+            source: None,
             turns: 0,
             context: None,
         }
@@ -478,6 +488,17 @@ mod tests {
         let json = serde_json::to_string(&key).unwrap();
         assert_eq!(json, "\"dsh:session-1\"");
         assert_eq!(serde_json::from_str::<SessionKey>(&json).unwrap(), key);
+    }
+
+    #[test]
+    fn an_old_session_without_a_source_field_is_still_the_cli_surface() {
+        let session = Session::bare(SessionKey::new(EngineId::Claude, "s-1"), 1);
+        let mut value = serde_json::to_value(&session).unwrap();
+        // Snapshots written by a build before `source` existed do not carry it.
+        value.as_object_mut().unwrap().remove("source");
+        let restored: Session = serde_json::from_value(value).unwrap();
+        assert!(restored.source.is_none());
+        assert_eq!(restored.key, session.key);
     }
 
     #[test]

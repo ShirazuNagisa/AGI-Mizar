@@ -13,9 +13,13 @@ agi-platform = { workspace = true }
 agi-engine = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+futures-util = { workspace = true }
+reqwest = { workspace = true }
+tokio-tungstenite = { workspace = true }
 
 [dev-dependencies]
 chrono = { workspace = true }

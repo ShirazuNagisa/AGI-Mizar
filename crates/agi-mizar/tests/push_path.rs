@@ -14,8 +14,8 @@ use agi_mizar::net::identity::{Identity, Purpose};
 use agi_mizar::{DeviceStore, MizarServer, RelayClient};
 use agi_protocol::domain::{Interaction, InteractionKind, Session, SessionKey};
 use agi_protocol::engine::EngineId;
-use serde_json::{json, Value};
 use futures_util::{SinkExt, StreamExt};
+use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::connect_async;
@@ -145,7 +145,9 @@ async fn an_approval_rides_on_the_card_with_the_id_an_answer_will_name() {
         requested_at: 1,
         questions: Vec::new(),
     };
-    let card = tracker.approval_requested(&interaction).expect("the card changed");
+    let card = tracker
+        .approval_requested(&interaction)
+        .expect("the card changed");
 
     server.publish_card_for_tests(&card).await;
 
@@ -194,7 +196,12 @@ async fn a_card_for_a_punched_connection_advertises_what_the_phone_needs() {
     // characters, so a phone can put it in a ticket without escaping.
     let identity = Identity::derive(b"a tunnel secret", Purpose::Host);
     assert_eq!(identity.endpoint_id().len(), 43);
-    assert_eq!(serde_json::to_string(&json!(identity.endpoint_id())).unwrap().len(), 45);
+    assert_eq!(
+        serde_json::to_string(&json!(identity.endpoint_id()))
+            .unwrap()
+            .len(),
+        45
+    );
 }
 
 #[tokio::test]
@@ -317,7 +324,10 @@ async fn a_phone_that_says_nothing_about_its_account_is_left_as_it_was() {
     let (server, store, _dir) = start().await;
     let issued = store.issue("phone", None).expect("a token");
     server.set_account_user(Some("account-a".to_string()));
-    assert_eq!(handshake(&server, &issued.token, None).await["type"], "welcome");
+    assert_eq!(
+        handshake(&server, &issued.token, None).await["type"],
+        "welcome"
+    );
 
     // A desktop that is signed out asks nothing of anybody.
     server.set_account_user(None);

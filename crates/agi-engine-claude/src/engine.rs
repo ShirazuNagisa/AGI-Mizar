@@ -39,6 +39,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, oneshot};
 
+use crate::desktop;
 use crate::paths::{self, TranscriptFile};
 use crate::transcript;
 
@@ -75,6 +76,9 @@ enum Outcome {
 /// One approval a hook is blocked on.
 struct Pending {
     settle: oneshot::Sender<Outcome>,
+    /// The transcript this approval belongs to, so a read-only desktop session
+    /// cannot be answered through the CLI engine's approval path.
+    session: Option<String>,
 }
 
 /// What the UI chose for a session, applied on the next prompt.
@@ -188,6 +192,10 @@ impl ClaudeEngine {
                 .collect()
         };
         let mut sessions = Vec::new();
+        // The desktop Code tab writes the same transcripts, with a title and a
+        // model the transcript's first line may not have. Reading its metadata
+        // is what lets the row say "Claude 桌面" instead of guessing from a path.
+        let desktop = desktop::by_cli_session(desktop::read_all());
 
         for file in paths::list_transcripts(&self.projects)
             .into_iter()
@@ -203,6 +211,13 @@ impl ClaudeEngine {
             session.model = meta.model;
             session.running = running.contains(&file.session_id);
             session.turns = meta.turns;
+            if let Some(gui) = desktop.get(&file.session_id) {
+                session.source = Some("claude_desktop".to_string());
+                session.title = gui.title.clone().or(session.title);
+                session.cwd = gui.cwd.clone().or(session.cwd);
+                session.model = gui.model.clone().or(session.model);
+                session.turns = session.turns.max(gui.completed_turns);
+            }
             sessions.push(session);
         }
 
@@ -222,6 +237,55 @@ impl ClaudeEngine {
         }
 
         sessions
+    }
+
+    /// Re-read the transcript directory and desktop metadata, then announce
+    /// only the rows that actually changed.
+    ///
+    /// Hooks cover a running Claude Code turn, but a Claude desktop Code session
+    /// that nobody prompts through the phone still has to appear (and later go
+    /// quiet) without a hook. A small poll is the honest fallback: file reads,
+    /// no socket, no invented running state.
+    pub fn refresh_from_disk(&self) {
+        let before = self.state().sessions.clone();
+        let sessions = self.refresh_sessions();
+        let after = self.state().sessions.clone();
+        for session in sessions {
+            if before.get(&session.key.id) != Some(&session) {
+                self.emit(EngineEvent::SessionUpdated(session));
+            }
+        }
+        for id in before.keys() {
+            if !after.contains_key(id) {
+                self.emit(EngineEvent::SessionRemoved(SessionKey::new(
+                    EngineId::Claude,
+                    id.clone(),
+                )));
+            }
+        }
+    }
+
+    /// Whether this transcript belongs to Claude Desktop's Code tab.
+    ///
+    /// The desktop window owns the Claude Code process. Writing a prompt with
+    /// `claude -p --resume` would race that process and make the GUI's turn
+    /// model inconsistent, so the desktop surface is deliberately read-only.
+    fn is_desktop_session(&self, session: &SessionKey) -> bool {
+        self.state()
+            .sessions
+            .get(&session.id)
+            .and_then(|row| row.source.as_deref())
+            == Some("claude_desktop")
+    }
+
+    fn reject_desktop_write(&self, session: &SessionKey) -> Result<(), EngineError> {
+        if self.is_desktop_session(session) {
+            return Err(EngineError::Unsupported {
+                engine: EngineId::Claude,
+                feature: "writing to a Claude Desktop session",
+            });
+        }
+        Ok(())
     }
 
     /// Tell the UI that one session's row changed.
@@ -286,6 +350,20 @@ impl ClaudeEngine {
 
     /// The one hook that can answer for the operator.
     async fn pre_tool_use(&self, payload: &Value, session: Option<String>) -> Option<Value> {
+        // A desktop Code session is read-only here. Let Claude's own GUI decide
+        // the permission; surfacing a question this engine will refuse to answer
+        // would leave the GUI blocked on a UI that cannot resolve it.
+        if let Some(id) = &session {
+            if self
+                .state()
+                .sessions
+                .get(id)
+                .and_then(|row| row.source.as_deref())
+                == Some("claude_desktop")
+            {
+                return None;
+            }
+        }
         // Nobody is watching: blocking for a decision nobody can make would stall
         // the operator's own terminal.
         if !self.attended.load(Ordering::Relaxed) {
@@ -311,8 +389,13 @@ impl ClaudeEngine {
 
         let local = format!("cl-{}", self.next_local.fetch_add(1, Ordering::Relaxed));
         let (tx, rx) = oneshot::channel();
-        self.approvals()
-            .insert(local.clone(), Pending { settle: tx });
+        self.approvals().insert(
+            local.clone(),
+            Pending {
+                settle: tx,
+                session: session.clone(),
+            },
+        );
 
         let interaction = Interaction {
             id: local.clone(),
@@ -968,6 +1051,7 @@ impl Engine for ClaudeEngine {
         if session.engine != EngineId::Claude {
             return Err(EngineError::UnknownSession(session.clone()));
         }
+        self.reject_desktop_write(session)?;
         // One process per prompt, so a session that is already running has no
         // room for a second. Saying so is better than a queue nobody can see.
         if self.state().children.contains_key(&session.id) {
@@ -983,10 +1067,36 @@ impl Engine for ClaudeEngine {
         engine.run_prompt(session, text).await
     }
 
+    async fn compact(&self, session: &SessionKey) -> Result<(), EngineError> {
+        if session.engine != EngineId::Claude {
+            return Err(EngineError::UnknownSession(session.clone()));
+        }
+        // Claude Code handles `/compact` as a local slash command before it
+        // reaches the model. In `-p` mode with `--resume`, that is the same
+        // path its own input box takes; a prompt containing the words "please
+        // compact" would be a model request and would not rewrite the
+        // transcript.
+        self.prompt(session, "/compact").await?;
+        // Wait for the CLI process, so the caller's stats read sees the new
+        // context rather than the pre-compaction frame. A local command is
+        // quick; the cap only exists so a wedged CLI cannot hold the phone's
+        // request forever.
+        for _ in 0..600 {
+            if !self.state().children.contains_key(&session.id) {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        Err(EngineError::upstream(
+            "Claude Code did not finish compacting",
+        ))
+    }
+
     async fn cancel(&self, session: &SessionKey) -> Result<(), EngineError> {
         if session.engine != EngineId::Claude {
             return Err(EngineError::UnknownSession(session.clone()));
         }
+        self.reject_desktop_write(session)?;
         let mut state = self.state();
         let Some(mut child) = state.children.remove(&session.id) else {
             // Nothing running is not a failure.
@@ -1015,6 +1125,24 @@ impl Engine for ClaudeEngine {
     }
 
     async fn answer(&self, id: &str, answer: Answer) -> Result<(), EngineError> {
+        if let Some(session) = self
+            .approvals()
+            .get(id)
+            .and_then(|pending| pending.session.clone())
+        {
+            if self
+                .state()
+                .sessions
+                .get(&session)
+                .and_then(|row| row.source.as_deref())
+                == Some("claude_desktop")
+            {
+                return Err(EngineError::Unsupported {
+                    engine: EngineId::Claude,
+                    feature: "answering a Claude Desktop approval",
+                });
+            }
+        }
         let Some(pending) = self.approvals().remove(id) else {
             return Err(EngineError::upstream(format!("no pending approval {id}")));
         };
@@ -1032,6 +1160,7 @@ impl Engine for ClaudeEngine {
         if session.engine != EngineId::Claude {
             return Err(EngineError::UnknownSession(session.clone()));
         }
+        self.reject_desktop_write(session)?;
         // Claude Code has no live model switch on a running turn: the choice is
         // an argument to the next process. Storing it is honest; pretending it
         // applied now would not be.
@@ -1047,6 +1176,7 @@ impl Engine for ClaudeEngine {
         if session.engine != EngineId::Claude {
             return Err(EngineError::UnknownSession(session.clone()));
         }
+        self.reject_desktop_write(session)?;
         self.state()
             .overrides
             .entry(session.id.clone())
@@ -1078,5 +1208,65 @@ fn kind_slug(kind: ActivityKind) -> &'static str {
         ActivityKind::Command => "command",
         ActivityKind::Output => "output",
         ActivityKind::Tool => "tool",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_desktop_session_refuses_cli_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = ClaudeEngine::new(dir.path(), "claude");
+        let key = SessionKey::new(EngineId::Claude, "s-desktop");
+        {
+            let mut state = engine.state();
+            let mut session = Session::bare(key.clone(), 0);
+            session.source = Some("claude_desktop".to_string());
+            state.sessions.insert(key.id.clone(), session);
+        }
+
+        let prompt = engine.prompt(&key, "hello").await;
+        assert!(matches!(
+            prompt,
+            Err(EngineError::Unsupported {
+                engine: EngineId::Claude,
+                ..
+            })
+        ));
+        let model = engine.set_model(&key, "claude-sonnet").await;
+        assert!(matches!(
+            model,
+            Err(EngineError::Unsupported {
+                engine: EngineId::Claude,
+                ..
+            })
+        ));
+        let permission = engine.set_permission(&key, "acceptEdits").await;
+        assert!(matches!(
+            permission,
+            Err(EngineError::Unsupported {
+                engine: EngineId::Claude,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_cli_session_still_accepts_a_model_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = ClaudeEngine::new(dir.path(), "claude");
+        let key = SessionKey::new(EngineId::Claude, "s-cli");
+        {
+            let mut state = engine.state();
+            state
+                .sessions
+                .insert(key.id.clone(), Session::bare(key.clone(), 0));
+        }
+        engine
+            .set_model(&key, "claude-sonnet")
+            .await
+            .expect("the CLI surface is controllable");
     }
 }

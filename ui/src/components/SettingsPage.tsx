@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type {
   AccountUser,
+  DatasetState,
   Kernel,
   ModelCheck,
   ModelRuntime,
@@ -12,6 +13,7 @@ import { formatGigabytes, formatModelVersion } from '../format'
 import { ChevronIcon, Spinner } from '../icons'
 import { Button } from './ui/button'
 import { Progress } from './ui/progress'
+import { Switch } from './ui/switch'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
 import { Toolbar } from './Toolbar'
 import { ShellSettingsList } from './ShellSettingsList'
@@ -38,6 +40,8 @@ interface SettingsPageProps {
   onThemeChange: (theme: ThemePreference) => void
   kernel: Kernel
   model: ModelState | null
+  /** Whether this install shares turns to improve Mizarllm. */
+  dataset: DatasetState
   /** Re-arm the first-run guide; the window then shows it instead of this page. */
   onRerunOnboarding: () => Promise<void>
 }
@@ -60,6 +64,7 @@ export function SettingsPage({
   onThemeChange,
   kernel,
   model,
+  dataset,
   onRerunOnboarding,
 }: SettingsPageProps) {
   return (
@@ -90,7 +95,7 @@ export function SettingsPage({
                 <span
                   className={cn(
                     'size-2',
-                    serverConnected ? 'bg-ink' : 'mz-border',
+                    serverConnected ? 'bg-fg' : 'border border-fg',
                   )}
                 />
                 {serverConnected ? '已连接' : '未连接'}
@@ -128,6 +133,10 @@ export function SettingsPage({
 
           <Section title="启动与窗口">
             <StartupSection platform={platform} />
+          </Section>
+
+          <Section title="数据与隐私">
+            <PrivacySection kernel={kernel} dataset={dataset} />
           </Section>
 
           <Section title="关于">
@@ -188,8 +197,8 @@ function DeviceList({
               <span
                 className={
                   online.has(device.id)
-                    ? 'size-2 shrink-0 bg-ink'
-                    : 'size-2 shrink-0 mz-border'
+                    ? 'size-2 shrink-0 bg-fg'
+                    : 'size-2 shrink-0 border border-fg'
                 }
               />
               <span className="truncate">{device.name}</span>
@@ -486,6 +495,172 @@ function CheckSummary({
 function StartupSection({ platform }: { platform: DesktopPlatform }) {
   const shell = useShellSettings()
   return <ShellSettingsList shell={shell} platform={platform} />
+}
+
+/**
+ * The anonymous dataset switch.
+ *
+ * Deliberately quiet: no uploaded count and no progress bar. The operator asked
+ * for a background feature, and a number here would either invite anxiety or
+ * turn a privacy choice into a scoreboard. The switch and the sentence about
+ * what cannot be undone are the whole surface.
+ */
+function PrivacySection({
+  kernel,
+  dataset,
+}: {
+  kernel: Kernel
+  dataset: DatasetState
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [enabled, setEnabled] = useState(dataset.enabled)
+  const [projects, setProjects] = useState<string[]>(dataset.excludedProjects)
+  const [draft, setDraft] = useState('')
+
+  useEffect(() => {
+    setEnabled(dataset.enabled)
+  }, [dataset.enabled])
+
+  useEffect(() => {
+    setProjects(dataset.excludedProjects)
+  }, [dataset.excludedProjects])
+
+  async function choose(next: boolean) {
+    setBusy(true)
+    setError(null)
+    // The snapshot polls on a slow cadence; the switch has to answer the click
+    // it just received.
+    setEnabled(next)
+    try {
+      const answer = await kernel.send<DatasetState>({ op: 'dataset_share', enabled: next })
+      setEnabled(answer.enabled)
+    } catch (failure) {
+      setEnabled(!next)
+      setError(failureMessage(failure, '没有记住共享选择'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function exclude(next: string[]) {
+    setBusy(true)
+    setError(null)
+    try {
+      const answer = await kernel.send<DatasetState>({
+        op: 'dataset_exclude',
+        projects: next,
+      })
+      setProjects(answer.excludedProjects)
+      setDraft('')
+    } catch (failure) {
+      setError(failureMessage(failure, '没有记住排除的项目'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function addProject() {
+    const name = draft.trim()
+    if (name === '' || projects.some((project) => project.toLowerCase() === name.toLowerCase())) {
+      setDraft('')
+      return
+    }
+    void exclude([...projects, name])
+  }
+
+  return (
+    <div className="mz-border">
+      <div className="flex items-start justify-between gap-6 px-4 py-3">
+        <div className="min-w-0">
+          <div className="text-[12px] text-fg">匿名共享会话数据</div>
+          <p className="mt-0.5 text-[12px] leading-5 text-muted">
+            共享最近 12 个月的会话轮次（包括已归档的），上传前会在本机去掉账户、设备名、
+            路径、邮箱和密钥。服务器不把数据与你的账户关联，不公开、不出售，只用于训练
+            Mizarllm。
+          </p>
+        </div>
+        <Switch
+          className="mt-0.5"
+          label="匿名共享会话数据"
+          checked={enabled}
+          disabled={busy}
+          onCheckedChange={(next) => void choose(next)}
+        />
+      </div>
+      <div className="mz-divide-t flex items-center justify-between gap-4 px-4 py-2">
+        <span className="text-[12px] text-muted">
+          {enabled ? '已开启：后台匿名分享中' : '已关闭：不再上传'}
+          {dataset.since === null ? '' : ` · ${relative(dataset.since)}`}
+        </span>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() =>
+            void kernel.send({
+              op: 'open_external',
+              url: 'https://dsh-mizar.shirazu-nagisa.com/privacy/',
+            })
+          }
+        >
+          查看隐私政策
+        </Button>
+      </div>
+      <div className="mz-divide-t px-4 py-3">
+        <div className="text-[12px] text-fg">永不共享的项目</div>
+        <p className="mt-0.5 text-[12px] leading-5 text-muted">
+          按项目名匹配会话的工作目录；这些项目的轮次不会上传。
+        </p>
+        {projects.length === 0 ? null : (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {projects.map((project) => (
+              <span key={project} className="mz-border flex items-center gap-1 px-2 py-0.5 text-[12px]">
+                {project}
+                <button
+                  type="button"
+                  aria-label={`不再排除 ${project}`}
+                  disabled={busy}
+                  onClick={() => void exclude(projects.filter((item) => item !== project))}
+                  className="text-muted outline-none hover:text-fg"
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+        <div className="mt-2 flex gap-2">
+          <input
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                addProject()
+              }
+            }}
+            placeholder="输入项目名，例如 my-secret-project"
+            spellCheck={false}
+            className="h-8 min-w-0 flex-1 mz-border bg-transparent px-2 text-[12px] text-fg outline-none"
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy || draft.trim() === ''}
+            onClick={addProject}
+          >
+            添加
+          </Button>
+        </div>
+      </div>
+      <p className="mz-divide-t px-4 py-2 text-[12px] leading-5 text-muted">
+        关闭会立即停止上传。已上传的数据已经无法与你的账户对应，不能单独删除。
+      </p>
+      {error === null ? null : (
+        <p className="mz-divide-t bg-ink px-4 py-1.5 text-[12px] leading-5 text-bg">{error}</p>
+      )}
+    </div>
+  )
 }
 
 /**

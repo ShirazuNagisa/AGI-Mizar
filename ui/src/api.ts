@@ -34,6 +34,11 @@ export interface EngineStatus {
   available: boolean
   /** Whether the operator picked it and its dependencies are in place. */
   configured: boolean
+  /**
+   * The lamp: enabled here and live now. DSH is live while its plugin is
+   * attached; Claude/Codex only while a turn is running.
+   */
+  engaged: boolean
   capabilities: Capabilities
   detail: string | null
   sessions: number
@@ -107,6 +112,8 @@ export interface Session {
   running: boolean
   parent: string | null
   origin: string | null
+  /** `claude_desktop` / `codex_desktop`; null for the CLI surface. */
+  source: string | null
   turns: number
   /** `null` means this engine cannot say, which is not the same as empty. */
   context: ContextPressure | null
@@ -225,6 +232,47 @@ export interface DeviceStatus {
   lastSeenMs: number
 }
 
+/** What this install knows about the DSH helper plugin. */
+export interface DshPluginView {
+  /** The version in the DSH profile, when installed. */
+  installed: string | null
+  /** The newest version npm published, once a check succeeded. */
+  latest: string | null
+  /** The oldest plugin version this app speaks to. */
+  minimum: string
+  /** Whether npm has a newer, compatible release. */
+  updateAvailable: boolean
+  /** The DSH profile the plugin lives (or would live) in. */
+  profile: string
+  /** Whether a usable `dsh` command was found. */
+  cli: boolean
+  /** Why the last npm check failed. */
+  error: string | null
+  /** Epoch milliseconds of the last successful check. */
+  lastChecked: number | null
+}
+
+export interface DependencyItem {
+  id: string
+  label: string
+  /** `ok`, `missing`, `outdated`, or `unknown`. */
+  status: 'ok' | 'missing' | 'outdated' | 'unknown'
+  detail: string
+  /** What the one-click repair would do, when it can. */
+  fix: string | null
+}
+
+export interface DependencyReport {
+  engine: EngineId
+  ok: boolean
+  summary: string
+  items: DependencyItem[]
+  /** What a repair changed; empty for a read-only check. */
+  changed: string[]
+  /** Why a repair could not finish. */
+  error: string | null
+}
+
 export interface StateSnapshot {
   version: string
   /** `macos`, `windows` or `linux`: which machine this window draws for. */
@@ -237,6 +285,21 @@ export interface StateSnapshot {
   onboarding: OnboardingState
   /** What model this install judges turns with, and whether it is running. */
   model: ModelState
+  /** Whether this install shares turns to improve Mizarllm. */
+  dataset: DatasetState
+  /** The DSH helper plugin's version, and whether npm has a newer one. */
+  dshPlugin: DshPluginView
+}
+
+/** The operator's answer about anonymous session sharing. */
+export interface DatasetState {
+  enabled: boolean
+  /** The consent copy version; `0` means this machine was never asked. */
+  policyVersion: number
+  /** When the answer last changed, epoch milliseconds. */
+  since: number | null
+  /** Project names whose turns are never shared. */
+  excludedProjects: string[]
 }
 
 export interface ActivityEntry {
@@ -315,6 +378,8 @@ export type Command =
   | { op: 'state' }
   | { op: 'messages'; session: string; limit?: number; before?: number }
   | { op: 'prompt'; session: string; text: string }
+  | { op: 'steer'; session: string; text: string }
+  | { op: 'fork'; session: string; at_seq: number }
   | { op: 'cancel'; session: string }
   | { op: 'answer'; id: string; outcome?: string; answers?: unknown[] }
   | { op: 'set_model'; session: string; model: string }
@@ -355,8 +420,14 @@ export type Command =
   | { op: 'model_rollback' }
   | { op: 'engine_rescan' }
   | { op: 'engine_configure'; engine: EngineId; enabled: boolean }
+  | { op: 'dependencies'; engine: EngineId }
+  | { op: 'dependencies_repair'; engine: EngineId }
+  | { op: 'dsh_plugin_check' }
+  | { op: 'dsh_plugin_update' }
   | { op: 'onboarding_complete' }
   | { op: 'onboarding_reset' }
+  | { op: 'dataset_share'; enabled: boolean }
+  | { op: 'dataset_exclude'; projects: string[] }
   | { op: 'ping' }
 
 export interface ApiError {
@@ -380,6 +451,7 @@ export type ApiEvent =
   | { type: 'model_progress'; download: ModelDownload }
   | { type: 'model_changed'; model: ModelState }
   | { type: 'onboarding_changed'; done: boolean }
+  | { type: 'dsh_plugin_changed'; plugin: DshPluginView }
   | { type: 'notice'; level: string; message: string }
 
 /** The token the shell put in this page's URL. */

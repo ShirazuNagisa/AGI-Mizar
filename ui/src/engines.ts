@@ -8,12 +8,24 @@ import type { EngineId } from './api'
  * the two screens cannot drift.
  */
 
-/** The plugin the desktop host speaks to inside DSH. */
+/**
+ * The plugin the desktop host speaks to inside DSH.
+ *
+ * Kept in step with `DSH_PLUGIN_MIN_VERSION` in `agi-protocol/src/api.rs`: the
+ * kernel uses its copy to decide whether an installed plugin is compatible and
+ * the window uses this one before the first snapshot arrives.
+ */
 export const DSH_PLUGIN_VERSION = '0.9.0'
 
-/** What a person pastes into the DSH terminal to add it. */
+/**
+ * What a person pastes into the DSH terminal to add it.
+ *
+ * The same npm package and profile the one-click install drives; a manual
+ * fallback that installed from a GitHub tag would be a second, differently
+ * upgraded copy of the plugin.
+ */
 export const DSH_PLUGIN_COMMAND =
-  'dsh plugin --profile desktop add github:ShirazuNagisa/DSH-Mizar#0.9.0'
+  'dsh plugin --profile desktop add dsh-mizar@0.9.0'
 
 /** One line each: what to install before this window can use the agent. */
 export const ENGINE_INSTALL_HINTS: Record<EngineId, string> = {

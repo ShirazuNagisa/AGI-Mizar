@@ -124,6 +124,18 @@ pub trait Engine: Send + Sync {
     /// Every session this engine currently lists.
     async fn sessions(&self) -> Result<Vec<Session>, EngineError>;
 
+    /// Sessions the engine keeps but no longer lists, for the historical
+    /// dataset backfill.
+    ///
+    /// `sessions()` is the operator's live list: an archived conversation is
+    /// deliberately absent from it. The default is empty because an adapter
+    /// that has no archive cannot invent one; an adapter that does (Codex)
+    /// overrides this with the same query it uses for the live list, asking for
+    /// the archived side.
+    async fn archived_sessions(&self) -> Result<Vec<Session>, EngineError> {
+        Ok(Vec::new())
+    }
+
     /// A page of records, newest last, at most `limit` of them.
     ///
     /// `before` pages backwards: only records with a smaller `seq`.
@@ -137,8 +149,26 @@ pub trait Engine: Send + Sync {
     /// Send a prompt.
     async fn prompt(&self, session: &SessionKey, text: &str) -> Result<(), EngineError>;
 
+    /// Add a message to a turn that is already running.
+    ///
+    /// Not every engine has a separate steer channel; the default reports the
+    /// gap rather than silently starting a second turn.
+    async fn steer(&self, _session: &SessionKey, _text: &str) -> Result<(), EngineError> {
+        Err(self.unsupported("STEER_UNSUPPORTED"))
+    }
+
     /// Stop the running turn.
     async fn cancel(&self, session: &SessionKey) -> Result<(), EngineError>;
+
+    /// Compact this session's context using the engine's own mechanism.
+    ///
+    /// This is deliberately not a prompt shaped like `/compact`: DSH runs its
+    /// compaction command, Claude Code runs its local slash command, and Codex
+    /// asks its app server for a compaction thread. An engine that has no such
+    /// mechanism reports `UNSUPPORTED`.
+    async fn compact(&self, _session: &SessionKey) -> Result<(), EngineError> {
+        Err(self.unsupported("COMPACT_UNSUPPORTED"))
+    }
 
     /// Answer a pending interaction.
     async fn answer(&self, id: &str, answer: Answer) -> Result<(), EngineError>;

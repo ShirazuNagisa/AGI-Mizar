@@ -16,7 +16,9 @@ agi-engine-claude = { workspace = true }
 agi-engine-dsh = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
+chrono = { workspace = true }
 reqwest = { workspace = true }
+regex = { workspace = true }
 sha2 = { workspace = true }
 futures-util = { workspace = true }
 serde = { workspace = true }

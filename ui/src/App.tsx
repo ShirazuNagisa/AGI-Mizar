@@ -3,17 +3,19 @@ import {
   Kernel,
   type AccountUser,
   type ApiEvent,
+  type DshPluginView,
   type EngineId,
   type StateSnapshot,
   type UsageOverview,
 } from './api'
-import { AGENTS, type Page } from './navigation'
+import { agentTab, type Page } from './navigation'
 import { applyPlatform, platformOf } from './platform'
 import { applyTheme, onSystemThemeChange, storeTheme, storedTheme, type ThemePreference } from './theme'
 import { OledScope } from './lib/oled'
 import { Sidebar } from './components/Sidebar'
 import { HomePage } from './components/HomePage'
 import { AgentPage } from './components/AgentPage'
+import { DshPluginUpdateDialog } from './components/DshPluginUpdateDialog'
 import { LoginPage } from './components/LoginPage'
 import { Onboarding } from './components/Onboarding'
 import { SettingsPage } from './components/SettingsPage'
@@ -40,6 +42,11 @@ export function App() {
   const [banner, setBanner] = useState<string | null>(null)
   const [serverConnected, setServerConnected] = useState(false)
   const [onlineDesktops, setOnlineDesktops] = useState<Set<string>>(new Set())
+  // The DSH plugin update popup. The release it was dismissed for is kept in a
+  // ref, not state: forgetting it on the next snapshot poll would reopen the
+  // dialog every five seconds.
+  const [pluginPrompt, setPluginPrompt] = useState<DshPluginView | null>(null)
+  const pluginDismissed = useRef<string | null>(null)
 
   // The window's appearance is a class; following the system means listening for
   // macOS changing its mind while this window stays open.
@@ -192,11 +199,45 @@ export function App() {
               current === null ? current : { ...current, onboarding: { done: event.done } },
             )
             return
+          case 'dsh_plugin_changed':
+            setSnapshot((current) =>
+              current === null ? current : { ...current, dshPlugin: event.plugin },
+            )
+            return
           default:
             return
         }
       },
       () => setBanner('与内核的连接已断开'),
+    )
+  }, [])
+
+  // The background check lands a few seconds after launch and then every six
+  // hours. Only a release newer than the one on disk opens the dialog, and only
+  // for a person who is actually using DSH: a machine that has never configured
+  // DSH gets the button on the agent page, not a popup at every launch.
+  useEffect(() => {
+    const plugin = snapshot?.dshPlugin
+    if (!plugin || !plugin.updateAvailable || snapshot?.onboarding?.done === false) {
+      // Do not close an open dialog here: after a successful update the event
+      // arrives before the person has read the result, and the dialog owns its
+      // own "done" state. It closes when they dismiss it.
+      return
+    }
+    const dsh = snapshot?.engines.find((engine) => engine.engine === 'dsh')
+    if (plugin.installed === null && dsh?.configured !== true) return
+    if (pluginDismissed.current === (plugin.latest ?? '')) return
+    setPluginPrompt((current) => current ?? plugin)
+  }, [snapshot?.dshPlugin, snapshot?.engines, snapshot?.onboarding?.done])
+
+  const dismissPluginPrompt = useCallback(() => {
+    pluginDismissed.current = pluginPrompt?.latest ?? ''
+    setPluginPrompt(null)
+  }, [pluginPrompt])
+
+  const pluginUpdated = useCallback((plugin: DshPluginView) => {
+    setSnapshot((current) =>
+      current === null ? current : { ...current, dshPlugin: plugin },
     )
   }, [])
 
@@ -415,6 +456,7 @@ export function App() {
         serverConnected={serverConnected}
         engines={snapshot.engines}
         model={snapshot.model ?? null}
+        dataset={snapshot.dataset ?? { enabled: false, policyVersion: 0, since: null, excludedProjects: [] }}
         platform={platform}
         accountBusy={accountBusy}
         accountError={accountError}
@@ -451,13 +493,19 @@ export function App() {
           <HomePage overview={usage} loading={usageLoading} error={usageError} />
         ) : null}
         {page.kind === 'agent' ? (
-          <AgentPage
-            engine={page.engine}
-            name={AGENTS.find((agent) => agent.engine === page.engine)?.name ?? page.engine}
-            status={snapshot?.engines.find((entry) => entry.engine === page.engine)}
-            kernel={kernel}
-            onReconnect={reconnect}
-          />
+          (() => {
+            const tab = agentTab(page.tab)
+            return (
+              <AgentPage
+                tab={tab}
+                status={snapshot?.engines.find((entry) => entry.engine === tab.engine)}
+                kernel={kernel}
+                plugin={snapshot?.dshPlugin ?? null}
+                sessions={snapshot?.sessions ?? []}
+                onReconnect={reconnect}
+              />
+            )
+          })()
         ) : null}
         {page.kind === 'login' ? (
           <LoginPage
@@ -484,11 +532,20 @@ export function App() {
             onThemeChange={chooseTheme}
             kernel={kernel}
             model={snapshot?.model ?? null}
+            dataset={snapshot?.dataset ?? { enabled: false, policyVersion: 0, since: null, excludedProjects: [] }}
             onRerunOnboarding={rerunOnboarding}
           />
         ) : null}
       </main>
     </div>
+    {pluginPrompt === null ? null : (
+      <DshPluginUpdateDialog
+        plugin={pluginPrompt}
+        kernel={kernel}
+        onDismiss={dismissPluginPrompt}
+        onUpdated={pluginUpdated}
+      />
+    )}
     </OledScope>
   )
 }
