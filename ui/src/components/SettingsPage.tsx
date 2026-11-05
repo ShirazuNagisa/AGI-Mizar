@@ -6,11 +6,10 @@ import type {
   ModelCheck,
   ModelRuntime,
   ModelState,
-  PairingView,
 } from '../api'
 import { THEMES, type ThemePreference } from '../theme'
 import { formatGigabytes, formatModelVersion } from '../format'
-import { ChevronIcon, Spinner } from '../icons'
+import { Spinner } from '../icons'
 import { Button } from './ui/button'
 import { Progress } from './ui/progress'
 import { Switch } from './ui/switch'
@@ -51,8 +50,6 @@ interface SettingsPageProps {
  *
  * Device lists are read-only and empty until the account service exists — the
  * page says so rather than drawing devices this computer cannot know about.
- * The pairing panel is the one temporary thing here: until accounts arrive it
- * is the only way a phone can attach, so it lives under 开发者.
  */
 export function SettingsPage({
   version,
@@ -143,7 +140,6 @@ export function SettingsPage({
             <AboutSection version={version} />
           </Section>
 
-          <DeveloperPairing kernel={kernel} />
 
           <RerunGuide onRerun={onRerunOnboarding} />
         </div>
@@ -787,63 +783,6 @@ function UpdateSummary({
     return <span className="text-fg">可更新到 {status.latest ?? '新版本'}</span>
   }
   return <span className="text-muted">已是最新</span>
-}
-
-/** The temporary way a phone attaches, until accounts replace it. */
-function DeveloperPairing({ kernel }: { kernel: Kernel }) {
-  const [open, setOpen] = useState(false)
-  const [view, setView] = useState<PairingView | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  async function reveal() {
-    setOpen(true)
-    setError(null)
-    try {
-      setView(await kernel.send<PairingView>({ op: 'pairing', refresh: true }))
-    } catch (failure) {
-      setError(failure instanceof Error ? failure.message : '配对码读取失败')
-    }
-  }
-
-  return (
-    <section className="mb-6">
-      <button
-        type="button"
-        onClick={() => (open ? setOpen(false) : void reveal())}
-        className="flex items-center gap-1.5 text-[12px] text-muted hover:text-fg"
-      >
-        <ChevronIcon size={13} className={open ? '' : '-rotate-90'} />
-        开发者
-      </button>
-      {open ? (
-        <div className="mt-2 mz-border p-4">
-          <p className="text-[12px] leading-5 text-muted">
-            账户体系上线前的临时入口：手机扫码配对这台电脑。上线后删除。
-          </p>
-          {error === null ? null : <p className="mt-2 text-[12px] text-muted">{error}</p>}
-          {view === null ? null : (
-            <div className="mt-3 flex items-center gap-4">
-              {view.svg === null ? null : (
-                <div
-                  className="size-[132px] mz-border bg-white p-2"
-                  dangerouslySetInnerHTML={{ __html: view.svg }}
-                />
-              )}
-              <div>
-                <div className="selectable text-[12px] font-semibold tracking-wide text-fg">
-                  {view.code}
-                </div>
-                <p className="mt-1 text-[12px] text-muted">在 Mizar 手机端扫码或输入此码</p>
-                <Button className="mt-2" size="sm" variant="outline" onClick={() => void reveal()}>
-                  换一个码
-                </Button>
-              </div>
-            </div>
-          )}
-        </div>
-      ) : null}
-    </section>
-  )
 }
 
 /** The way back into the first-run guide, for anyone who skipped past a step. */

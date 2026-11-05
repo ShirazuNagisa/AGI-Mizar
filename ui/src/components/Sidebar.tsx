@@ -138,7 +138,17 @@ export function Sidebar({ engines, page, serverConnected, loggedIn, onNavigate }
               contentClassName={ROW_LABEL}
             >
               <AgentMark tab={tab} />
-              <span className="flex-1 truncate text-[12px]">{tab.name}</span>
+              <span className="min-w-0 truncate text-[12px]">{tab.name}</span>
+              {tab.engine === 'dsh' ? null : (
+                <span
+                  className={cn(
+                    'shrink-0 text-[9px] leading-none',
+                    active ? 'text-bg/70' : 'text-muted',
+                  )}
+                >
+                  （实验性）
+                </span>
+              )}
               <Lamp state={engaged ? 'on' : installed ? 'off' : 'absent'} label={lamp} />
             </WipeButton>
           )

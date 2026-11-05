@@ -39,8 +39,10 @@
   --border: #2a2c30;
   --fg: #f2f3f5;
   --muted: #9aa0a8;
-  --accent: #3ccbf4;
-  --accent-soft: rgb(60 203 244 / 0.14);
+  /* Dark mode's accent is ink-white: selected rows and primary actions are
+     white with a dark label, not a blue fill. */
+  --accent: #ffffff;
+  --accent-soft: rgb(255 255 255 / 0.14);
   --heat-0: #1c1e21;
   --ink: var(--accent);
 }
@@ -315,6 +317,20 @@ html:not([data-theme="oled"]) .bg-ink {
 
 html:not([data-theme="oled"]) .text-bg {
   color: #08161c;
+}
+
+/* Icons and lamps that use the foreground colour would disappear on the white
+   accent fill, so invert them while they sit inside `.bg-ink`. */
+html:not([data-theme="oled"]) .bg-ink .bg-fg {
+  background-color: var(--bg);
+}
+
+html:not([data-theme="oled"]) .bg-ink .border-fg {
+  border-color: var(--bg);
+}
+
+html:not([data-theme="oled"]) .bg-ink .text-muted {
+  color: color-mix(in srgb, #08161c 68%, transparent);
 }
 
 /* ── Type size, per theme ─────────────────────────────────────────────────

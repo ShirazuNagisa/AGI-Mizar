@@ -41,8 +41,8 @@ export function Switch({ checked, onCheckedChange, disabled, label, id, classNam
       >
         <span
           className={cn(
-            'size-4 rounded-full bg-white shadow-sm transition-transform',
-            checked ? 'translate-x-[18px]' : 'translate-x-[2px]',
+            'size-4 rounded-full shadow-sm transition-transform',
+            checked ? 'translate-x-[18px] bg-[#08161c]' : 'translate-x-[2px] bg-white',
           )}
         />
       </button>
