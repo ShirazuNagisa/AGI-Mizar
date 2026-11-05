@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { DeviceStatus, EngineStatus, Kernel, StateSnapshot } from '../api'
 import { ENGINE_MARKS, GearIcon, PowerIcon } from '../icons'
-import { AGENTS } from '../navigation'
+import { AGENT_TABS } from '../navigation'
 import { applyPlatform } from '../platform'
 import { cn } from '../lib/utils'
 
@@ -9,8 +9,8 @@ import { cn } from '../lib/utils'
  * The tray page.
  *
  * A separate window, not a native menu: the menu bar draws its own rows, and
- * these six lines need an icon on the left, a lamp pinned to the right and a
- * width that hugs the text. A native menu can do none of the three.
+ * these rows need an icon on the left, a lamp pinned to the right and a width
+ * that hugs the text. A native menu can do none of the three.
  *
  * It is the same React bundle, served from the kernel with `?panel=tray`, so it
  * reads state the way the window does.
@@ -58,15 +58,23 @@ export function TrayPanel({ kernel }: { kernel: Kernel }) {
   return (
     <div ref={root} className="flex w-full flex-col gap-1.5 bg-surface p-1.5 text-fg">
       <div className="flex flex-col">
-        {AGENTS.map(({ engine, name }) => {
-          const status = engines.find((entry) => entry.engine === engine)
+        {AGENT_TABS.map((tab) => {
+          const status = engines.find((entry) => entry.engine === tab.engine)
           // Same rule as the sidebar: enabled here and live now, not merely
           // "the adapter could accept a prompt".
           const engaged = status?.engaged === true
-          const Mark = ENGINE_MARKS[engine]
+          const Mark = ENGINE_MARKS[tab.engine]
+          const label = tab.engine === 'dsh' ? tab.name : `${tab.name}（实验性）`
           return (
-            <Row key={engine} label={name} connected={engaged}>
-              <Mark size={15} className="shrink-0 text-muted" />
+            <Row key={tab.id} label={label} connected={engaged}>
+              <span className="relative inline-flex size-[15px] shrink-0 items-center justify-center text-muted">
+                <Mark size={15} />
+                {tab.surface === 'cli' ? (
+                  <span className="absolute -bottom-1 -right-1 font-mono text-[5px] font-bold leading-none tracking-[-1px]">
+                    &gt;_
+                  </span>
+                ) : null}
+              </span>
             </Row>
           )
         })}

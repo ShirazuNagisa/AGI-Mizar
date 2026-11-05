@@ -163,8 +163,11 @@ export function Sidebar({ engines, page, serverConnected, loggedIn, onNavigate }
           className="flex h-8 items-center text-left text-[12px]"
           contentClassName={cn(ROW_LABEL, 'gap-2')}
         >
-          <Lamp state={serverConnected ? 'on' : 'off'} label={serverConnected ? '已连接' : '未连接'} />
-          {serverConnected ? '已连接' : '未连接'}
+          <Lamp
+            state={serverConnected ? 'on' : 'off'}
+            label={serverConnected ? '已连接到服务器' : '未连接'}
+          />
+          {serverConnected ? '已连接到服务器' : '未连接'}
         </WipeButton>
 
         <WipeButton

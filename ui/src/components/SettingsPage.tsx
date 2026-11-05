@@ -137,7 +137,7 @@ export function SettingsPage({
           </Section>
 
           <Section title="关于">
-            <AboutSection version={version} />
+            <AboutSection version={version} kernel={kernel} />
           </Section>
 
 
@@ -666,7 +666,7 @@ function PrivacySection({
  * how this app was installed; the last result is read on open so the row does
  * not start blank every time the page is visited.
  */
-function AboutSection({ version }: { version: string }) {
+function AboutSection({ version, kernel }: { version: string; kernel: Kernel }) {
   const available = shellAvailable()
   const [status, setStatus] = useState<UpdateStatus | null>(null)
   const [checking, setChecking] = useState(false)
@@ -722,6 +722,19 @@ function AboutSection({ version }: { version: string }) {
       <div className="divide-y divide-ink">
         <AboutRow label="版本" value={version === '' ? '—' : version} />
         <AboutRow label="构建" value={status === null || status.current === '' ? '—' : status.current} />
+        <button
+          type="button"
+          onClick={() =>
+            void kernel.send({
+              op: 'open_external',
+              url: 'https://github.com/ShirazuNagisa/AGI-Mizar',
+            })
+          }
+          className="flex w-full items-center justify-between gap-4 px-4 py-2.5 text-left text-[12px] outline-none hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-accent/60"
+        >
+          <span className="shrink-0 text-muted">查看源代码</span>
+          <span className="selectable truncate text-fg">GitHub ↗</span>
+        </button>
         <div className="flex items-start justify-between gap-4 px-4 py-2.5">
           <div className="min-w-0 text-[12px] leading-5">
             <UpdateSummary checking={checking} status={status} error={error} />
