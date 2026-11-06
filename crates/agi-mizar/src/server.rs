@@ -676,7 +676,11 @@ impl MizarServer {
             let mut states = server.core.subscribe_states();
             tokio::spawn(async move {
                 let mut tracker = crate::activity::Tracker::default();
-                let mut retry = false;
+                // Start with one reconciliation owed: a session may already be
+                // running when this process starts, before any SessionUpdated
+                // event has reached this loop. The first tick publishes that
+                // card; subsequent ticks only run after a failed publish.
+                let mut retry = true;
                 let mut reconcile = tokio::time::interval(std::time::Duration::from_secs(10));
                 reconcile.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
