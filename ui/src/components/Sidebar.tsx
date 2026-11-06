@@ -1,6 +1,7 @@
+import { useState } from 'react'
 import type { EngineStatus } from '../api'
 import { AGENT_TABS, type AgentTab, type Page, samePage } from '../navigation'
-import { ENGINE_MARKS, GearIcon, PersonIcon } from '../icons'
+import { ENGINE_MARKS, GearIcon } from '../icons'
 import { cn } from '../lib/utils'
 import { isMac } from '../platform'
 import { WipeButton } from './ui/wipe'
@@ -10,8 +11,9 @@ interface SidebarProps {
   engines: EngineStatus[]
   page: Page
   serverConnected: boolean
-  loggedIn: boolean
   onNavigate: (page: Page) => void
+  /** Developer-only: put the first-run guide back on screen. */
+  onRerunOnboarding: () => Promise<void>
 }
 
 /**
@@ -88,8 +90,27 @@ const ROW_LABEL = 'flex w-full items-center gap-2.5 px-2'
  * Only the current page is filled. Inverting every row would turn eight
  * navigation items into eight boxes.
  */
-export function Sidebar({ engines, page, serverConnected, loggedIn, onNavigate }: SidebarProps) {
+export function Sidebar({
+  engines,
+  page,
+  serverConnected,
+  onNavigate,
+  onRerunOnboarding,
+}: SidebarProps) {
   const oled = useIsOled()
+  const [rerunning, setRerunning] = useState(false)
+
+  async function rerunGuide() {
+    if (rerunning) return
+    setRerunning(true)
+    try {
+      await onRerunOnboarding()
+    } catch (error) {
+      console.error('could not rerun onboarding', error)
+    } finally {
+      setRerunning(false)
+    }
+  }
   return (
     <aside
       className={cn(
@@ -171,18 +192,6 @@ export function Sidebar({ engines, page, serverConnected, loggedIn, onNavigate }
         </WipeButton>
 
         <WipeButton
-          onClick={() => onNavigate({ kind: 'login' })}
-          className={cn(
-            'flex h-9 items-center text-left text-[12px]',
-            page.kind === 'login' && 'bg-ink text-bg',
-          )}
-          contentClassName={ROW_LABEL}
-        >
-          <PersonIcon size={17} />
-          <span className="flex-1">{loggedIn ? '账户' : '登录'}</span>
-        </WipeButton>
-
-        <WipeButton
           onClick={() => onNavigate({ kind: 'settings' })}
           className={cn(
             'flex h-9 items-center text-left text-[12px]',
@@ -192,6 +201,17 @@ export function Sidebar({ engines, page, serverConnected, loggedIn, onNavigate }
         >
           <GearIcon size={17} />
           <span className="flex-1">设置</span>
+        </WipeButton>
+
+        {/* Developer-only for now: the first-run guide is not a product setting.
+            It will be removed with the guide's production release. */}
+        <WipeButton
+          onClick={() => void rerunGuide()}
+          disabled={rerunning}
+          className="flex h-8 items-center text-left text-[11px] text-muted"
+          contentClassName={cn(ROW_LABEL, 'gap-2')}
+        >
+          <span className="flex-1">{rerunning ? '正在重新进入…' : '重新运行新手引导'}</span>
         </WipeButton>
       </div>
     </aside>

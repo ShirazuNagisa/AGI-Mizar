@@ -16,6 +16,8 @@ import { Switch } from './ui/switch'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
 import { Toolbar } from './Toolbar'
 import { ShellSettingsList } from './ShellSettingsList'
+import { RemoteAgentSettings } from './RemoteAgentSettings'
+import { LoginPage } from './LoginPage'
 import { useShellSettings } from '../lib/use-shell-settings'
 import type { DesktopPlatform } from '../platform'
 import {
@@ -41,8 +43,14 @@ interface SettingsPageProps {
   model: ModelState | null
   /** Whether this install shares turns to improve Mizarllm. */
   dataset: DatasetState
-  /** Re-arm the first-run guide; the window then shows it instead of this page. */
-  onRerunOnboarding: () => Promise<void>
+  accountBusy: boolean
+  accountError: string | null
+  onLogin: (identifier: string, password: string) => Promise<void>
+  onLogout: () => Promise<void>
+  onGithubStart: () => Promise<void>
+  onGithubExchange: (handoff: string) => Promise<void>
+  onAppleStart: () => Promise<void>
+  onAppleExchange: (handoff: string) => Promise<void>
 }
 
 /**
@@ -62,87 +70,168 @@ export function SettingsPage({
   kernel,
   model,
   dataset,
-  onRerunOnboarding,
+  accountBusy,
+  accountError,
+  onLogin,
+  onLogout,
+  onGithubStart,
+  onGithubExchange,
+  onAppleStart,
+  onAppleExchange,
 }: SettingsPageProps) {
+  const [tab, setTab] = useState<SettingsTabId>('account')
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
       <Toolbar title="设置" />
+      <SettingsTabs tab={tab} onChange={setTab} />
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-[720px] px-8 py-6">
-          <Section title="设备">
-            <Group title="AGI Mizar 桌面端">
-              <DeviceList
-                devices={account?.devices.filter((device) => device.platform !== 'ios') ?? []}
-                online={onlineDesktops}
-                empty={account === null ? '登录后可查看同一账户下的桌面端' : '这个账户下还没有桌面端'}
-              />
-            </Group>
-            <Group title="Mizar 手机端">
-              <DeviceList
-                devices={account?.devices.filter((device) => device.platform === 'ios') ?? []}
-                online={new Set()}
-                empty={account === null ? '登录后可查看同一账户下的手机' : '这个账户下还没有手机'}
-              />
-            </Group>
-          </Section>
+          {tab === 'account' ? (
+            <LoginPage
+              embedded
+              account={account}
+              serverConnected={serverConnected}
+              busy={accountBusy}
+              error={accountError}
+              onLogin={onLogin}
+              onLogout={onLogout}
+              onGithubStart={onGithubStart}
+              onGithubExchange={onGithubExchange}
+              onAppleStart={onAppleStart}
+              onAppleExchange={onAppleExchange}
+            />
+          ) : null}
 
-          <Section title="连接状态">
-            <div className="flex items-center justify-between mz-border px-4 py-3">
-              <span className="flex items-center gap-2 text-[12px] text-fg">
-                <span
-                  className={cn(
-                    'size-2',
-                    serverConnected ? 'bg-fg' : 'border border-fg',
-                  )}
-                />
-                {serverConnected ? '已连接' : '未连接'}
-              </span>
-              <span className="text-[12px] text-muted">
-                {account === null ? '登录后自动连接' : '中继由账户决定'}
-              </span>
-            </div>
-          </Section>
+          {tab === 'devices' ? (
+            <>
+              <Section title="设备">
+                <Group title="AGI Mizar 桌面端">
+                  <DeviceList
+                    devices={account?.devices.filter((device) => device.platform !== 'ios') ?? []}
+                    online={onlineDesktops}
+                    empty={account === null ? '登录后可查看同一账户下的桌面端' : '这个账户下还没有桌面端'}
+                  />
+                </Group>
+                <Group title="Mizar 手机端">
+                  <DeviceList
+                    devices={account?.devices.filter((device) => device.platform === 'ios') ?? []}
+                    online={new Set()}
+                    empty={account === null ? '登录后可查看同一账户下的手机' : '这个账户下还没有手机'}
+                  />
+                </Group>
+              </Section>
 
-          <Section title="模型">
-            <ModelSection kernel={kernel} model={model} />
-          </Section>
+              <Section title="连接状态">
+                <div className="flex items-center justify-between mz-border px-4 py-3">
+                  <span className="flex items-center gap-2 text-[12px] text-fg">
+                    <span
+                      className={cn(
+                        'size-2',
+                        serverConnected ? 'bg-fg' : 'border border-fg',
+                      )}
+                    />
+                    {serverConnected ? '已连接' : '未连接'}
+                  </span>
+                  <span className="text-[12px] text-muted">
+                    {account === null ? '登录后自动连接' : '中继由账户决定'}
+                  </span>
+                </div>
+              </Section>
+            </>
+          ) : null}
 
-          <Section title="外观">
-            <div className="flex items-center justify-between mz-border px-4 py-2.5">
-              <span className="text-[12px] text-fg">主题</span>
-              <Select
-                value={theme}
-                onValueChange={(value) => onThemeChange(value as ThemePreference)}
-              >
-                <SelectTrigger aria-label="主题">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {THEMES.map((option) => (
-                    <SelectItem key={option.value} value={option.value}>
-                      {option.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          </Section>
+          {tab === 'remote' ? <RemoteAgentSettings kernel={kernel} /> : null}
 
-          <Section title="启动与窗口">
-            <StartupSection platform={platform} />
-          </Section>
+          {tab === 'approval' ? (
+            <Section title="审批模型">
+              <ModelSection kernel={kernel} model={model} />
+            </Section>
+          ) : null}
 
-          <Section title="数据与隐私">
-            <PrivacySection kernel={kernel} dataset={dataset} />
-          </Section>
+          {tab === 'appearance' ? (
+            <Section title="外观">
+              <div className="flex items-center justify-between mz-border px-4 py-2.5">
+                <span className="text-[12px] text-fg">主题</span>
+                <Select
+                  value={theme}
+                  onValueChange={(value) => onThemeChange(value as ThemePreference)}
+                >
+                  <SelectTrigger aria-label="主题">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {THEMES.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </Section>
+          ) : null}
 
-          <Section title="关于">
-            <AboutSection version={version} kernel={kernel} />
-          </Section>
+          {tab === 'startup' ? (
+            <Section title="启动与窗口">
+              <StartupSection platform={platform} />
+            </Section>
+          ) : null}
 
+          {tab === 'privacy' ? (
+            <Section title="数据与隐私">
+              <PrivacySection kernel={kernel} dataset={dataset} />
+            </Section>
+          ) : null}
 
-          <RerunGuide onRerun={onRerunOnboarding} />
+          {tab === 'about' ? (
+            <Section title="关于">
+              <AboutSection version={version} kernel={kernel} />
+            </Section>
+          ) : null}
         </div>
+      </div>
+    </div>
+  )
+}
+
+const SETTINGS_TABS = [
+  { id: 'account', label: '账户' },
+  { id: 'devices', label: '设备与连接' },
+  { id: 'remote', label: '远程Agent' },
+  { id: 'approval', label: '审批模型' },
+  { id: 'appearance', label: '外观' },
+  { id: 'startup', label: '启动与窗口' },
+  { id: 'privacy', label: '数据与隐私' },
+  { id: 'about', label: '关于' },
+] as const
+
+type SettingsTabId = (typeof SETTINGS_TABS)[number]['id']
+
+function SettingsTabs({
+  tab,
+  onChange,
+}: {
+  tab: SettingsTabId
+  onChange: (tab: SettingsTabId) => void
+}) {
+  return (
+    <div className="mz-divide-b shrink-0 overflow-x-auto px-6">
+      <div role="tablist" aria-label="设置页面" className="flex min-w-max items-center gap-1 py-2">
+        {SETTINGS_TABS.map((option) => (
+          <button
+            key={option.id}
+            type="button"
+            role="tab"
+            aria-selected={tab === option.id}
+            onClick={() => onChange(option.id)}
+            className={cn(
+              'h-7 shrink-0 px-2.5 text-[12px] outline-none transition-colors',
+              tab === option.id ? 'bg-ink text-bg' : 'text-muted hover:text-fg',
+            )}
+          >
+            {option.label}
+          </button>
+        ))}
       </div>
     </div>
   )
@@ -796,43 +885,4 @@ function UpdateSummary({
     return <span className="text-fg">可更新到 {status.latest ?? '新版本'}</span>
   }
   return <span className="text-muted">已是最新</span>
-}
-
-/** The way back into the first-run guide, for anyone who skipped past a step. */
-function RerunGuide({ onRerun }: { onRerun: () => Promise<void> }) {
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  async function rerun() {
-    setBusy(true)
-    setError(null)
-    try {
-      await onRerun()
-    } catch (failure) {
-      setError(failureMessage(failure, '无法重新运行新手引导'))
-    } finally {
-      // On success the window swaps to the guide and this page is gone.
-      setBusy(false)
-    }
-  }
-
-  return (
-    <section className="mz-divide-t pt-5">
-      <div className="flex items-start justify-between gap-6">
-        <div className="min-w-0">
-          <div className="text-[12px] text-fg">重新运行新手引导</div>
-          <p className="mt-0.5 text-[12px] leading-5 text-muted">
-            再走一遍欢迎、登录、Agent 与模型的设置；已经登录的账户和已安装的模型会原样保留。
-          </p>
-        </div>
-        <Button size="sm" variant="outline" onClick={() => void rerun()} disabled={busy}>
-          {busy ? <Spinner /> : null}
-          重新运行
-        </Button>
-      </div>
-      {error === null ? null : (
-        <p className="mt-2 bg-ink px-2 py-1 text-[12px] leading-5 text-bg">{error}</p>
-      )}
-    </section>
-  )
 }

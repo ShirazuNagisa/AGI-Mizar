@@ -410,6 +410,18 @@ export type Command =
   | { op: 'account_apple_await'; state: string }
   | { op: 'account_github_await'; state: string }
   | { op: 'account_apple_exchange'; handoff: string }
+  | { op: 'lan_identity' }
+  | { op: 'lan_certificate' }
+  | { op: 'remote_target_settings' }
+  | { op: 'set_remote_target_settings'; enabled: boolean; allow_lan: boolean; allow_wan: boolean; workspaces: string[]; blocked: string[] }
+  | { op: 'remote_audit' }
+  | { op: 'remote_install'; profile?: string; dry_run?: boolean }
+  | { op: 'remote_uninstall'; profile?: string; dry_run?: boolean }
+  | { op: 'remote_delegations' }
+  | { op: 'remote_result'; id: string }
+  | { op: 'remote_answer'; id: string; approval: string; outcome: string }
+  | { op: 'remote_send'; id: string; message: string }
+  | { op: 'remote_cancel'; id: string }
   | { op: 'open_external'; url: string }
   | { op: 'model_state' }
   | { op: 'model_check' }

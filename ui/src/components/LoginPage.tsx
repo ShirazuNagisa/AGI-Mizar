@@ -15,6 +15,8 @@ interface LoginPageProps {
   onGithubExchange: (handoff: string) => Promise<void>
   onAppleStart?: () => Promise<void>
   onAppleExchange?: (handoff: string) => Promise<void>
+  /** Render inside another page instead of as a full page with its own toolbar. */
+  embedded?: boolean
 }
 
 /**
@@ -36,6 +38,7 @@ export function LoginPage({
   onGithubExchange,
   onAppleStart,
   onAppleExchange,
+  embedded = false,
 }: LoginPageProps) {
   const [identifier, setIdentifier] = useState('')
   const [password, setPassword] = useState('')
@@ -50,10 +53,16 @@ export function LoginPage({
   }
 
   return (
-    <div className="flex h-full min-w-0 flex-1 flex-col">
-      <Toolbar title="登录" />
-      <div className="flex-1 overflow-y-auto">
-        <div className="mx-auto w-full max-w-[560px] px-8 py-10">
+    <div className={embedded ? '' : 'flex h-full min-w-0 flex-1 flex-col'}>
+      {embedded ? null : <Toolbar title="登录" />}
+      <div className={embedded ? '' : 'flex-1 overflow-y-auto'}>
+        <div
+          className={
+            embedded
+              ? 'mx-auto w-full max-w-[560px]'
+              : 'mx-auto w-full max-w-[560px] px-8 py-10'
+          }
+        >
           {account === null ? (
             <form onSubmit={submit}>
               <h2 className="text-[24px] font-semibold text-fg">登录后使用远程连接</h2>

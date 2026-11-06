@@ -479,8 +479,8 @@ export function App() {
         engines={snapshot?.engines ?? []}
         page={page}
         serverConnected={serverConnected}
-        loggedIn={account !== null}
         onNavigate={setPage}
+        onRerunOnboarding={rerunOnboarding}
       />
 
       <main className="flex min-w-0 flex-1 flex-col">
@@ -533,7 +533,14 @@ export function App() {
             kernel={kernel}
             model={snapshot?.model ?? null}
             dataset={snapshot?.dataset ?? { enabled: false, policyVersion: 0, since: null, excludedProjects: [] }}
-            onRerunOnboarding={rerunOnboarding}
+            accountBusy={accountBusy}
+            accountError={accountError}
+            onLogin={login}
+            onLogout={logout}
+            onGithubStart={githubStart}
+            onGithubExchange={githubExchange}
+            onAppleStart={appleStart}
+            onAppleExchange={appleExchange}
           />
         ) : null}
       </main>
