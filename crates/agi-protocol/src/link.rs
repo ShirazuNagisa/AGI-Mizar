@@ -323,6 +323,20 @@ pub enum DesktopFrame {
     /// Ask the plugin to stop forwarding some event names.
     #[serde(rename = "filter")]
     Filter { v: u32, drop: Vec<String> },
+    /// A remote delegation settled (or needs approval). The plugin maps the
+    /// delegation back to the DSH session that started it and wakes the model.
+    #[serde(rename = "delegation_notice")]
+    DelegationNotice {
+        v: u32,
+        id: String,
+        #[serde(rename = "delegationId")]
+        delegation_id: String,
+        /// `settled`, `approval` or `resolved`.
+        kind: String,
+        text: String,
+        #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
+    },
 }
 
 impl DesktopFrame {
@@ -383,6 +397,23 @@ impl DesktopFrame {
         }
     }
 
+    /// Wake the parent model when a remote delegation settles.
+    pub fn delegation_notice(
+        id: impl Into<String>,
+        delegation_id: impl Into<String>,
+        kind: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        Self::DelegationNotice {
+            v: LINK_VERSION,
+            id: id.into(),
+            delegation_id: delegation_id.into(),
+            kind: kind.into(),
+            text: text.into(),
+            reference: None,
+        }
+    }
+
     /// A question answer batch.
     pub fn question_answer(id: impl Into<String>, answers: Vec<Value>) -> Self {
         Self::Answer {
@@ -397,6 +428,17 @@ impl DesktopFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_delegation_notice_has_the_plugin_contract_shape() {
+        let frame = DesktopFrame::delegation_notice("n1", "d1", "settled", "done");
+        let value = serde_json::to_value(frame).unwrap();
+        assert_eq!(value["type"], "delegation_notice");
+        assert_eq!(value["id"], "n1");
+        assert_eq!(value["delegationId"], "d1");
+        assert_eq!(value["kind"], "settled");
+        assert_eq!(value["text"], "done");
+    }
 
     #[test]
     fn parses_a_hello() {

@@ -53,7 +53,14 @@ pub struct AccountDesktop {
     pub device_id: String,
     #[serde(default)]
     pub name: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub platform: String,
     pub online: bool,
+    /// The relay room, when the computer is online.
+    #[serde(default)]
+    pub room: Option<String>,
 }
 
 #[cfg(test)]

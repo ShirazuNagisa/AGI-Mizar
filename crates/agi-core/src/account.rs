@@ -81,6 +81,31 @@ pub struct AccountEvent {
 }
 
 /// The account this window is signed in to.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanCertificateAnswer {
+    pub body: agi_lan::CertificateBody,
+    pub signature: String,
+    pub ca_public_key: String,
+}
+
+/// A peer token the target minted, and the relay room it lives in.
+#[derive(Clone)]
+pub struct DesktopConnection {
+    /// The account service origin, so the caller can build the ws(s) URL.
+    pub base: String,
+    /// The target's relay room.
+    pub room: String,
+    /// The target-minted device token (a live credential; never log it).
+    pub token: String,
+    /// The account session token the relay gate checks (never log it).
+    pub account_session: String,
+    /// This desktop's account device id.
+    pub device_id: String,
+    /// This account's user id.
+    pub account_id: String,
+}
+
 pub struct AccountService {
     http: reqwest::Client,
     base: String,
@@ -443,6 +468,103 @@ impl AccountService {
         Ok(Some(answer.user))
     }
 
+    /// This account's user id, when signed in.
+    pub fn user_id(&self) -> Option<String> {
+        self.user().map(|user| user.id)
+    }
+
+    /// This device's account id, as the relay knows it.
+    pub fn device_id(&self) -> Option<String> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (!state.device.id.is_empty() && state.device.id != "id-unset")
+            .then(|| state.device.id.clone())
+    }
+
+    /// Ask a computer on this account to mint a peer device token for it.
+    ///
+    /// The relay verifies that both ends belong to the same account and that the
+    /// target is connected; the target mints the token. This is the same broker
+    /// the phone uses, but the desktop presents its own device id and may ask
+    /// for the `peer` kind once the relay learns to distinguish it.
+    pub async fn connect(
+        &self,
+        target_device_id: &str,
+        engine: &str,
+    ) -> Result<DesktopConnection, AccountError> {
+        let Some(token) = self.token() else {
+            return Err(AccountError::new(
+                "SIGN_IN_REQUIRED",
+                "sign in to the account before delegating to another computer",
+            ));
+        };
+        let Some(caller) = self.device_id() else {
+            return Err(AccountError::new(
+                "SIGN_IN_REQUIRED",
+                "this install has no account device id",
+            ));
+        };
+        let response = self
+            .http
+            .post(format!("{}/account/v1/connect", self.base))
+            .header("x-mizar-client-id", caller.clone())
+            .bearer_auth(&token)
+            .json(&json!({ "deviceId": target_device_id, "engine": engine, "kind": "peer" }))
+            .send()
+            .await
+            .map_err(|error| AccountError::new("UNREACHABLE", format!("the relay: {error}")))?;
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            let (code, message, contact) = failure(&text, status);
+            return Err(AccountError {
+                code,
+                message: match contact {
+                    Some(contact) => format!("{message} ({contact})"),
+                    None => message,
+                },
+            });
+        }
+        let answer: Value = serde_json::from_str(&text)
+            .map_err(|_| AccountError::new("BAD_ANSWER", "the relay's answer was not readable"))?;
+        let room = answer
+            .get("room")
+            .and_then(Value::as_str)
+            .filter(|room| !room.is_empty())
+            .ok_or_else(|| AccountError::new("BAD_ANSWER", "the relay returned no room"))?;
+        let peer = answer
+            .get("token")
+            .and_then(Value::as_str)
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| AccountError::new("BAD_ANSWER", "the relay returned no token"))?;
+        let account_id = match self.user_id() {
+            Some(id) => id,
+            // A launch that signs in and delegates before the background refresh
+            // has answered still needs the account id in the hello frame. One
+            // `/me` here is cheaper than a delegation that fails on a race.
+            None => match self.refresh().await {
+                Ok(Some(user)) => user.id,
+                Ok(None) => {
+                    return Err(AccountError::new(
+                        "SIGN_IN_REQUIRED",
+                        "the account session is no longer valid",
+                    ))
+                }
+                Err(error) => return Err(error),
+            },
+        };
+        Ok(DesktopConnection {
+            base: self.base.clone(),
+            room: room.to_string(),
+            token: peer.to_string(),
+            account_session: token,
+            device_id: caller,
+            account_id,
+        })
+    }
+
     /// The account's computers, with their current reachability.
     pub async fn desktops(&self) -> Result<Vec<AccountDesktop>, AccountError> {
         let Some(token) = self.token() else {
@@ -466,6 +588,71 @@ impl AccountService {
         let answer: Answer = serde_json::from_str(&text)
             .map_err(|_| AccountError::new("BAD_ANSWER", "the relay's answer was not readable"))?;
         Ok(answer.desktops)
+    }
+
+    /// Ask the account CA to sign this device's LAN public keys.
+    pub async fn lan_certificate(
+        &self,
+        ed25519_public: &str,
+        x25519_public: &str,
+    ) -> Result<LanCertificateAnswer, AccountError> {
+        let token = self
+            .token()
+            .ok_or_else(|| AccountError::new("SIGN_IN_REQUIRED", "no account session"))?;
+        let device = self
+            .device_id()
+            .ok_or_else(|| AccountError::new("SIGN_IN_REQUIRED", "no device id"))?;
+        let response = self
+            .http
+            .post(format!("{}/account/v1/lan/certificate", self.base))
+            .header("x-mizar-client-id", &device)
+            .bearer_auth(&token)
+            .json(&json!({
+                "ed25519Public": ed25519_public,
+                "x25519Public": x25519_public,
+            }))
+            .send()
+            .await
+            .map_err(|error| AccountError::new("UNREACHABLE", format!("the relay: {error}")))?;
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            let (code, message, _) = failure(&text, status);
+            return Err(AccountError::new(code, message));
+        }
+        serde_json::from_str(&text)
+            .map_err(|_| AccountError::new("BAD_ANSWER", "the LAN certificate was not readable"))
+    }
+
+    /// Ask one online computer what it offers, through the relay's room proxy.
+    ///
+    /// `hello` is the only unauthenticated method on the target; the relay's
+    /// room gate still wants an account session, which is why this goes through
+    /// the account service rather than a bare HTTP client.
+    pub async fn probe(&self, room: &str) -> Result<serde_json::Value, AccountError> {
+        let token = self
+            .token()
+            .ok_or_else(|| AccountError::new("SIGN_IN_REQUIRED", "no account session"))?;
+        let device = self.device_id().unwrap_or_default();
+        let response = self
+            .http
+            .get(format!("{}/r/{room}/mizar/v1/hello", self.base))
+            .header("x-mizar-session", &token)
+            .header("x-mizar-client-id", &device)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|error| AccountError::new("UNREACHABLE", format!("the relay: {error}")))?;
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(AccountError::new(
+                format!("HTTP_{}", status.as_u16()),
+                "the computer did not answer its hello",
+            ));
+        }
+        serde_json::from_str(&text)
+            .map_err(|_| AccountError::new("BAD_ANSWER", "the computer's hello was not readable"))
     }
 
     /// Sign out: tell the relay, then forget the token whatever it said.
@@ -822,10 +1009,31 @@ mod tests {
             )
         }
 
+        async fn connect(Json(body): Json<Value>) -> Json<Value> {
+            Json(json!({
+                "room": "FAKE-ROOM",
+                "token": format!("peer-for-{}", body["deviceId"].as_str().unwrap_or("?")),
+            }))
+        }
+
+        async fn lan_certificate(Json(_body): Json<Value>) -> Json<Value> {
+            Json(json!({
+                "body": {
+                    "v": 1, "accountId": "u1", "deviceId": "d1",
+                    "ed25519Public": "ed", "x25519Public": "x",
+                    "issuedAt": 1, "expiresAt": 2
+                },
+                "signature": "sig",
+                "caPublicKey": "ca"
+            }))
+        }
+
         let seen = Seen::default();
         let app = Router::new()
             .route("/account/v1/login", post(login))
             .route("/account/v1/me", get(me))
+            .route("/account/v1/connect", post(connect))
+            .route("/account/v1/lan/certificate", post(lan_certificate))
             .with_state(seen);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -859,6 +1067,39 @@ mod tests {
         assert_eq!(desktops.len(), 1);
         assert_eq!(phones.len(), 1);
 
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn connecting_to_a_desktop_returns_both_credentials() {
+        let (base, server) = fake_relay().await;
+        let dir = tempfile::tempdir().unwrap();
+        let service = AccountService::new(base.clone());
+        service.load(dir.path().join("account.json"));
+        service.login("shirazu", "hunter2").await.unwrap();
+
+        let connection = service.connect("d1", "dsh").await.unwrap();
+        assert_eq!(connection.base, base);
+        assert_eq!(connection.room, "FAKE-ROOM");
+        assert_eq!(connection.token, "peer-for-d1");
+        assert_eq!(connection.account_session, "session-token");
+        assert_eq!(connection.account_id, "u1");
+        assert_eq!(connection.device_id, service.device_id().unwrap());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_lan_certificate_is_read_back() {
+        let (base, server) = fake_relay().await;
+        let dir = tempfile::tempdir().unwrap();
+        let service = AccountService::new(base);
+        service.load(dir.path().join("account.json"));
+        service.login("shirazu", "hunter2").await.unwrap();
+        let answer = service.lan_certificate("ed", "x").await.unwrap();
+        assert_eq!(answer.body.account_id, "u1");
+        assert_eq!(answer.body.device_id, "d1");
+        assert_eq!(answer.signature, "sig");
+        assert_eq!(answer.ca_public_key, "ca");
         server.abort();
     }
 

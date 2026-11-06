@@ -123,6 +123,11 @@ async fn a_running_session_becomes_a_card_the_relay_can_start() {
     assert_eq!(body["rows"][0]["sessionId"], "dsh:s-1");
     assert_eq!(body["rows"][0]["runningSince"], 1_700_000_000_000i64);
     assert!(body["approvals"].as_array().unwrap().is_empty());
+    // A stale foreground report must not suppress the start: the card is the
+    // only thing that can appear when the phone was never opened for this turn.
+    assert!(body["exceptDeviceIds"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
 }
 
 #[tokio::test]
@@ -180,6 +185,29 @@ async fn a_finished_turn_ends_the_card_and_says_which_session() {
     // call, because the two facts are only true together.
     assert_eq!(body["endLiveActivity"], true);
     assert_eq!(body["body"], "Refactor the parser is done");
+    // An end push must reach even a device the host still believes is on
+    // screen: a stale presence report must not leave the card counting.
+    assert!(body["exceptDeviceIds"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+}
+
+#[tokio::test]
+async fn a_finished_turn_does_not_exclude_a_foreground_device_from_the_end_push() {
+    let (server, _store, _dir) = start().await;
+    let (base, seen) = fake_relay().await;
+    server.attach_relay(RelayClient::new(base, "a-tunnel-token", 1));
+    server.set_foreground_for_tests("phone-1", true);
+    let key = SessionKey::new(EngineId::Dsh, "s-1");
+    server
+        .publish_turn_end_for_tests(&key, "Refactor the parser", true)
+        .await;
+    let requests = seen.lock().unwrap().clone();
+    let body = &requests[0].body;
+    assert_eq!(body["endLiveActivity"], true);
+    assert!(body["exceptDeviceIds"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
 }
 
 #[tokio::test]

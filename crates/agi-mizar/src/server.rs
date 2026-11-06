@@ -41,7 +41,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::frames::{
     record_to_envelope, ClientFrame, ErrorCode, Hello, ServerFrame, SessionRow, WelcomeInput,
@@ -102,6 +102,13 @@ pub struct MizarServer {
     /// candidates in, so without a relay there is nothing to advertise and the
     /// phone's route plan correctly has no `.p2p` in it.
     direct: Mutex<Option<DirectPath>>,
+    /// Sessions each peer created, by `peer:<account>:<device>`.
+    ///
+    /// The peer token proves the account, not the ownership rule: without this
+    /// map a peer could name any session id and read another conversation.
+    peer_sessions: Mutex<std::collections::HashMap<String, std::collections::BTreeSet<String>>>,
+    /// Where the peer ownership map is kept, once boot points us at it.
+    peer_sessions_path: Mutex<Option<std::path::PathBuf>>,
 }
 
 /// Where the direct path listens, and the name a phone dials it by.
@@ -210,6 +217,8 @@ impl MizarServer {
             uploads: Arc::new(upload_store()),
             account: Mutex::new(None),
             direct: Mutex::new(None),
+            peer_sessions: Mutex::new(std::collections::HashMap::new()),
+            peer_sessions_path: Mutex::new(None),
         })
     }
 
@@ -506,6 +515,111 @@ impl MizarServer {
         self.publish_turn_end(session, title, end).await;
     }
 
+    /// Mark a device's presence for the push-path integration test.
+    #[doc(hidden)]
+    pub fn set_foreground_for_tests(&self, device_id: &str, foreground: bool) {
+        let mut known = self
+            .foreground
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if foreground {
+            known.insert(device_id.to_string());
+        } else {
+            known.remove(device_id);
+        }
+    }
+
+    /// Run one authenticated LAN connection.
+    ///
+    /// Noise and the account certificate have already proven the peer; this
+    /// method mints a short-lived local token with the same `peer:<account>:
+    /// <device>:dsh` marker the WAN path uses, sends it over the encrypted
+    /// session, and then hands the byte stream to the ordinary Mizar peer loop.
+    /// The token is revoked when the session ends, so a captured LAN transcript
+    /// cannot be replayed as a bearer token.
+    pub async fn serve_lan(
+        self: Arc<Self>,
+        remote: agi_lan::RemoteDevice,
+        session: agi_lan::LanSession,
+    ) -> anyhow::Result<()> {
+        let prefs = self.core.remote_prefs();
+        if !prefs.enabled || !prefs.allow_lan {
+            anyhow::bail!("LAN peers are disabled on this computer");
+        }
+        if prefs
+            .blocked
+            .iter()
+            .any(|blocked| blocked == &remote.device_id)
+        {
+            anyhow::bail!("this device is blocked on this computer");
+        }
+        let marker = format!("peer:{}:{}:dsh", remote.account_id, remote.device_id);
+        let issued = self
+            .store
+            .issue(&format!("LAN peer {}", remote.name), Some(marker))
+            .map_err(|error| anyhow::anyhow!("issuing the LAN token: {error}"))?;
+        let token_frame = json!({
+            "v": 1,
+            "type": "lan.session",
+            "token": issued.token,
+        });
+        if let Err(error) = session
+            .send(
+                serde_json::to_vec(&token_frame)
+                    .unwrap_or_default()
+                    .as_slice(),
+            )
+            .await
+        {
+            let _ = self.store.revoke(&issued.device.id);
+            return Err(anyhow::anyhow!("sending the LAN token: {error}"));
+        }
+
+        let session = Arc::new(session);
+        let (inbound_tx, inbound_rx) = mpsc::channel::<String>(64);
+        let (outbound_tx, mut outbound_rx) = mpsc::channel::<Vec<u8>>(64);
+        let peer_name = remote.device_id.clone();
+        let peer_task = tokio::spawn(serve_peer(
+            Arc::clone(&self),
+            peer_name,
+            Peer {
+                inbound: inbound_rx,
+                outbound: outbound_tx,
+            },
+        ));
+
+        let reader_session = Arc::clone(&session);
+        let reader = tokio::spawn(async move {
+            loop {
+                match reader_session.recv().await {
+                    Ok(bytes) => {
+                        let Ok(text) = String::from_utf8(bytes) else {
+                            continue;
+                        };
+                        if inbound_tx.send(text).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+        let writer_session = Arc::clone(&session);
+        let writer = tokio::spawn(async move {
+            while let Some(bytes) = outbound_rx.recv().await {
+                if writer_session.send(&bytes).await.is_err() {
+                    return;
+                }
+            }
+        });
+
+        let _ = peer_task.await;
+        reader.abort();
+        writer.abort();
+        let _ = self.store.revoke(&issued.device.id);
+        Ok(())
+    }
+
     /// Run one punched connection: the same handshake and methods as a socket.
     ///
     /// Public because the accept loop lives in the boot sequence, which owns the
@@ -743,6 +857,7 @@ impl MizarServer {
                         "addresses": addresses,
                         "desktop": { "os": os_name(), "client": "AGI Mizar" },
                         "engines": engines,
+                        "remote": remote_view(&self.core.remote_prefs()),
                         // What this connection is bound to. Absent on a phone
                         // that did not choose, which is also what an older host
                         // says -- so the phone reads "no answer" and "no choice"
@@ -780,7 +895,9 @@ impl MizarServer {
                 let items: Vec<SessionRow> = snapshot
                     .sessions
                     .iter()
-                    .filter(|session| Self::in_scope(scope, &session.key))
+                    .filter(|session| {
+                        Self::in_scope(scope, &session.key) && self.peer_owns(device, &session.key)
+                    })
                     .map(|session| SessionRow {
                         session_id: session.key.to_string(),
                         updated_at: session.updated_at,
@@ -798,7 +915,7 @@ impl MizarServer {
             }
 
             "session.messages" => {
-                let Some(key) = self.scoped_session_of(scope, frame) else {
+                let Some(key) = self.scoped_session_of(device, scope, frame) else {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
@@ -884,7 +1001,7 @@ impl MizarServer {
             // mid-turn came back to an empty interval and a hole where the
             // conversation should be. This hands the whole turn back.
             "session.stream" => {
-                let Some(key) = self.scoped_session_of(scope, frame) else {
+                let Some(key) = self.scoped_session_of(device, scope, frame) else {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
@@ -943,7 +1060,7 @@ impl MizarServer {
             // come from this one frame; the old plugin answered it straight from
             // `session/projections`, and this does the same through the engine.
             "session.stats" => {
-                let Some(key) = self.scoped_session_of(scope, frame) else {
+                let Some(key) = self.scoped_session_of(device, scope, frame) else {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
@@ -1073,6 +1190,23 @@ impl MizarServer {
                         // not a failure to read the list either.
                         Err(error) if error.code() != "UNSUPPORTED" => complete = false,
                         Err(_) => {}
+                    }
+                }
+                if Self::peer_key(device).is_some() {
+                    let allowed = self.core.remote_prefs().workspaces;
+                    items.retain(|row| {
+                        row.get("path").and_then(Value::as_str).is_some_and(|path| {
+                            allowed.iter().any(|candidate| {
+                                candidate.trim_end_matches('/') == path.trim_end_matches('/')
+                            })
+                        })
+                    });
+                    // A peer must not learn which sessions its operator has in
+                    // these folders; it only needs the paths it may use.
+                    for row in &mut items {
+                        if let Some(object) = row.as_object_mut() {
+                            object.remove("sessionIds");
+                        }
                     }
                 }
                 ServerFrame::ok(id, json!({ "items": items, "complete": complete }))
@@ -1225,6 +1359,14 @@ impl MizarServer {
             // first engine that can take one answers.
             "session.create" => {
                 let cwd = frame.payload.get("cwd").and_then(Value::as_str);
+                let peer = Self::peer_key(device).is_some();
+                if peer && !cwd.is_some_and(|path| self.core.remote_workspace_allowed(path)) {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::WorkspaceNotAllowed,
+                        "a peer may only start work in the operator's remote workspaces",
+                    );
+                }
                 let mut last: Option<ServerFrame> = None;
                 for engine_id in Self::visible_engines(scope) {
                     let Some(engine) = self.core.engine(engine_id) else {
@@ -1232,7 +1374,8 @@ impl MizarServer {
                     };
                     match engine.create(cwd).await {
                         Ok(key) => {
-                            return ServerFrame::ok(id, json!({ "sessionId": key.to_string() }))
+                            self.record_peer_session(device, &key);
+                            return ServerFrame::ok(id, json!({ "sessionId": key.to_string() }));
                         }
                         Err(error) => {
                             last = Some(ServerFrame::error(
@@ -1253,7 +1396,7 @@ impl MizarServer {
             }
 
             "session.archive" => {
-                let Some(key) = self.scoped_session_of(scope, frame) else {
+                let Some(key) = self.scoped_session_of(device, scope, frame) else {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
@@ -1309,7 +1452,7 @@ impl MizarServer {
                 }
             }
             "session.activity" => {
-                let Some(key) = self.scoped_session_of(scope, frame) else {
+                let Some(key) = self.scoped_session_of(device, scope, frame) else {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
@@ -1392,7 +1535,7 @@ impl MizarServer {
             // adapters, and the code it refuses with is passed through so the
             // app can tell "not yours" from "not there".
             "file.stat" => {
-                let Some(key) = self.scoped_session_of(scope, frame) else {
+                let Some(key) = self.scoped_session_of(device, scope, frame) else {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
@@ -1434,7 +1577,7 @@ impl MizarServer {
             }
 
             "file.read" => {
-                let Some(key) = self.scoped_session_of(scope, frame) else {
+                let Some(key) = self.scoped_session_of(device, scope, frame) else {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
@@ -1497,7 +1640,7 @@ impl MizarServer {
             // only offers boundaries it read from the transcript; the host still
             // refuses anything that is not a turn end.
             "session.fork" => {
-                let Some(key) = self.scoped_session_of(scope, frame) else {
+                let Some(key) = self.scoped_session_of(device, scope, frame) else {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
@@ -1704,7 +1847,7 @@ impl MizarServer {
             ),
 
             "session.prompt" => {
-                let Some(key) = self.scoped_session_of(scope, frame) else {
+                let Some(key) = self.scoped_session_of(device, scope, frame) else {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
@@ -1782,7 +1925,7 @@ impl MizarServer {
             }
 
             "session.cancel" => {
-                let Some(key) = self.scoped_session_of(scope, frame) else {
+                let Some(key) = self.scoped_session_of(device, scope, frame) else {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
@@ -1803,7 +1946,7 @@ impl MizarServer {
             }
 
             "session.compact" => {
-                let Some(key) = self.scoped_session_of(scope, frame) else {
+                let Some(key) = self.scoped_session_of(device, scope, frame) else {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
@@ -1831,10 +1974,12 @@ impl MizarServer {
                 // different agent's work, and this was the second thing that
                 // leaked after the session list was filtered.
                 let visible = |interaction: &agi_protocol::domain::Interaction| {
-                    interaction
-                        .session
-                        .as_ref()
-                        .is_none_or(|key| Self::in_scope(scope, key))
+                    let Some(key) = interaction.session.as_ref() else {
+                        // A peer cannot answer an interaction that names no
+                        // session; a phone keeps the old unscoped allowance.
+                        return Self::peer_key(device).is_none();
+                    };
+                    Self::in_scope(scope, key) && self.peer_owns(device, key)
                 };
                 let approvals: Vec<Value> = snapshot
                     .interactions
@@ -1850,6 +1995,8 @@ impl MizarServer {
                             "reason": interaction.detail,
                             "displayReason": Value::Null,
                             "requestedAt": interaction.requested_at,
+                            "risk": approval_risk(interaction).0,
+                            "riskReason": approval_risk(interaction).1,
                         })
                     })
                     .collect();
@@ -1904,7 +2051,7 @@ impl MizarServer {
                     .unwrap_or("rejected")
                     .to_string();
 
-                if self.answers_another_agent(scope, request_id) {
+                if self.answers_another_agent(device, scope, request_id) {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::RemoteError,
@@ -1945,7 +2092,7 @@ impl MizarServer {
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default();
-                if self.answers_another_agent(scope, call_id) {
+                if self.answers_another_agent(device, scope, call_id) {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::RemoteError,
@@ -1970,7 +2117,7 @@ impl MizarServer {
             }
 
             "session.model.set" => {
-                let Some(key) = self.scoped_session_of(scope, frame) else {
+                let Some(key) = self.scoped_session_of(device, scope, frame) else {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
@@ -2019,7 +2166,7 @@ impl MizarServer {
             }
 
             "session.permission.set" => {
-                let Some(key) = self.scoped_session_of(scope, frame) else {
+                let Some(key) = self.scoped_session_of(device, scope, frame) else {
                     return ServerFrame::error(
                         Some(id),
                         ErrorCode::MalformedFrame,
@@ -2237,7 +2384,13 @@ impl MizarServer {
         if card.is_empty() {
             return;
         }
-        let body = crate::activity::activity_body(card, &self.foreground_devices());
+        // Do not exclude a device just because presence says it is on screen.
+        // That report is asynchronous and can be stale after the app is
+        // suspended; excluding it is how a session started on the desktop never
+        // gets a card on the phone. The relay turns a start into an update when
+        // the phone has already reported its own card, so including every device
+        // is also what prevents a second card rather than what causes one.
+        let body = crate::activity::activity_body(card, &[]);
         if let Err(error) = self.relay_post("/push/v1/activity", body).await {
             // A phone that cannot be reached is a worse app, not a broken host.
             tracing::debug!("mizar: no live activity update — {error}");
@@ -2278,7 +2431,18 @@ impl MizarServer {
 
     /// One turn-end notification, and the end of the card when nothing is left.
     async fn publish_turn_end(&self, session: &SessionKey, title: &str, end: bool) {
-        let body = crate::activity::turn_end_body(title, session, end, &self.foreground_devices());
+        // A foreground phone draws its own card, but the presence report can be
+        // stale: iOS suspends the process between the scene change and the
+        // `push.presence` call. Excluding such a phone from the **end** push is
+        // how a Live Activity stays on the Lock Screen until the app is opened.
+        // The end frame must reach every device; only a normal turn-end alert is
+        // suppressed for devices that are already looking at the screen.
+        let except = if end {
+            Vec::new()
+        } else {
+            self.foreground_devices()
+        };
+        let body = crate::activity::turn_end_body(title, session, end, &except);
         if let Err(error) = self.relay_post("/push/v1/notify", body).await {
             tracing::debug!("mizar: no turn-end notification — {error}");
         }
@@ -2315,20 +2479,18 @@ impl MizarServer {
     /// refused here.
     fn answers_another_agent(
         &self,
+        device: &crate::store::Device,
         scope: Option<agi_protocol::engine::EngineId>,
         id: &str,
     ) -> bool {
-        let Some(scope) = scope else { return false };
         self.core
             .snapshot()
             .interactions
             .iter()
             .find(|interaction| interaction.id == id)
-            .is_some_and(|interaction| {
-                interaction
-                    .session
-                    .as_ref()
-                    .is_some_and(|key| !Self::in_scope(Some(scope), key))
+            .is_some_and(|interaction| match interaction.session.as_ref() {
+                Some(key) => !Self::in_scope(scope, key) || !self.peer_owns(device, key),
+                None => Self::peer_key(device).is_some(),
             })
     }
 
@@ -2345,11 +2507,100 @@ impl MizarServer {
     /// filter is for.
     fn scoped_session_of(
         &self,
+        device: &crate::store::Device,
         scope: Option<agi_protocol::engine::EngineId>,
         frame: &ClientFrame,
     ) -> Option<SessionKey> {
         let key = self.session_of(frame)?;
-        Self::in_scope(scope, &key).then_some(key)
+        (Self::in_scope(scope, &key) && self.peer_owns(device, &key)).then_some(key)
+    }
+
+    /// The stable peer identity a device marker carries, if it is a peer.
+    fn peer_key(device: &crate::store::Device) -> Option<String> {
+        crate::relay::peer_identity_of_marker(device.model.as_deref()?)
+    }
+
+    /// Whether this device may touch one session.
+    ///
+    /// Phones keep the old engine-scope rule; a peer is additionally confined to
+    /// the sessions it created.
+    fn peer_owns(&self, device: &crate::store::Device, key: &SessionKey) -> bool {
+        let Some(peer) = Self::peer_key(device) else {
+            return true;
+        };
+        self.peer_sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&peer)
+            .is_some_and(|sessions| sessions.contains(&key.to_string()))
+    }
+
+    /// Remember one session a peer created.
+    pub fn load_peer_sessions(&self, path: std::path::PathBuf) {
+        let sessions = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| {
+                serde_json::from_str::<std::collections::HashMap<String, Vec<String>>>(&text).ok()
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(peer, sessions)| (peer, sessions.into_iter().collect()))
+            .collect();
+        *self
+            .peer_sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = sessions;
+        *self
+            .peer_sessions_path
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(path);
+    }
+
+    fn record_peer_session(&self, device: &crate::store::Device, key: &SessionKey) {
+        let Some(peer) = Self::peer_key(device) else {
+            return;
+        };
+        self.peer_sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(peer)
+            .or_default()
+            .insert(key.to_string());
+        self.save_peer_sessions();
+    }
+
+    fn save_peer_sessions(&self) {
+        let Some(path) = self
+            .peer_sessions_path
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        else {
+            return;
+        };
+        let sessions: std::collections::HashMap<String, Vec<String>> = self
+            .peer_sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .map(|(peer, sessions)| (peer.clone(), sessions.iter().cloned().collect()))
+            .collect();
+        let Ok(bytes) = serde_json::to_vec_pretty(&sessions) else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let temp = path.with_extension("json.tmp");
+        if std::fs::write(&temp, &bytes).is_err() {
+            return;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600));
+        }
+        let _ = std::fs::rename(&temp, &path);
     }
 }
 
@@ -2485,6 +2736,22 @@ fn wallet_rows(wallets: &[Wallet], required: bool) -> Option<Vec<Value>> {
 }
 
 /// `GET /mizar/v1/hello` — unauthenticated, reveals identity only.
+/// What a peer is allowed to learn before it has authenticated.
+///
+/// A disabled host reports the switch, not the catalogue: the workspace paths
+/// are the operator's projects, and `hello` is unauthenticated.
+fn remote_view(prefs: &agi_core::RemotePrefs) -> Value {
+    if !prefs.enabled {
+        return json!({ "enabled": false, "allowLan": false, "allowWan": false, "workspaces": [] });
+    }
+    json!({
+        "enabled": true,
+        "allowLan": prefs.allow_lan,
+        "allowWan": prefs.allow_wan,
+        "workspaces": prefs.workspaces,
+    })
+}
+
 async fn hello(
     State(server): State<Arc<MizarServer>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -2518,6 +2785,7 @@ async fn hello(
         "pairingOpen": server.code().is_some(),
         "paired": !server.store.devices().is_empty(),
         "engines": engines,
+        "remote": remote_view(&server.core.remote_prefs()),
     }))
     .into_response()
 }
@@ -2856,6 +3124,15 @@ async fn serve_punched(server: Arc<MizarServer>, stream: crate::net::engine::Str
 /// The handshake, the state channel, the interaction forwarder and the method
 /// loop are all here, and all of them are transport-agnostic. The only thing a
 /// caller supplies is a [`Peer`]: text frames in, frame bytes out.
+/// The device id behind a peer token, from its `peer:<account>:<device>:<engine>`
+/// marker. Phone tokens have no peer identity and are not covered by the
+/// remote-device blocklist.
+fn peer_device_id(device: &crate::store::Device) -> Option<String> {
+    let marker = device.model.as_deref()?;
+    let identity = crate::relay::peer_identity_of_marker(marker)?;
+    identity.rsplit(':').next().map(str::to_string)
+}
+
 async fn serve_peer(server: Arc<MizarServer>, peer: String, connection: Peer) {
     let Peer {
         mut inbound,
@@ -2903,6 +3180,20 @@ async fn serve_peer(server: Arc<MizarServer>, peer: String, connection: Peer) {
         return;
     };
 
+    if peer_device_id(&device).is_some_and(|id| server.core.peer_is_blocked(&id)) {
+        tracing::warn!("mizar: {peer} is blocked on this computer");
+        let _ = send(
+            &out,
+            ServerFrame::error(
+                None,
+                ErrorCode::Unauthenticated,
+                "this device is blocked on this computer",
+            ),
+        )
+        .await;
+        return;
+    }
+
     tracing::info!(
         "mizar: {} connected from {peer} ({})",
         device.name,
@@ -2945,12 +3236,16 @@ async fn serve_peer(server: Arc<MizarServer>, peer: String, connection: Peer) {
     // channel only reached the desktop's own window.
     let states_task = {
         let out = out.clone();
+        let state_server = Arc::clone(&server);
+        let state_device = device.clone();
         let mut states = server.core.subscribe_states();
         tokio::spawn(async move {
             loop {
                 match states.recv().await {
                     Ok((session, bytes)) => {
-                        if scope.is_some_and(|engine| session.engine != engine) {
+                        if scope.is_some_and(|engine| session.engine != engine)
+                            || !state_server.peer_owns(&state_device, &session)
+                        {
                             continue;
                         }
                         let id = session.to_string();
@@ -2973,11 +3268,13 @@ async fn serve_peer(server: Arc<MizarServer>, peer: String, connection: Peer) {
     let mut events = server.core.subscribe();
     let forwarder = {
         let out = out.clone();
+        let forward_server = Arc::clone(&server);
+        let forward_device = device.clone();
         tokio::spawn(async move {
             loop {
                 match events.recv().await {
                     Ok(event) => {
-                        if !interaction_in_scope(&event, scope) {
+                        if !interaction_in_scope(&forward_server, &forward_device, &event, scope) {
                             continue;
                         }
                         if let Some(frame) = interaction_event(&event) {
@@ -3016,7 +3313,49 @@ async fn serve_peer(server: Arc<MizarServer>, peer: String, connection: Peer) {
         })
     };
 
-    while let Some(text) = inbound.recv().await {
+    let mut prefs_changed = server.core.subscribe_remote_prefs();
+    loop {
+        let text = tokio::select! {
+            text = inbound.recv() => match text {
+                Some(text) => text,
+                None => break,
+            },
+            changed = prefs_changed.recv() => {
+                // A policy change wakes an idle connection; blocking must not
+                // wait for the peer's next frame.
+                if changed.is_ok()
+                    && peer_device_id(&device)
+                        .is_some_and(|id| server.core.peer_is_blocked(&id))
+                {
+                    tracing::warn!("mizar: {} became blocked; closing the socket", device.name);
+                    let _ = send(
+                        &out,
+                        ServerFrame::error(
+                            None,
+                            ErrorCode::Unauthenticated,
+                            "this device is blocked on this computer",
+                        ),
+                    )
+                    .await;
+                    break;
+                }
+                continue;
+            }
+        };
+        // Per-frame checks still matter: the broadcast can lag or coalesce.
+        if peer_device_id(&device).is_some_and(|id| server.core.peer_is_blocked(&id)) {
+            tracing::warn!("mizar: {} became blocked; closing the socket", device.name);
+            let _ = send(
+                &out,
+                ServerFrame::error(
+                    None,
+                    ErrorCode::Unauthenticated,
+                    "this device is blocked on this computer",
+                ),
+            )
+            .await;
+            break;
+        }
         let Some(frame) = ClientFrame::parse(&text) else {
             continue;
         };
@@ -3054,11 +3393,12 @@ async fn send(
 /// cannot answer usefully, and an approval it answers lands on the wrong
 /// agent's turn.
 fn interaction_in_scope(
+    server: &MizarServer,
+    device: &crate::store::Device,
     event: &agi_protocol::api::ApiEvent,
     scope: Option<agi_protocol::engine::EngineId>,
 ) -> bool {
     use agi_protocol::api::ApiEvent;
-    let Some(scope) = scope else { return true };
     let key = match event {
         ApiEvent::InteractionRequested { interaction } => interaction.session.as_ref(),
         // A resolution carries no session: the phone only ever hears about
@@ -3066,7 +3406,84 @@ fn interaction_in_scope(
         // over a request that is gone.
         _ => return true,
     };
-    key.is_none_or(|key| key.engine == scope)
+    key.is_none_or(|key| MizarServer::in_scope(scope, key) && server.peer_owns(device, key))
+}
+
+/// Classify one approval for the parent model.
+///
+/// This is deliberately conservative and title-based: a tool this host does not
+/// recognise is high risk. Build/test/lint commands are low; anything that
+/// installs, escalates, reaches the network, or writes outside a workspace is
+/// high. A peer may only auto-answer the low tier.
+fn approval_risk(interaction: &agi_protocol::domain::Interaction) -> (&'static str, &'static str) {
+    let title = interaction.title.to_lowercase();
+    if matches!(
+        title.as_str(),
+        "read" | "list" | "glob" | "grep" | "edit" | "write" | "apply_patch" | "multiedit"
+    ) {
+        return ("low", "workspace read or edit");
+    }
+    if matches!(
+        title.as_str(),
+        "bash" | "shell" | "exec" | "run" | "command"
+    ) {
+        let detail = interaction.detail.as_deref().unwrap_or("").to_lowercase();
+        let destructive = [
+            "sudo",
+            "rm -rf",
+            "mkfs",
+            "dd if=",
+            "shutdown",
+            "reboot",
+            "chmod",
+            "chown",
+            "curl ",
+            "wget ",
+            "ssh ",
+            "scp ",
+            "git push",
+            "npm install",
+            "pnpm add",
+            "brew ",
+            "pip install",
+            "> /",
+            "/etc/",
+            "~/.ssh",
+            "security ",
+        ];
+        if destructive.iter().any(|needle| detail.contains(needle)) {
+            return (
+                "high",
+                "destructive, privileged, network or install command",
+            );
+        }
+        let routine = [
+            "cargo test",
+            "cargo build",
+            "cargo check",
+            "cargo clippy",
+            "cargo fmt",
+            "npm test",
+            "npm run test",
+            "pnpm test",
+            "pnpm run test",
+            "git status",
+            "git diff",
+            "ls ",
+            "rg ",
+            "grep ",
+            "cat ",
+            "sed -n",
+        ];
+        if routine.iter().any(|needle| detail.contains(needle)) {
+            return ("low", "routine build, test or read command");
+        }
+        return ("high", "unrecognised shell command");
+    }
+    if title.contains("fetch") || title.contains("browser") || title.contains("web") {
+        return ("high", "network egress");
+    }
+    ("high", "tool is not on the low-risk list")
 }
 
 /// Translate one kernel event into the frame the phone understands.
@@ -3187,6 +3604,27 @@ mod tests {
             0
         );
         assert!(membership(EngineId::Dsh, None).is_none());
+    }
+
+    #[test]
+    fn approval_risk_is_conservative_but_not_all_bash() {
+        let mut interaction = agi_protocol::domain::Interaction {
+            id: "a".to_string(),
+            session: None,
+            kind: InteractionKind::Approval,
+            title: "bash".to_string(),
+            detail: Some("cargo test -p agi-core".to_string()),
+            requested_at: 0,
+            questions: Vec::new(),
+        };
+        assert_eq!(approval_risk(&interaction).0, "low");
+        interaction.detail = Some("sudo rm -rf /".to_string());
+        assert_eq!(approval_risk(&interaction).0, "high");
+        interaction.title = "read".to_string();
+        interaction.detail = None;
+        assert_eq!(approval_risk(&interaction).0, "low");
+        interaction.title = "unknown-tool".to_string();
+        assert_eq!(approval_risk(&interaction).0, "high");
     }
 
     #[test]

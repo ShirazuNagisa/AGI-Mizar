@@ -38,6 +38,37 @@ pub fn default_hook_path() -> PathBuf {
     agi_platform::data_dir().join("hook.json")
 }
 
+/// The scoped endpoint the remote-agent MCP/CLI reads.
+///
+/// A separate file and a separate token: a tool process may ask the kernel to
+/// delegate, but it has no business reading sessions or driving the window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolFile {
+    pub port: u16,
+    pub token: String,
+}
+
+/// `~/.agi-mizar/agent-tool.json`.
+pub fn default_tool_path() -> PathBuf {
+    agi_platform::data_dir().join("agent-tool.json")
+}
+
+/// Publish the scoped tool endpoint atomically.
+pub fn write_tool_file(path: &Path, port: u16, token: &str) -> io::Result<()> {
+    write_private_json(
+        path,
+        &ToolFile {
+            port,
+            token: token.to_string(),
+        },
+    )
+}
+
+/// Remove the scoped tool endpoint, on shutdown.
+pub fn remove_tool_file(path: &Path) {
+    let _ = std::fs::remove_file(path);
+}
+
 /// Publish the hook endpoint atomically, owner-readable only.
 pub fn write_hook_file(path: &Path, port: u16, token: &str) -> io::Result<()> {
     write_private_json(
@@ -133,6 +164,33 @@ mod tests {
         write_endpoint_file(&path, 1, "tok").unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn the_tool_file_is_owner_only_and_parseable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent-tool.json");
+        write_tool_file(&path, 1, "tool-tok").unwrap();
+        let parsed: ToolFile =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(parsed.port, 1);
+        assert_eq!(parsed.token, "tool-tok");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn tool_removal_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent-tool.json");
+        write_tool_file(&path, 1, "tok").unwrap();
+        remove_tool_file(&path);
+        remove_tool_file(&path);
+        assert!(!path.exists());
     }
 
     #[test]

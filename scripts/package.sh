@@ -36,13 +36,26 @@ fi
 # It goes in as a Tauri resource — resources are signed and notarized with the
 # bundle, which a file copied in afterwards would not be.
 cargo build --release -p agi-hook-shim
-SHIM="target/release/agi-mizar-hook"
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+SHIM="$TARGET_DIR/release/agi-mizar-hook"
 if [[ "${1:-}" == "--universal" ]]; then
-  SHIM="target/universal-apple-darwin/release/agi-mizar-hook"
+  SHIM="$TARGET_DIR/universal-apple-darwin/release/agi-mizar-hook"
 fi
 mkdir -p crates/agi-app/resources
 cp "$SHIM" crates/agi-app/resources/agi-mizar-hook
 chmod +x crates/agi-app/resources/agi-mizar-hook
+
+# The remote-agent sidecar. It is what the settings-page install button runs,
+# so it has to be inside the signed bundle, not a path the user happened to
+# build in a target directory.
+cargo build --release -p agi-remote
+REMOTE="$TARGET_DIR/release/agi-remote"
+if [[ "${1:-}" == "--universal" ]]; then
+  REMOTE="$TARGET_DIR/universal-apple-darwin/release/agi-remote"
+fi
+mkdir -p crates/agi-app/resources/bin
+cp "$REMOTE" crates/agi-app/resources/bin/agi-remote
+chmod +x crates/agi-app/resources/bin/agi-remote
 
 TARGET_ARGS=()
 if [[ "${1:-}" == "--universal" ]]; then
@@ -70,7 +83,10 @@ fi
 # The updater's signature is what makes a downloaded bundle trusted; without the
 # key the CLI refuses to produce `latest.json`'s artifacts, which is the correct
 # failure for a release but not for a local build.
-if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" && -z "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]]; then
+UPDATER_ARTIFACTS=false
+if [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" || -n "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]]; then
+  UPDATER_ARTIFACTS=true
+else
   echo "note: no TAURI_SIGNING_PRIVATE_KEY; updater artifacts will not be produced" >&2
 fi
 
@@ -78,16 +94,26 @@ if [[ ! -x crates/agi-app/resources/bin/llama-server ]]; then
   echo "note: no llama-server in resources/bin; run scripts/fetch-llama.sh" >&2
 fi
 
-cargo tauri build "${TARGET_ARGS[@]}" \
-  --config '{"bundle":{"resources":{"resources/agi-mizar-hook":"agi-mizar-hook","resources/bin":"bin"}}}'
+set +e
+cargo tauri build ${TARGET_ARGS[@]+"${TARGET_ARGS[@]}"} \
+  --config "{\"bundle\":{\"createUpdaterArtifacts\":${UPDATER_ARTIFACTS},\"resources\":{\"resources/agi-mizar-hook\":\"agi-mizar-hook\",\"resources/bin\":\"bin\"}}}"
+BUNDLE_STATUS=$?
+set -e
 
 # Nested binaries are not signed by the bundler: it signs MacOS/, Frameworks/
 # and friends, not Resources/. Every dylib and the runner itself have to be
 # signed with the same identity first, then the app re-signed around them. Do
 # not use --deep here: it signs with the wrong options and hides the real error.
-APP_DIR="target/release/bundle/macos/AGI Mizar.app"
+APP_DIR="$TARGET_DIR/release/bundle/macos/AGI Mizar.app"
 if [[ "${#TARGET_ARGS[@]}" -gt 0 ]]; then
-  APP_DIR="target/${TARGET_ARGS[1]}/release/bundle/macos/AGI Mizar.app"
+  APP_DIR="$TARGET_DIR/${TARGET_ARGS[1]}/release/bundle/macos/AGI Mizar.app"
+fi
+if [[ ! -d "$APP_DIR" ]]; then
+  echo "error: tauri build failed before producing $APP_DIR (exit $BUNDLE_STATUS)" >&2
+  exit "$BUNDLE_STATUS"
+fi
+if [[ "$BUNDLE_STATUS" -ne 0 ]]; then
+  echo "warning: tauri exited $BUNDLE_STATUS after producing the app bundle; continuing without updater artifacts" >&2
 fi
 if [[ -d "$APP_DIR/Contents/Resources/bin" && -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
   find "$APP_DIR/Contents/Resources/bin" -type f -name '*.dylib' -print0 \
@@ -96,6 +122,8 @@ if [[ -d "$APP_DIR/Contents/Resources/bin" && -n "${APPLE_SIGNING_IDENTITY:-}" ]
   codesign --force --options runtime --timestamp \
     --sign "$APPLE_SIGNING_IDENTITY" "$APP_DIR/Contents/Resources/bin/llama-server"
   codesign --force --options runtime --timestamp \
+    --sign "$APPLE_SIGNING_IDENTITY" "$APP_DIR/Contents/Resources/bin/agi-remote"
+  codesign --force --options runtime --timestamp \
     --sign "$APPLE_SIGNING_IDENTITY" "$APP_DIR"
 fi
 
@@ -103,9 +131,9 @@ fi
 # submit. A DMG that is signed and not notarized is still rejected by
 # Gatekeeper — "Unnotarized Developer ID" — so this step is not optional for a
 # build somebody else will install.
-BUNDLE_DIR="target/release/bundle"
+BUNDLE_DIR="$TARGET_DIR/release/bundle"
 if [[ "${#TARGET_ARGS[@]}" -gt 0 ]]; then
-  BUNDLE_DIR="target/${TARGET_ARGS[1]}/release/bundle"
+  BUNDLE_DIR="$TARGET_DIR/${TARGET_ARGS[1]}/release/bundle"
 fi
 DMG="$(find "$BUNDLE_DIR/dmg" -maxdepth 1 -name '*.dmg' -print -quit 2>/dev/null || true)"
 if [[ -n "$DMG" ]]; then

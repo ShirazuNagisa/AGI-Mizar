@@ -9,6 +9,7 @@ description = "Starts the whole kernel: engines, local API, phone server, tunnel
 
 [dependencies]
 agi-core = { workspace = true }
+agi-lan = { workspace = true }
 agi-engine = { workspace = true }
 agi-engine-claude = { workspace = true }
 agi-engine-codex = { workspace = true }

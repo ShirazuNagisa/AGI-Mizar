@@ -55,6 +55,8 @@ pub struct Config {
     pub plugin_token: String,
     /// Presented by the hook shim on every hook invocation.
     pub hook_token: String,
+    /// Presented by the scoped remote-agent MCP/CLI; only `Remote*` commands.
+    pub tool_token: String,
 }
 
 #[derive(Clone)]
@@ -66,6 +68,7 @@ struct AppState {
     claude: Option<Arc<ClaudeEngine>>,
     api_token: Arc<String>,
     hook_token: Arc<String>,
+    tool_token: Arc<String>,
     /// How many UI sockets are open. Claude's `PreToolUse` only blocks while
     /// somebody is watching.
     watchers: Arc<AtomicUsize>,
@@ -87,6 +90,7 @@ pub async fn bind(
         claude,
         api_token: Arc::new(config.api_token),
         hook_token: Arc::new(config.hook_token),
+        tool_token: Arc::new(config.tool_token),
         watchers: Arc::new(AtomicUsize::new(0)),
     };
 
@@ -251,8 +255,15 @@ async fn command_handler(
     headers: HeaderMap,
     Json(command): Json<Command>,
 ) -> Response {
-    if !authorized(&headers, &app.api_token) {
+    let ui = authorized(&headers, &app.api_token);
+    let tool = authorized(&headers, &app.tool_token);
+    if !ui && !tool {
         return unauthorized();
+    }
+    // The tool token is deliberately narrower than the UI's: an MCP process may
+    // delegate, but it must not read sessions or drive the window.
+    if tool && !ui && !command.is_remote() {
+        return forbidden("the tool token may only call Remote commands");
     }
     Json(app.core.dispatch(command).await).into_response()
 }
@@ -519,6 +530,14 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
         difference |= a ^ b;
     }
     difference == 0
+}
+
+fn forbidden(message: &str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({ "ok": false, "error": { "code": "FORBIDDEN", "message": message } })),
+    )
+        .into_response()
 }
 
 fn unauthorized() -> Response {

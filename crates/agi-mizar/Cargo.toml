@@ -8,6 +8,7 @@ repository.workspace = true
 description = "The Mizar v1 server: pairing, devices, and the phone-facing WebSocket, served from the desktop."
 
 [dependencies]
+agi-lan = { workspace = true }
 agi-protocol = { workspace = true }
 agi-platform = { workspace = true }
 agi-engine = { workspace = true }

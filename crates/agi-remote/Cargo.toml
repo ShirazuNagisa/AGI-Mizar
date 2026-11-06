@@ -1,0 +1,21 @@
+[package]
+name = "agi-remote"
+version.workspace = true
+edition.workspace = true
+description = "MCP/CLI bridge from an AGI Mizar agent to same-account remote peers"
+publish = false
+
+[[bin]]
+name = "agi-remote"
+path = "src/main.rs"
+
+[dependencies]
+agi-platform = { workspace = true }
+anyhow = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+tempfile = { workspace = true }

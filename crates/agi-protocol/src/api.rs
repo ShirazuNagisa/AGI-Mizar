@@ -428,8 +428,63 @@ pub enum Command {
     },
     /// Forget the account on this machine.
     AccountLogout,
+    /// Recent delegation audit lines (UI token only).
+    RemoteAudit,
+    /// Install/repair the DSH MCP entry and skill (UI token only).
+    RemoteInstall {
+        #[serde(default)]
+        profile: Option<String>,
+        #[serde(default)]
+        dry_run: bool,
+    },
+    /// Remove the DSH MCP entry and skill (UI token only).
+    RemoteUninstall {
+        #[serde(default)]
+        profile: Option<String>,
+        #[serde(default)]
+        dry_run: bool,
+    },
     /// The account's computers, with whether each is reachable now.
     AccountDesktops,
+    /// This computer's LAN identity and certificate status.
+    LanIdentity,
+    /// Fetch/renew the account CA certificate for this LAN identity.
+    LanCertificate,
+    /// This computer's policy for accepting same-account peers.
+    RemoteTargetSettings,
+    /// Replace the target policy. UI token only; never the tool token.
+    SetRemoteTargetSettings {
+        enabled: bool,
+        allow_lan: bool,
+        allow_wan: bool,
+        #[serde(default)]
+        workspaces: Vec<String>,
+        #[serde(default)]
+        blocked: Vec<String>,
+    },
+    /// Same-account computers this install may delegate to.
+    RemotePeers,
+    /// Start one remote delegation. Returns immediately with its id.
+    RemoteDelegate {
+        peer: String,
+        #[serde(default)]
+        cwd: Option<String>,
+        prompt: String,
+    },
+    /// Every delegation this install knows about.
+    RemoteDelegations,
+    /// One delegation's state and final text.
+    RemoteResult { id: String },
+    /// Stop the remote turn and mark the delegation cancelled.
+    RemoteCancel { id: String },
+    /// Answer one remote approval (P4; P1 answers NOT_IMPLEMENTED).
+    RemoteAnswer {
+        id: String,
+        approval: String,
+        outcome: String,
+    },
+    /// Send another prompt to the same remote session.
+    RemoteSend { id: String, message: String },
     /// Where the browser should go to sign in with GitHub.
     AccountGithubStart,
     /// Spend the handoff code GitHub's done page showed.
@@ -491,6 +546,26 @@ pub enum Command {
 
     /// Liveness probe, used by the shell before it shows a window.
     Ping,
+}
+
+impl Command {
+    /// Whether this is one of the tool-token commands.
+    ///
+    /// The UI bearer answers everything; `agent-tool.json` is deliberately
+    /// narrower. Keep this list next to the enum so a new Remote command cannot
+    /// be forgotten in the server's token check.
+    pub fn is_remote(&self) -> bool {
+        matches!(
+            self,
+            Self::RemotePeers
+                | Self::RemoteDelegate { .. }
+                | Self::RemoteDelegations
+                | Self::RemoteResult { .. }
+                | Self::RemoteCancel { .. }
+                | Self::RemoteAnswer { .. }
+                | Self::RemoteSend { .. }
+        )
+    }
 }
 
 /// What the window draws to pair a phone.
@@ -688,6 +763,42 @@ mod tests {
         assert!(wire.get("update_available").is_none());
         assert!(wire.get("last_checked").is_none());
         assert_eq!(wire["minimum"], DSH_PLUGIN_MIN_VERSION);
+    }
+
+    #[test]
+    fn the_tool_scope_is_exactly_the_remote_commands() {
+        assert!(Command::RemotePeers.is_remote());
+        assert!(Command::RemoteDelegate {
+            peer: "p".into(),
+            cwd: None,
+            prompt: "t".into(),
+        }
+        .is_remote());
+        assert!(Command::RemoteDelegations.is_remote());
+        assert!(Command::RemoteResult { id: "d".into() }.is_remote());
+        assert!(Command::RemoteCancel { id: "d".into() }.is_remote());
+        assert!(Command::RemoteAnswer {
+            id: "d".into(),
+            approval: "a".into(),
+            outcome: "allowed-once".into(),
+        }
+        .is_remote());
+        assert!(Command::RemoteSend {
+            id: "d".into(),
+            message: "more".into(),
+        }
+        .is_remote());
+        for command in [
+            Command::State,
+            Command::AccountDesktops,
+            Command::Messages {
+                session: "dsh:s".parse().unwrap(),
+                limit: None,
+                before: None,
+            },
+        ] {
+            assert!(!command.is_remote());
+        }
     }
 
     #[test]

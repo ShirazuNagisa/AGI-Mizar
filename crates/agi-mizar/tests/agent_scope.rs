@@ -116,6 +116,10 @@ impl Engine for Fake {
         Ok(self.sessions.clone())
     }
 
+    async fn create(&self, _cwd: Option<&str>) -> Result<SessionKey, agi_engine::EngineError> {
+        Ok(SessionKey::new(self.id, "peer-created"))
+    }
+
     async fn records(
         &self,
         _session: &SessionKey,
@@ -290,6 +294,10 @@ async fn an_unscoped_phone_still_sees_every_agent() {
     );
 
     let workspaces = call(&mut socket, "workspace.list", json!({})).await;
+    assert_eq!(
+        workspaces["type"], "ok",
+        "workspace.list failed: {workspaces}"
+    );
     let rows = workspaces["result"]["items"].as_array().unwrap();
     assert_eq!(rows.len(), 3, "one workspace per agent: {workspaces}");
     assert_eq!(workspaces["result"]["complete"], true);
@@ -312,6 +320,10 @@ async fn a_token_scoped_to_one_agent_sees_only_that_agent() {
     // The bug this file exists for: two folders from two other agents, drawn
     // under DSH's as empty headings.
     let workspaces = call(&mut socket, "workspace.list", json!({})).await;
+    assert_eq!(
+        workspaces["type"], "ok",
+        "workspace.list failed: {workspaces}"
+    );
     let rows = workspaces["result"]["items"].as_array().unwrap();
     assert_eq!(rows.len(), 1, "only DSH's workspace: {workspaces}");
     assert_eq!(rows[0]["workspaceId"], "dsh:ws-dsh");
@@ -338,6 +350,10 @@ async fn a_paired_phone_can_ask_for_an_agent_on_the_socket() {
         .starts_with("claude:"));
 
     let workspaces = call(&mut socket, "workspace.list", json!({})).await;
+    assert_eq!(
+        workspaces["type"], "ok",
+        "workspace.list failed: {workspaces}"
+    );
     let rows = workspaces["result"]["items"].as_array().unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["engine"], "claude");
@@ -547,6 +563,7 @@ async fn another_agents_approval_is_not_listed_nor_answerable() {
     let (mut socket, _) = connect(server.port(), &issued.token, None).await;
 
     let pending = call(&mut socket, "interactions.pending", json!({})).await;
+    assert_eq!(pending["type"], "ok", "pending failed: {pending}");
     let approvals = pending["result"]["approvals"].as_array().unwrap();
     assert_eq!(approvals.len(), 1, "only DSH's approval: {pending}");
     assert_eq!(approvals[0]["sessionId"], "dsh:session-1");
@@ -597,13 +614,22 @@ async fn call(
     method: &str,
     payload: Value,
 ) -> Value {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let id = format!("m{}", NEXT.fetch_add(1, Ordering::Relaxed));
     socket
         .send(Message::Text(
-            json!({ "v": 1, "type": method, "id": "m1", "payload": payload }).to_string(),
+            json!({ "v": 1, "type": method, "id": id, "payload": payload }).to_string(),
         ))
         .await
         .unwrap();
-    next(socket).await
+    loop {
+        let value = next(socket).await;
+        if value.get("id").and_then(Value::as_str) == Some(&id) {
+            return value;
+        }
+        // An event (an approval, a state notice) is not this call's answer.
+    }
 }
 
 /// Read one frame.
@@ -627,4 +653,132 @@ async fn the_hello_probe_still_answers_for_a_phone_that_has_not_paired() {
     assert_eq!(status, 200);
     let value: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(value["hostName"], "test-host");
+}
+
+/// A peer is confined to the sessions it created and the operator's workspaces.
+#[tokio::test]
+async fn a_peer_only_sees_its_own_sessions_and_allowed_workspaces() {
+    use agi_core::RemotePrefs;
+
+    let (server, store, core, fakes, dir) = start().await;
+    server.load_peer_sessions(dir.path().join("peer-sessions.json"));
+    core.set_remote_prefs(RemotePrefs {
+        enabled: true,
+        allow_lan: true,
+        allow_wan: true,
+        workspaces: vec!["/tmp/dsh-project".to_string()],
+        blocked: Vec::new(),
+    });
+    let issued = store
+        .issue("Peer", Some("peer:acct-1:peer-1:dsh".to_string()))
+        .unwrap();
+    let (mut socket, _) = connect(server.port(), &issued.token, None).await;
+
+    // The host has DSH's session-1, but the peer did not create it.
+    let sessions = call(&mut socket, "session.list", json!({})).await;
+    assert_eq!(
+        sessions["result"]["items"].as_array().unwrap().len(),
+        0,
+        "a new peer owns nothing: {sessions}"
+    );
+    let refused = call(
+        &mut socket,
+        "session.messages",
+        json!({ "sessionId": "dsh:session-1" }),
+    )
+    .await;
+    assert_eq!(refused["type"], "error", "another session must be refused");
+
+    // A path outside the allowlist is refused before the engine is touched.
+    let outside = call(
+        &mut socket,
+        "session.create",
+        json!({ "cwd": "/tmp/not-allowed" }),
+    )
+    .await;
+    assert_eq!(outside["type"], "error");
+    assert_eq!(outside["code"], "WORKSPACE_NOT_ALLOWED");
+
+    // The allowlisted path creates a session the peer now owns.
+    let created = call(
+        &mut socket,
+        "session.create",
+        json!({ "cwd": "/tmp/dsh-project" }),
+    )
+    .await;
+    assert_eq!(
+        created["type"], "ok",
+        "the allowed workspace creates: {created}"
+    );
+    let owned = created["result"]["sessionId"].as_str().unwrap().to_string();
+    let served = call(
+        &mut socket,
+        "session.messages",
+        json!({ "sessionId": owned }),
+    )
+    .await;
+    assert_eq!(
+        served["type"], "ok",
+        "the peer's own session stays readable"
+    );
+
+    // Another agent's approval is not this peer's to see; one on its own
+    // session is.
+    fakes[0].ask(Interaction {
+        id: "approval-other".to_string(),
+        session: Some(SessionKey::new(EngineId::Dsh, "session-1")),
+        kind: agi_protocol::domain::InteractionKind::Approval,
+        title: "bash".to_string(),
+        detail: Some("another session".to_string()),
+        requested_at: 1,
+        questions: Vec::new(),
+    });
+    let owned_key: SessionKey = owned.parse().unwrap();
+    fakes[0].ask(Interaction {
+        id: "approval-owned".to_string(),
+        session: Some(owned_key),
+        kind: agi_protocol::domain::InteractionKind::Approval,
+        title: "bash".to_string(),
+        detail: Some("my session".to_string()),
+        requested_at: 2,
+        questions: Vec::new(),
+    });
+    for _ in 0..50 {
+        if core.snapshot().interactions.len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let pending = call(&mut socket, "interactions.pending", json!({})).await;
+    assert_eq!(pending["type"], "ok", "pending failed: {pending}");
+    let approvals = pending["result"]["approvals"].as_array().unwrap();
+    assert_eq!(
+        approvals.len(),
+        1,
+        "only the peer's own approval: {pending}"
+    );
+    assert_eq!(approvals[0]["requestId"], "approval-owned");
+
+    // The ownership map is on disk for a restart.
+    let saved = std::fs::read_to_string(dir.path().join("peer-sessions.json")).unwrap();
+    assert!(saved.contains(&owned), "peer ownership survives: {saved}");
+
+    let workspaces = call(&mut socket, "workspace.list", json!({})).await;
+    assert_eq!(
+        workspaces["type"], "ok",
+        "workspace.list failed: {workspaces}"
+    );
+    let rows = workspaces["result"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("workspace.list shape: {workspaces}"));
+    assert_eq!(
+        rows.len(),
+        1,
+        "only the allowed DSH workspace: {workspaces}"
+    );
+    assert_eq!(rows[0]["path"], "/tmp/dsh-project");
+    assert!(
+        rows[0].get("sessionIds").is_none(),
+        "peer must not see other sessions"
+    );
 }

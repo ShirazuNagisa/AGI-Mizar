@@ -445,6 +445,7 @@ fn main() {
                     &agi_core::endpoint::default_endpoint_path(),
                 );
                 agi_core::endpoint::remove_hook_file(&agi_core::endpoint::default_hook_path());
+                agi_core::endpoint::remove_tool_file(&agi_core::endpoint::default_tool_path());
             }
         });
 }

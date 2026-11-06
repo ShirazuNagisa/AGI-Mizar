@@ -1,0 +1,25 @@
+[package]
+name = "agi-peer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Outbound Mizar v1 client for same-account remote agents"
+
+[dependencies]
+agi-protocol = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+agi-platform = { workspace = true }
+anyhow = { workspace = true }
+reqwest = { workspace = true }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }

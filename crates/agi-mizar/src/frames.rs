@@ -155,6 +155,8 @@ pub enum ErrorCode {
     AttachmentTooLarge,
     AttachmentUnsupported,
     AttachmentFailed,
+    /// A peer asked for a directory outside the operator's remote allowlist.
+    WorkspaceNotAllowed,
 }
 
 impl ErrorCode {
@@ -187,6 +189,7 @@ impl ErrorCode {
             Self::AttachmentTooLarge => "ATTACHMENT_TOO_LARGE",
             Self::AttachmentUnsupported => "ATTACHMENT_UNSUPPORTED",
             Self::AttachmentFailed => "ATTACHMENT_FAILED",
+            Self::WorkspaceNotAllowed => "WORKSPACE_NOT_ALLOWED",
         }
     }
 

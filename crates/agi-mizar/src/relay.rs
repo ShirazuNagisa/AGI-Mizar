@@ -42,6 +42,9 @@ use crate::store::DeviceStore;
 /// Where the account headers come from: the session token and this device's id.
 type AccountSource = Arc<dyn Fn() -> Option<(String, String)> + Send + Sync>;
 
+/// Whether this computer currently accepts same-account peers.
+pub type PeerPolicy = Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// The path a computer dials to establish its tunnel.
 pub const TUNNEL_PATH: &str = "/tunnel";
 
@@ -79,6 +82,8 @@ pub struct RelayClient {
     account: Mutex<Option<AccountSource>>,
     /// The roster tokens are minted from, when the relay brokers a phone.
     store: Mutex<Option<Arc<DeviceStore>>>,
+    /// The operator's remote-peer switch, read when the relay asks for a peer.
+    peer_policy: Mutex<Option<PeerPolicy>>,
     /// Tells the read loop to hang up so the next dial carries fresher headers.
     kick: broadcast::Sender<()>,
 }
@@ -102,6 +107,7 @@ impl RelayClient {
             streams: Mutex::new(HashMap::new()),
             account: Mutex::new(None),
             store: Mutex::new(None),
+            peer_policy: Mutex::new(None),
             kick: broadcast::channel(4).0,
         })
     }
@@ -154,6 +160,14 @@ impl RelayClient {
             .store
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(store);
+    }
+
+    /// Give the tunnel the operator's remote-peer switch.
+    pub fn set_peer_policy(&self, policy: PeerPolicy) {
+        *self
+            .peer_policy
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(policy);
     }
 
     /// Hang up so the next dial presents the current account headers.
@@ -364,6 +378,29 @@ impl RelayClient {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        // A desktop peer is a separate capability from a phone: the operator
+        // turns it on for this machine, and the relay only asks after the paid
+        // gate has passed.
+        let peer = frame.get("peer").and_then(Value::as_bool).unwrap_or(false);
+        let peer_allowed = self
+            .peer_policy
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(|policy| policy())
+            .unwrap_or(false);
+        if peer && !peer_allowed {
+            let out = out.clone();
+            tokio::spawn(async move {
+                let _ = out
+                    .send(json!({
+                        "t": "error", "id": id,
+                        "message": "this computer does not accept remote peers"
+                    }))
+                    .await;
+            });
+            return;
+        }
         let store = self
             .store
             .lock()
@@ -372,7 +409,11 @@ impl RelayClient {
         tokio::spawn(async move {
             let token = match store {
                 Some(store) if !account.is_empty() && !phone.is_empty() => {
-                    provision_for_phone(&store, &account, &phone, &name, &engine).ok()
+                    if peer {
+                        provision_for_peer(&store, &account, &phone, &name, &engine).ok()
+                    } else {
+                        provision_for_phone(&store, &account, &phone, &name, &engine).ok()
+                    }
                 }
                 _ => None,
             };
@@ -727,16 +768,65 @@ fn account_marker(account: &str, phone: &str, engine: &str) -> String {
     }
 }
 
+/// The marker a peer token carries: account, calling desktop, engine.
+fn peer_marker(account: &str, peer: &str, engine: &str) -> String {
+    if engine.is_empty() {
+        format!("peer:{account}:{peer}")
+    } else {
+        format!("peer:{account}:{peer}:{engine}")
+    }
+}
+
+/// The stable peer identity embedded in a peer token marker.
+///
+/// `peer:<account>:<device>` — deliberately without the engine, so switching
+/// the target's agent does not create a second session-ownership bucket.
+pub fn peer_identity_of_marker(marker: &str) -> Option<String> {
+    let mut parts = marker.split(':');
+    if parts.next() != Some("peer") {
+        return None;
+    }
+    let account = parts.next().filter(|part| !part.is_empty())?;
+    let peer = parts.next().filter(|part| !part.is_empty())?;
+    Some(format!("peer:{account}:{peer}"))
+}
+
 /// The engine a provisioned token was scoped to, if any.
 pub fn engine_of_marker(marker: &str) -> Option<&str> {
     let mut parts = marker.split(':');
-    if parts.next() != Some("account") {
+    let kind = parts.next()?;
+    if kind != "account" && kind != "peer" {
         return None;
     }
     parts.next()?; // account id
-    parts.next()?; // phone id
+    parts.next()?; // device id
     let engine = parts.next()?;
     (!engine.is_empty()).then_some(engine)
+}
+
+/// Mint one peer's token, replacing the one it had before.
+///
+/// Peer tokens and phone tokens use different markers: a phone switching agents
+/// must not revoke a peer, and a peer reconnecting must not touch the phones.
+fn provision_for_peer(
+    store: &DeviceStore,
+    account: &str,
+    peer: &str,
+    name: &str,
+    engine: &str,
+) -> std::io::Result<String> {
+    let marker = peer_marker(account, peer, engine);
+    let stale = format!("peer:{account}:{peer}");
+    for device in store.devices() {
+        let is_this_peer = device
+            .model
+            .as_deref()
+            .is_some_and(|model| model == stale || model.starts_with(&format!("{stale}:")));
+        if device.is_live() && is_this_peer {
+            let _ = store.revoke(&device.id);
+        }
+    }
+    store.issue(name, Some(marker)).map(|issued| issued.token)
 }
 
 /// Mint one phone's token, replacing the one it had before.
@@ -769,15 +859,16 @@ fn provision_for_phone(
 
 /// Revoke every token this account was provisioned, without touching the tunnel.
 pub fn revoke_account_tokens(store: &DeviceStore, account: &str) {
-    let prefix = format!("account:{account}:");
-    for device in store.devices() {
-        if device.is_live()
-            && device
-                .model
-                .as_deref()
-                .is_some_and(|model| model.starts_with(&prefix))
-        {
-            let _ = store.revoke(&device.id);
+    for prefix in [format!("account:{account}:"), format!("peer:{account}:")] {
+        for device in store.devices() {
+            if device.is_live()
+                && device
+                    .model
+                    .as_deref()
+                    .is_some_and(|model| model.starts_with(&prefix))
+            {
+                let _ = store.revoke(&device.id);
+            }
         }
     }
 }
@@ -878,6 +969,42 @@ mod tests {
         assert!(store.lookup(&second).is_none());
         assert!(store.lookup(&other).is_none());
         assert!(store.lookup(&paired.token).is_some());
+    }
+
+    #[test]
+    fn peer_markers_keep_their_identity_and_engine() {
+        assert_eq!(
+            peer_identity_of_marker("peer:acct-1:peer-1:dsh").as_deref(),
+            Some("peer:acct-1:peer-1")
+        );
+        assert_eq!(engine_of_marker("peer:acct-1:peer-1:dsh"), Some("dsh"));
+        assert_eq!(peer_identity_of_marker("account:acct-1:phone-1:dsh"), None);
+        assert_eq!(engine_of_marker("account:acct-1:phone-1:dsh"), Some("dsh"));
+    }
+
+    /// A peer re-provision touches peers of the same caller, not phones.
+    #[test]
+    fn a_provisioned_peer_replaces_only_that_peer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DeviceStore::open(dir.path().join("devices.json"), "host").unwrap();
+        let phone = provision_for_phone(&store, "u1", "caller", "Phone", "dsh").unwrap();
+        let first = provision_for_peer(&store, "u1", "caller", "Peer", "dsh").unwrap();
+        let second = provision_for_peer(&store, "u1", "caller", "Peer", "dsh").unwrap();
+        assert_ne!(first, second);
+        assert!(
+            store.lookup(&first).is_none(),
+            "the old peer token is revoked"
+        );
+        assert!(store.lookup(&second).is_some());
+        assert!(store.lookup(&phone).is_some(), "phones are not peer tokens");
+
+        // Another caller's peer keeps its token.
+        let other = provision_for_peer(&store, "u1", "caller-2", "Peer 2", "dsh").unwrap();
+        assert!(store.lookup(&other).is_some());
+        revoke_account_tokens(&store, "u1");
+        assert!(store.lookup(&second).is_none());
+        assert!(store.lookup(&other).is_none());
+        assert!(store.lookup(&phone).is_none());
     }
 
     #[test]

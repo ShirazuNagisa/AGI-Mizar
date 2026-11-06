@@ -100,6 +100,7 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
     let plugin_token = random_token();
     let api_token = random_token();
     let hook_token = random_token();
+    let tool_token = random_token();
 
     let dsh = DshEngine::new(plugin_token.clone());
     let mut engines: Vec<Arc<dyn Engine>> = vec![dsh.clone()];
@@ -115,6 +116,51 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
     engines.extend(hosted);
 
     let core = Core::new(engines);
+    {
+        let dsh_for_notice = Arc::clone(&dsh);
+        core.set_remote_notice_sink(Arc::new(move |record, notice_kind| {
+            let dsh = Arc::clone(&dsh_for_notice);
+            let id = record.id.clone();
+            let kind = if notice_kind == "approval" {
+                "approval".to_string()
+            } else {
+                format!("{:?}", record.state).to_lowercase()
+            };
+            let text = if notice_kind == "approval" {
+                let approval = record.approval.clone();
+                match approval {
+                    Some(approval) => format!(
+                        "Remote approval needed on {} (risk: {}): {}\n\
+                         Delegation {}. Answer with remote_answer only if the risk is low; \
+                         otherwise leave it to the remote operator.",
+                        record.peer_name, approval.risk, approval.reason, record.id
+                    ),
+                    None => "A remote approval was withdrawn.".to_string(),
+                }
+            } else {
+                match record.state {
+                    agi_core::remote::RemoteState::Done => record
+                        .final_text
+                        .clone()
+                        .unwrap_or_else(|| "the remote agent finished without text".to_string()),
+                    agi_core::remote::RemoteState::Failed => record
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "the remote turn failed".to_string()),
+                    agi_core::remote::RemoteState::Cancelled => {
+                        "the remote turn was cancelled".to_string()
+                    }
+                    agi_core::remote::RemoteState::Interrupted => {
+                        "the remote turn was interrupted".to_string()
+                    }
+                    agi_core::remote::RemoteState::Running => return,
+                }
+            };
+            tokio::spawn(async move {
+                dsh.notify_delegation(&id, &kind, &text).await;
+            });
+        }));
+    }
     core.set_unavailable(missing.clone().into_iter().collect());
     core.set_rescan(Arc::new(discover_local));
     core.set_claude_hooks(Arc::new(install_hooks));
@@ -123,6 +169,9 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
     if let Some(home) = endpoint_file.parent() {
         core.load_preferences(home.join("preferences.json"));
         core.load_account(home.join("account.json"));
+        core.load_lan_certificate(home.join("lan-certificate.json"));
+        core.load_remote(agi_core::remote::default_path());
+        core.set_remote_audit_path(agi_core::remote::default_audit_path());
         dsh.set_usage_cache_path(home.join("usage-dsh.json"));
 
         // An install that has already signed in has been configured by hand, in
@@ -176,6 +225,7 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
             api_token: api_token.clone(),
             plugin_token: plugin_token.clone(),
             hook_token: hook_token.clone(),
+            tool_token: tool_token.clone(),
         },
     )
     .await?;
@@ -184,6 +234,7 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
     // answers retries with backoff and looks broken.
     endpoint::write_endpoint_file(&endpoint_file, api_port, &plugin_token)?;
     endpoint::write_hook_file(&endpoint::default_hook_path(), api_port, &hook_token)?;
+    endpoint::write_tool_file(&endpoint::default_tool_path(), api_port, &tool_token)?;
 
     if config.install_claude_hooks {
         if let Err(error) = install_hooks() {
@@ -201,6 +252,123 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
     // authenticates against.
     let roster_for_relay = Arc::clone(&roster);
     let mizar = MizarServer::new(Arc::clone(&core), roster, dsh_home);
+    mizar.load_peer_sessions(agi_platform::data_dir().join("peer-sessions.json"));
+
+    // The LAN listener starts only when the operator enabled LAN and the
+    // account issued a certificate. A failed bind is retried; a disabled host
+    // never opens the port at all.
+    {
+        let core_for_lan = Arc::clone(&core);
+        let mizar_for_lan = Arc::clone(&mizar);
+        tokio::spawn(async move {
+            loop {
+                let prefs = core_for_lan.remote_prefs();
+                if !prefs.enabled || !prefs.allow_lan {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    continue;
+                }
+                let credentials = match core_for_lan.lan_credentials().await {
+                    Ok(credentials) => credentials,
+                    Err(error) => {
+                        tracing::debug!("lan: credentials not ready — {error}");
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        continue;
+                    }
+                };
+                let lan_account = credentials.trust.account_id.clone();
+                let core_for_discovery = Arc::clone(&core_for_lan);
+                let mdns_beacon = agi_lan::LanBeacon::new(
+                    &credentials.trust.account_id,
+                    credentials.certificate.body.device_id.clone(),
+                    credentials.certificate.body.device_id.clone(),
+                    agi_lan::LAN_PORT,
+                    &credentials.certificate,
+                );
+                let lan_account_tag = agi_lan::account_tag(&credentials.trust.account_id);
+                let beacon = agi_lan::LanBeacon::new(
+                    &credentials.trust.account_id,
+                    credentials.certificate.body.device_id.clone(),
+                    credentials.certificate.body.device_id.clone(),
+                    agi_lan::LAN_PORT,
+                    &credentials.certificate,
+                );
+                let listener =
+                    match agi_lan::LanListener::bind(agi_lan::LAN_PORT, credentials).await {
+                        Ok(listener) => listener,
+                        Err(error) => {
+                            tracing::warn!("lan: cannot bind {} — {error}", agi_lan::LAN_PORT);
+                            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                            continue;
+                        }
+                    };
+                tracing::info!("lan: listening on {}", agi_lan::LAN_PORT);
+                tokio::spawn(async move {
+                    let _advertiser = agi_lan::MdnsAdvertiser::start(
+                        &mdns_beacon,
+                        &format!("{}.local.", agi_platform::host_name()),
+                    )
+                    .map_err(|error| tracing::warn!("lan: mDNS advertise failed — {error}"))
+                    .ok();
+                    let browser = agi_lan::MdnsBrowser::start(&lan_account_tag)
+                        .map_err(|error| tracing::warn!("lan: mDNS browse failed — {error}"))
+                        .ok();
+                    if let Some(browser) = browser {
+                        let core = Arc::clone(&core_for_discovery);
+                        tokio::task::spawn_blocking(move || {
+                            for (beacon, ip) in browser.receiver().iter() {
+                                core.record_lan_beacon_ip(&beacon, ip);
+                            }
+                        });
+                    }
+                    let discovery = match agi_lan::LanDiscovery::bind(agi_lan::DISCOVERY_PORT).await
+                    {
+                        Ok(discovery) => discovery,
+                        Err(error) => {
+                            tracing::warn!("lan: discovery bind failed — {error}");
+                            return;
+                        }
+                    };
+                    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
+                    loop {
+                        tokio::select! {
+                            _ = ticker.tick() => {
+                                if let Err(error) = discovery.announce(&beacon).await {
+                                    tracing::debug!("lan: announce failed — {error}");
+                                }
+                            }
+                            found = discovery.recv_for_account(&lan_account) => {
+                                match found {
+                                    Ok((beacon, from)) => {
+                                        core_for_discovery.record_lan_beacon(&beacon, from);
+                                    }
+                                    Err(error) => {
+                                        tracing::debug!("lan: receive failed — {error}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+                loop {
+                    match listener.accept().await {
+                        Ok(session) => {
+                            let remote = session.remote().clone();
+                            let mizar = Arc::clone(&mizar_for_lan);
+                            tokio::spawn(async move {
+                                if let Err(error) = mizar.serve_lan(remote, session).await {
+                                    tracing::debug!("lan: session ended — {error}");
+                                }
+                            });
+                        }
+                        Err(error) => {
+                            tracing::warn!("lan: accept failed — {error}");
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        }
+                    }
+                }
+            }
+        });
+    }
     match mizar.bind(agi_mizar::frames::DEFAULT_PORT).await {
         Ok(_handle) => {}
         Err(error) => {
@@ -226,6 +394,11 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
         relay.attach_store(Arc::clone(&roster_for_relay));
         let core_for_relay = Arc::clone(&core);
         relay.set_account_source(Arc::new(move || core_for_relay.relay_account()));
+        let core_for_policy = Arc::clone(&core);
+        relay.set_peer_policy(Arc::new(move || {
+            let prefs = core_for_policy.remote_prefs();
+            prefs.enabled && prefs.allow_wan
+        }));
         core.attach_relay_status(Arc::clone(&mizar) as Arc<dyn agi_core::RelayStatusSource>);
         mizar.attach_relay(Arc::clone(&relay));
 

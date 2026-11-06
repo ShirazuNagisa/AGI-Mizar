@@ -283,6 +283,20 @@ impl DshEngine {
     }
 
     /// Write one frame to the plugin.
+    /// Wake the parent model after a remote delegation settles.
+    ///
+    /// The frame is deliberately opaque to the engine: the plugin owns the
+    /// delegation→session map and the `agents.followup` call. If no plugin is
+    /// attached, this is a dropped notification, not a failure of the remote
+    /// work.
+    pub async fn notify_delegation(&self, delegation_id: &str, kind: &str, text: &str) {
+        let id = format!("notice-{delegation_id}-{}", self.next_id());
+        let frame = DesktopFrame::delegation_notice(id, delegation_id, kind, text);
+        if let Err(error) = self.send(frame).await {
+            tracing::debug!("dsh link: delegation notice not delivered — {error}");
+        }
+    }
+
     async fn send(&self, frame: DesktopFrame) -> Result<(), EngineError> {
         let sender = self.inner().out.clone();
         let Some(sender) = sender else {
