@@ -11,8 +11,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OpenFlags};
+
+/// A turn older than this cannot still be the one holding the lamp.
+const MAX_TURN_AGE: Duration = Duration::from_secs(6 * 60 * 60);
+/// The history database must have been written recently for its in-progress
+/// rows to be believable. A closed desktop app stops writing here.
+const DB_FRESH_FOR: Duration = Duration::from_secs(10 * 60);
 
 /// A snapshot of the desktop store's thread names and live turns.
 #[derive(Debug, Default, Clone)]
@@ -62,16 +69,51 @@ pub fn read_from(state_path: &Path, history_path: &Path) -> GuiState {
             }
         }
     }
-    if let Ok(connection) = open_read_only(history_path) {
-        if let Ok(mut statement) = connection
-            .prepare("SELECT DISTINCT thread_id FROM thread_turns WHERE status IN ('inProgress', 'in_progress')")
-        {
-            if let Ok(rows) = statement.query_map([], |row| row.get::<_, String>(0)) {
-                out.running.extend(rows.flatten());
+    // The history table is a projection, not a heartbeat: after a Codex
+    // crash/close it keeps its last `inProgress` row forever. Only trust it
+    // while the database itself is warm, and only for a turn young enough to
+    // still be running.
+    if is_fresh(history_path, DB_FRESH_FOR) {
+        if let Ok(connection) = open_read_only(history_path) {
+            let cutoff = now_secs().saturating_sub(MAX_TURN_AGE.as_secs() as i64);
+            if let Ok(mut statement) = connection.prepare(
+                "SELECT DISTINCT thread_id FROM thread_turns \
+                 WHERE status IN ('inProgress', 'in_progress') \
+                   AND COALESCE(started_at, 0) >= ?1",
+            ) {
+                if let Ok(rows) = statement.query_map([cutoff], |row| row.get::<_, String>(0)) {
+                    out.running.extend(rows.flatten());
+                }
             }
         }
     }
     out
+}
+
+fn is_fresh(path: &Path, within: Duration) -> bool {
+    // SQLite in WAL mode writes the page changes to `<db>-wal` first; the main
+    // file can stay untouched until a checkpoint. Treat either as the heartbeat.
+    let wal = path.with_file_name(format!(
+        "{}-wal",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+    ));
+    fn fresh(candidate: &Path, within: Duration) -> bool {
+        std::fs::metadata(candidate)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age <= within)
+    }
+    fresh(path, within) || fresh(&wal, within)
+}
+
+fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn open_read_only(path: &Path) -> rusqlite::Result<Connection> {
@@ -117,15 +159,16 @@ mod tests {
         let connection = Connection::open(path).unwrap();
         connection
             .execute(
-                "CREATE TABLE thread_turns (thread_id TEXT, turn_id TEXT, status TEXT)",
+                "CREATE TABLE thread_turns (thread_id TEXT, turn_id TEXT, status TEXT, started_at INTEGER)",
                 [],
             )
             .unwrap();
         for (thread, status) in rows {
+            let started = now_secs() - if *status == "inProgress" { 10 } else { 3600 };
             connection
                 .execute(
-                    "INSERT INTO thread_turns (thread_id, turn_id, status) VALUES (?1, 't', ?2)",
-                    rusqlite::params![thread, status],
+                    "INSERT INTO thread_turns (thread_id, turn_id, status, started_at) VALUES (?1, 't', ?2, ?3)",
+                    rusqlite::params![thread, status, started],
                 )
                 .unwrap();
         }
@@ -158,6 +201,30 @@ mod tests {
             gui.titles.get("desktop-1").map(String::as_str),
             Some("Gui title")
         );
+    }
+
+    #[test]
+    fn an_old_open_turn_does_not_light_the_lamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.sqlite");
+        let history = dir.path().join("history.sqlite");
+        state_db(&state, &[("stale", "Codex Desktop", "Old turn")]);
+        let connection = Connection::open(&history).unwrap();
+        connection
+            .execute(
+                "CREATE TABLE thread_turns (thread_id TEXT, turn_id TEXT, status TEXT, started_at INTEGER)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO thread_turns VALUES ('stale', 't', 'inProgress', ?1)",
+                rusqlite::params![now_secs() - 7 * 60 * 60],
+            )
+            .unwrap();
+        drop(connection);
+        let gui = read_from(&state, &history);
+        assert!(!gui.running.contains("stale"));
     }
 
     #[test]
