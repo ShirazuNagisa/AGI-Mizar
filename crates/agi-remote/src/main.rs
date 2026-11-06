@@ -524,16 +524,24 @@ fn required(arguments: &Value, name: &str) -> Result<String> {
 
 // -------------------------------------------------------------- installer
 
-fn dsh_home() -> Result<PathBuf> {
-    if let Ok(home) = std::env::var("DSH_HOME") {
-        return Ok(PathBuf::from(home));
-    }
-    let home = std::env::var("HOME").context("HOME is not set")?;
-    Ok(PathBuf::from(home).join(".dsh"))
+/// Where DSH keeps its profiles. `DSH_HOME` wins, then the platform home
+/// (on Windows `USERPROFILE`; a process launched from Explorer has no `HOME`).
+fn dsh_home() -> PathBuf {
+    agi_platform::dsh_home()
+}
+
+/// Quote a scalar for YAML without double-quote escapes.
+///
+/// A Windows path is `C:\Users\...`, and `\U` / `\w` inside a double-quoted
+/// YAML scalar are not valid escapes, so the generated `cordis.patch.yml`
+/// would fail to parse and DSH would reject the whole patch. Single-quoted
+/// scalars are literal; the only escape is doubling an embedded `'`.
+fn yaml_single_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn profile_dir(args: &[String]) -> Result<PathBuf> {
-    let dsh = dsh_home()?;
+    let dsh = dsh_home();
     let explicit = flag(args, "--profile").or_else(|| std::env::var("DSH_PROFILE").ok());
     if let Some(name) = explicit {
         let dir = dsh.join("profiles").join(&name);
@@ -577,8 +585,8 @@ fn install(args: &[String]) -> Result<()> {
         .with_context(|| format!("reading {}", patch_path.display()))?;
     let executable = std::env::current_exe().context("the agi-remote executable path")?;
     let block = format!(
-        "- insert:\n    - id: {MCP_ENTRY_ID}\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: agi_mizar_remote\n        transport: stdio\n        command: \"{}\"\n        args: ['mcp']\n        toolCallTimeoutMs: 60000\n",
-        executable.display()
+        "- insert:\n    - id: {MCP_ENTRY_ID}\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: agi_mizar_remote\n        transport: stdio\n        command: {}\n        args: ['mcp']\n        toolCallTimeoutMs: 60000\n",
+        yaml_single_quoted(&executable.to_string_lossy())
     );
     let has_entry = before.contains(&format!("id: {MCP_ENTRY_ID}"));
     // A repair updates the sidecar path rather than accepting any old entry.
@@ -607,7 +615,7 @@ fn install(args: &[String]) -> Result<()> {
             println!("+{line}");
         }
     }
-    let skill_dir = dsh_home()?.join("skills").join(SKILL_NAME);
+    let skill_dir = dsh_home().join("skills").join(SKILL_NAME);
     let skill_path = skill_dir.join("SKILL.md");
     println!("skill: {}", skill_path.display());
     if dry {
@@ -649,7 +657,7 @@ fn uninstall(args: &[String]) -> Result<()> {
     } else {
         println!("MCP entry: not present");
     }
-    let skill_dir = dsh_home()?.join("skills").join(SKILL_NAME);
+    let skill_dir = dsh_home().join("skills").join(SKILL_NAME);
     println!("skill: {}", skill_dir.display());
     if dry {
         println!("dry run; nothing removed");

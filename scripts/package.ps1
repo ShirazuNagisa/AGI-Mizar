@@ -275,6 +275,19 @@ if (-not (Test-Path $llamaServer)) {
     Write-Host ("llama: {0} files, {1:N1} MiB" -f $llamaFiles.Count, ($llamaSize / 1MB))
 }
 
+# 2b. The agi-remote sidecar. It is the MCP/CLI bridge behind the settings
+#     page's remote-agent install; Windows packages it in the same `bin/`
+#     resource directory as the llama runtime, and agi-core's
+#     find_remote_installer looks for `bin/agi-remote.exe` beside the app.
+Step 'agi-remote sidecar'
+& cargo build --release -p agi-remote
+if ($LASTEXITCODE -ne 0) { Fail "cargo build --release -p agi-remote failed (exit $LASTEXITCODE)" }
+$remoteBuilt = Join-Path $root 'target/release/agi-remote.exe'
+if (-not (Test-Path $remoteBuilt)) { Fail "expected $remoteBuilt to exist after the build" }
+$remoteResource = Join-Path $llamaDir 'agi-remote.exe'
+Copy-Item -Path $remoteBuilt -Destination $remoteResource -Force
+Write-Host ("agi-remote: {0} ({1:N0} KiB)" -f $remoteResource, ((Get-Item $remoteResource).Length / 1KB))
+
 # 3. Signing prerequisites, reported rather than assumed.
 Step 'signing'
 $configArgs = @()

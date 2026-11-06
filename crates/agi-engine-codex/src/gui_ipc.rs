@@ -554,6 +554,7 @@ pub async fn answer_user_input(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
 
     #[cfg(unix)]

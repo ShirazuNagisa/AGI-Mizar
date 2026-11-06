@@ -697,19 +697,29 @@ mod tests {
             .send(b"hello from the computer".to_vec())
             .await
             .expect("sent");
+        // Computer to phone. The engine may have queued more than the data
+        // datagram (an ack for the phone's message, a keepalive), and packet
+        // order across a real socket is not the send order; keep feeding what
+        // arrives into the session until the message shows up.
         let mut buffer = vec![0u8; 2048];
-        let (length, _) =
-            tokio::time::timeout(Duration::from_secs(2), dialer.socket.recv_from(&mut buffer))
-                .await
-                .expect("a datagram comes back")
-                .expect("a datagram");
-        let packet = Packet::decode(&buffer[..length]).expect("a packet");
-        let events = dialer
-            .session
-            .as_mut()
-            .expect("settled")
-            .on_packet(&packet, Instant::now());
-        let messages: Vec<Vec<u8>> = events.into_iter().filter_map(Event::message).collect();
+        let mut messages: Vec<Vec<u8>> = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while messages.is_empty() {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            assert!(!remaining.is_zero(), "no computer-to-phone message arrived");
+            let (length, _) =
+                tokio::time::timeout(remaining, dialer.socket.recv_from(&mut buffer))
+                    .await
+                    .expect("a datagram comes back")
+                    .expect("a datagram");
+            let packet = Packet::decode(&buffer[..length]).expect("a packet");
+            let events = dialer
+                .session
+                .as_mut()
+                .expect("settled")
+                .on_packet(&packet, Instant::now());
+            messages.extend(events.into_iter().filter_map(Event::message));
+        }
         assert_eq!(messages, vec![b"hello from the computer".to_vec()]);
     }
 

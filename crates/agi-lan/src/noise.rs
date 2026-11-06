@@ -165,6 +165,21 @@ impl LanListener {
         Ok(self.listener.local_addr()?)
     }
 
+    /// The address a peer on this machine can dial right now.
+    ///
+    /// [`Self::local_addr`] reports the wildcard address (`0.0.0.0`) for the
+    /// normal bind. Unix engines treat connecting to it as loopback, but
+    /// Windows refuses the dial with `WSAEADDRNOTAVAIL` (10049), so tests and
+    /// same-host tooling must map it to loopback explicitly.
+    pub fn dial_addr(&self) -> Result<SocketAddr, LanError> {
+        let bound = self.local_addr()?;
+        Ok(if bound.ip().is_unspecified() {
+            SocketAddr::from(([127, 0, 0, 1], bound.port()))
+        } else {
+            bound
+        })
+    }
+
     /// Accept one peer and finish the handshake before returning.
     pub async fn accept(&self) -> Result<LanSession, LanError> {
         let (mut stream, _) = self.listener.accept().await?;
@@ -389,7 +404,7 @@ mod tests {
         let server_credentials = credentials(&ca, "acct", "server");
         let client_credentials = credentials(&ca, "acct", "client");
         let listener = LanListener::bind(0, server_credentials).await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let address = listener.dial_addr().unwrap();
         let accept = tokio::spawn(async move { listener.accept().await });
 
         let client = connect(address, &client_credentials).await.unwrap();
@@ -406,7 +421,7 @@ mod tests {
         let server_credentials = credentials(&ca, "acct", "server");
         let wrong = credentials(&ca, "other", "client");
         let listener = LanListener::bind(0, server_credentials).await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let address = listener.dial_addr().unwrap();
         let accept = tokio::spawn(async move { listener.accept().await });
         assert!(connect(address, &wrong).await.is_err());
         assert!(accept.await.unwrap().is_err());
@@ -421,7 +436,7 @@ mod tests {
         // this combination, and the static-key check must notice.
         client.identity = Arc::new(DeviceIdentity::generate());
         let listener = LanListener::bind(0, server_credentials).await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let address = listener.dial_addr().unwrap();
         let accept = tokio::spawn(async move { listener.accept().await });
         let _client = connect(address, &client).await;
         assert!(accept.await.unwrap().is_err());

@@ -276,12 +276,22 @@ fn run_remote_installer(uninstall: bool, profile: Option<&str>, dry_run: bool) -
 }
 
 /// Find the `agi-remote` sidecar beside a packaged app.
+///
+/// The sidecar is staged in three layouts, all of which are checked:
+/// - next to the executable (a dev `cargo build` puts it beside `agi-mizar.exe`);
+/// - under `bin/` (the Windows bundler maps `resources/bin` there);
+/// - under `../Resources/bin` (the macOS `.app` bundle layout).
 fn find_remote_installer(exe: &std::path::Path) -> Option<std::path::PathBuf> {
     let parent = exe.parent()?;
     [
         parent.join("agi-remote"),
+        parent.join("agi-remote.exe"),
+        parent.join("bin/agi-remote"),
+        parent.join("bin/agi-remote.exe"),
         parent.join("../Resources/bin/agi-remote"),
+        parent.join("../Resources/bin/agi-remote.exe"),
         parent.join("../Resources/agi-remote"),
+        parent.join("../Resources/agi-remote.exe"),
     ]
     .into_iter()
     .find(|path| path.is_file())

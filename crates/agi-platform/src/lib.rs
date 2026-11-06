@@ -58,6 +58,23 @@ pub fn data_dir() -> PathBuf {
     home().join(".agi-mizar")
 }
 
+/// Where DSH keeps its profiles: `$DSH_HOME`, or `~/.dsh`.
+///
+/// `DSH_HOME` wins because tests and a portable install use it to keep the real
+/// profile untouched. Otherwise the platform home is used: on Windows that is
+/// `USERPROFILE`, which a GUI-launched process always has, while `HOME` is
+/// normally unset there — resolving `.dsh` from a missing `HOME` is what used
+/// to make the remote-agent installer fail when the app was started from
+/// Explorer or the Start Menu.
+pub fn dsh_home() -> PathBuf {
+    if let Some(directory) = std::env::var_os("DSH_HOME") {
+        if !directory.is_empty() {
+            return PathBuf::from(directory);
+        }
+    }
+    home().join(".dsh")
+}
+
 /// The machine's name, as a person would recognise it.
 pub fn host_name() -> String {
     #[cfg(windows)]
