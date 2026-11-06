@@ -399,6 +399,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dial_addr_is_loopback_when_the_listener_binds_the_wildcard() {
+        let ca = SigningKey::generate(&mut OsRng);
+        let listener = LanListener::bind(0, credentials(&ca, "acct", "server"))
+            .await
+            .unwrap();
+        let dial = listener.dial_addr().unwrap();
+        assert!(
+            dial.ip().is_loopback(),
+            "dial_addr must map 0.0.0.0 to loopback, got {dial}"
+        );
+        assert_eq!(dial.port(), listener.local_addr().unwrap().port());
+    }
+
+    #[tokio::test]
     async fn two_desktops_handshake_and_exchange_an_encrypted_message() {
         let ca = SigningKey::generate(&mut OsRng);
         let server_credentials = credentials(&ca, "acct", "server");

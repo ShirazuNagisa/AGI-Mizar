@@ -715,3 +715,22 @@ fn remove_entry(text: &str) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::yaml_single_quoted;
+
+    /// The Windows bug this guards: a `C:\Users\...` path inside double quotes
+    /// is an illegal YAML escape (`\U`, `\w`), and DSH refused the whole patch.
+    #[test]
+    fn a_windows_path_is_a_literal_yaml_scalar() {
+        let quoted = yaml_single_quoted(r"C:\Users\me\AGI Mizar\agi-remote.exe");
+        assert_eq!(quoted, r"'C:\Users\me\AGI Mizar\agi-remote.exe'");
+        assert!(!quoted.contains('"'));
+    }
+
+    #[test]
+    fn a_quote_in_the_path_is_doubled() {
+        assert_eq!(yaml_single_quoted("a'b"), "'a''b'");
+    }
+}

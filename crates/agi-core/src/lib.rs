@@ -3044,6 +3044,27 @@ mod tests {
     }
 
     #[test]
+    fn the_remote_installer_is_found_in_the_bundle_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join(if cfg!(windows) {
+            "AGI Mizar.exe"
+        } else {
+            "AGI Mizar"
+        });
+        std::fs::write(&app, b"app").unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let remote = bin.join(if cfg!(windows) {
+            "agi-remote.exe"
+        } else {
+            "agi-remote"
+        });
+        std::fs::write(&remote, b"remote").unwrap();
+        let found = find_remote_installer(&app).expect("the sidecar under bin/ is found");
+        assert_eq!(found.file_name(), remote.file_name());
+    }
+
+    #[test]
     fn the_theme_is_remembered_between_launches() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("preferences.json");
