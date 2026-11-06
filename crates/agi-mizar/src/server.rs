@@ -2228,10 +2228,17 @@ impl MizarServer {
                     }
                 }
                 match self.relay_post("/push/v1/register", body).await {
-                    Ok(answer) => ServerFrame::ok(
-                        id,
-                        json!({ "registered": answer.get("ok").and_then(Value::as_bool).unwrap_or(false) }),
-                    ),
+                    Ok(answer) => {
+                        let registered = answer.get("ok").and_then(Value::as_bool).unwrap_or(false);
+                        if registered {
+                            // The phone may have registered after a session
+                            // started. A start that was sent before this token
+                            // existed is gone; publish the current card now so
+                            // the relay can use the start token immediately.
+                            self.publish_current_card().await;
+                        }
+                        ServerFrame::ok(id, json!({ "registered": registered }))
+                    }
                     Err(error) => {
                         tracing::warn!("mizar: push.register was not carried — {error}");
                         ServerFrame::ok(id, json!({ "registered": false }))
@@ -2376,6 +2383,49 @@ impl MizarServer {
             // A phone that cannot be woken is a worse app, not a broken host.
             tracing::debug!("mizar: no notification for {kind} — {error}");
         }
+    }
+
+    /// Publish the card for whatever is running right now.
+    ///
+    /// This is the resynchronisation path for a phone that registered its push
+    /// address after a session had already started: the original start push
+    /// happened before the relay could address this install.
+    async fn publish_current_card(&self) {
+        let snapshot = self.core.snapshot();
+        let mut rows: Vec<crate::activity::Row> = snapshot
+            .sessions
+            .iter()
+            .filter(|session| session.running)
+            .map(|session| crate::activity::Row {
+                session_id: session.key.to_string(),
+                title: session.title.clone().unwrap_or_default(),
+                running_since: session.updated_at,
+            })
+            .collect();
+        rows.sort_by_key(|row| row.running_since);
+        rows.truncate(crate::activity::MAX_ROWS);
+        if rows.is_empty() {
+            return;
+        }
+        let approvals = snapshot
+            .interactions
+            .iter()
+            .filter(|interaction| {
+                interaction.kind == agi_protocol::domain::InteractionKind::Approval
+            })
+            .map(|interaction| crate::activity::Approval {
+                request_id: interaction.id.clone(),
+                session_id: interaction
+                    .session
+                    .as_ref()
+                    .map(|key| key.to_string())
+                    .unwrap_or_default(),
+                tool: interaction.title.clone(),
+                detail: interaction.detail.clone().unwrap_or_default(),
+            })
+            .collect();
+        self.publish_card(&crate::activity::Card { rows, approvals })
+            .await;
     }
 
     /// Publish what the island should say.
