@@ -505,8 +505,8 @@ impl MizarServer {
     /// `doc(hidden)` rather than private because an integration test is another
     /// crate, and re-implementing the body in the test would check nothing.
     #[doc(hidden)]
-    pub async fn publish_card_for_tests(&self, card: &crate::activity::Card) {
-        self.publish_card(card).await;
+    pub async fn publish_card_for_tests(&self, card: &crate::activity::Card) -> bool {
+        self.publish_card(card).await
     }
 
     /// Publish a turn-end notification, for the same reason.
@@ -676,8 +676,16 @@ impl MizarServer {
             let mut states = server.core.subscribe_states();
             tokio::spawn(async move {
                 let mut tracker = crate::activity::Tracker::default();
+                let mut retry = false;
+                let mut reconcile = tokio::time::interval(std::time::Duration::from_secs(10));
+                reconcile.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     tokio::select! {
+                        _ = reconcile.tick() => {
+                            if retry && server.publish_current_card().await {
+                                retry = false;
+                            }
+                        }
                         event = events.recv() => match event {
                             Ok(agi_protocol::api::ApiEvent::SessionUpdated { session }) => {
                                 if !session.running {
@@ -690,7 +698,7 @@ impl MizarServer {
                                     continue;
                                 }
                                 if let Some(card) = tracker.running(&session, activity_now()) {
-                                    server.publish_card(&card).await;
+                                    retry = !server.publish_card(&card).await;
                                 }
                             }
                             Ok(agi_protocol::api::ApiEvent::SessionRemoved { session }) => {
@@ -701,12 +709,12 @@ impl MizarServer {
                             }
                             Ok(agi_protocol::api::ApiEvent::InteractionRequested { interaction }) => {
                                 if let Some(card) = tracker.approval_requested(&interaction) {
-                                    server.publish_card(&card).await;
+                                    retry = !server.publish_card(&card).await;
                                 }
                             }
                             Ok(agi_protocol::api::ApiEvent::InteractionResolved { id }) => {
                                 if let Some(card) = tracker.approval_resolved(&id) {
-                                    server.publish_card(&card).await;
+                                    retry = !server.publish_card(&card).await;
                                 }
                             }
                             Ok(_) => {}
@@ -2390,7 +2398,7 @@ impl MizarServer {
     /// This is the resynchronisation path for a phone that registered its push
     /// address after a session had already started: the original start push
     /// happened before the relay could address this install.
-    async fn publish_current_card(&self) {
+    async fn publish_current_card(&self) -> bool {
         let snapshot = self.core.snapshot();
         let mut rows: Vec<crate::activity::Row> = snapshot
             .sessions
@@ -2405,7 +2413,7 @@ impl MizarServer {
         rows.sort_by_key(|row| row.running_since);
         rows.truncate(crate::activity::MAX_ROWS);
         if rows.is_empty() {
-            return;
+            return false;
         }
         let approvals = snapshot
             .interactions
@@ -2425,7 +2433,7 @@ impl MizarServer {
             })
             .collect();
         self.publish_card(&crate::activity::Card { rows, approvals })
-            .await;
+            .await
     }
 
     /// Publish what the island should say.
@@ -2434,11 +2442,11 @@ impl MizarServer {
     /// that already has a card. That is what lets this computer stay ignorant of
     /// which phones are showing one -- the relay already knows, because a card
     /// reports its own token.
-    async fn publish_card(&self, card: &crate::activity::Card) {
+    async fn publish_card(&self, card: &crate::activity::Card) -> bool {
         // An empty card is not "a card with no rows": it is the end of the
         // activity, and `publish_turn_end` is the call that ends it.
         if card.is_empty() {
-            return;
+            return false;
         }
         // Do not exclude a device just because presence says it is on screen.
         // That report is asynchronous and can be stale after the app is
@@ -2447,9 +2455,18 @@ impl MizarServer {
         // the phone has already reported its own card, so including every device
         // is also what prevents a second card rather than what causes one.
         let body = crate::activity::activity_body(card, &[]);
-        if let Err(error) = self.relay_post("/push/v1/activity", body).await {
-            // A phone that cannot be reached is a worse app, not a broken host.
-            tracing::debug!("mizar: no live activity update — {error}");
+        match self.relay_post("/push/v1/activity", body).await {
+            Ok(answer) => {
+                // `sent` is the relay's APNs tally. A start whose transport
+                // failed is not a card; keep it eligible for the activity
+                // loop's periodic retry rather than waiting for the next turn.
+                answer.get("sent").and_then(Value::as_u64).unwrap_or(0) > 0
+            }
+            Err(error) => {
+                // A phone that cannot be reached is a worse app, not a broken host.
+                tracing::debug!("mizar: no live activity update — {error}");
+                false
+            }
         }
     }
 
