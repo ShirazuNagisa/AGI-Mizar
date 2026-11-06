@@ -681,6 +681,12 @@ impl MizarServer {
                         event = events.recv() => match event {
                             Ok(agi_protocol::api::ApiEvent::SessionUpdated { session }) => {
                                 if !session.running {
+                                    // Do not rely only on the state machine's terminal
+                                    // frame to finish the card. A missed terminal frame
+                                    // used to leave the island up until the app was
+                                    // opened; the session list's running flag is the
+                                    // durable second source.
+                                    server.finish_card(&mut tracker, &session.key, true).await;
                                     continue;
                                 }
                                 if let Some(card) = tracker.running(&session, activity_now()) {
