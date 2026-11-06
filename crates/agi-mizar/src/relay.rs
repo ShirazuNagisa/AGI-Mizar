@@ -340,8 +340,15 @@ impl RelayClient {
         }
 
         // Every stream belongs to this socket; they all end with it.
+        //
+        // Do not await the writer. It may be stuck in `sink.send` on a
+        // half-open socket whose peer already sent FIN -- which is exactly what
+        // a relay timeout leaves behind. Awaiting it made `serve_once` never
+        // return, so the redial loop above never ran and the room stayed dark
+        // for hours. Drop the output channel, then abort the writer and reap it.
         self.streams().clear();
         drop(out);
+        writer.abort();
         let _ = writer.await;
         Ok(())
     }
