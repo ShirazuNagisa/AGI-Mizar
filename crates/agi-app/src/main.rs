@@ -294,15 +294,23 @@ fn main() {
                     .max_inner_size(WINDOW_WIDTH, f64::INFINITY)
                     .visible(!background);
 
-            // The window draws its own chrome: the page reserves a strip for the
-            // traffic lights, and everything below it is the app's. Windows has
-            // no such overlay, so it keeps the system title bar and its own
-            // window menu (Cut/Copy/Paste come from WebView2's context menu).
+            // The window draws its own chrome: on macOS the page reserves a
+            // strip for the traffic lights and the system overlays them; on
+            // Windows the page draws the same strip and its own traffic lights,
+            // because the system title bar is removed below. Linux keeps the
+            // system title bar (and its own window menu).
             #[cfg(target_os = "macos")]
             let builder = builder
                 .title_bar_style(tauri::TitleBarStyle::Overlay)
                 .hidden_title(true)
                 .traffic_light_position(tauri::LogicalPosition::new(18.0, 20.0));
+
+            // Borderless on Windows: no caption, but `shadow(true)` gives the
+            // DWM drop shadow and frame insets back, and tao still resizes the
+            // window from its edges and keeps a maximized window off the
+            // taskbar (WM_NCCALCSIZE uses the monitor work area).
+            #[cfg(windows)]
+            let builder = builder.decorations(false).shadow(true);
 
             let window = builder.build()?;
 

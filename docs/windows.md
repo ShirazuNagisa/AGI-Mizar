@@ -549,3 +549,13 @@ Windows 任务在 macOS 之后串行。Authenticode 是**可选**的：只有发
 - 平台缺口（非本轮回归）：Codex GUI 控制仅 unix；Claude Desktop GUI 来源仅 macOS 路径；上下文压缩没有
   桌面 UI/API 入口。需要账户/手机的 LAN 证书、WAN、生产 dataset 上传未验证（本机未登录）。
 - 另：`../dsh-relay` 的两个 Windows 缺陷（直跑守卫、GNU tar `D:` 主机）已修，relay 334/334、dsh 74/74。
+
+### 2026-11-07 自绘标题栏
+
+Windows 不再显示系统标题栏：窗口 `decorations(false) + shadow(true)`，页面在右上角绘制
+最小化 / 最大化 / 关闭（46×48，关闭键 hover 变 Windows 红 `#c42b1c`），`Toolbar` 在 Windows 下
+`pr-[144px]` 让页面自己的右上角按钮左移。拖动靠 32px 拖动条 + 工具栏 `data-tauri-drag-region`
+（双击切换最大化）；缩放靠 8 个贴边热区调用 `start_resize_dragging`（tao 只接管有阴影窗口的顶边）。
+实现与验证记录见工作区 `docs/session-notes/2026-11-07-windows-custom-titlebar.md`；安装包
+23,796,282 B / SHA256 `7D0C54D9…DB1C5`。限制：窗口宽度固定 1034（年份格子），最大化按钮没有
+Windows 11 的 Snap Layouts 悬停面板（自绘按钮拿不到系统 caption 的贴靠面板）。

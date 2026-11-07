@@ -3,8 +3,9 @@
  *
  * The kernel answers it in `StateSnapshot.platform`, and the shell also puts it
  * in the window's URL, because the first paint needs it before the snapshot has
- * been fetched: macOS reserves a strip at the top of the window for its traffic
- * lights, and Windows — which keeps the system title bar — does not.
+ * been fetched: macOS and Windows both give the page the top strip of the
+ * window (macOS overlays its traffic lights there, Windows has no system bar at
+ * all and the page paints them); Linux keeps its system title bar.
  *
  * The value is painted on `<html data-platform>` so CSS can branch too, and so a
  * component that has no snapshot (the toolbar) does not have to drill a prop.
@@ -45,6 +46,17 @@ export function desktopPlatform(): DesktopPlatform {
 /** Whether this is a Mac, the one desktop with the traffic-light overlay. */
 export function isMac(): boolean {
   return desktopPlatform() === 'macos'
+}
+
+/**
+ * Whether this is Windows, where the page draws the title bar itself.
+ *
+ * Windows 11 removed nothing: the native caption is disabled and the page
+ * paints the same strip mac gets from its overlay, including the traffic
+ * lights; the buttons call the window plugin's minimize/maximize/close.
+ */
+export function isWindows(): boolean {
+  return desktopPlatform() === 'windows'
 }
 
 /** Paint a platform on `<html>`, so CSS and components can branch without props. */

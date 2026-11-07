@@ -153,3 +153,46 @@ export function panelResize(height: number): Promise<void> {
 export function panelOpenSettings(): Promise<void> {
   return call<void>('tray_panel_open_settings')
 }
+
+// ── The window's own chrome ────────────────────────────────────────────────
+//
+// On macOS the system draws the traffic lights over the page's reserved strip.
+// On Windows the page draws them and calls the window plugin directly: these
+// are the core window commands, allowed by `capabilities/remote-chrome.json`,
+// not shell commands of our own.
+
+/** Which edge or corner a resize drag starts from. */
+export type ResizeEdge =
+  | 'North'
+  | 'South'
+  | 'East'
+  | 'West'
+  | 'NorthEast'
+  | 'NorthWest'
+  | 'SouthEast'
+  | 'SouthWest'
+
+/** Minimize the window. */
+export function windowMinimize(): Promise<void> {
+  return call<void>('plugin:window|minimize')
+}
+
+/** Maximize when normal, restore when maximized. */
+export function windowToggleMaximize(): Promise<void> {
+  return call<void>('plugin:window|toggle_maximize')
+}
+
+/** Maximize/restore state, for drawing the green button's glyph. */
+export function windowIsMaximized(): Promise<boolean> {
+  return call<boolean>('plugin:window|is_maximized')
+}
+
+/** Close the window; the shell's close-requested hook decides tray vs quit. */
+export function windowClose(): Promise<void> {
+  return call<void>('plugin:window|close')
+}
+
+/** Start a resize drag from the given edge or corner. */
+export function windowStartResize(edge: ResizeEdge): Promise<void> {
+  return call<void>('plugin:window|start_resize_dragging', { value: edge })
+}
