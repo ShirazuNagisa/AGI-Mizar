@@ -305,6 +305,7 @@ async fn a_remote_delegate_uses_the_wan_route_end_to_end() {
     let started = client
         .dispatch(Command::RemoteDelegate {
             peer: "b-device".to_string(),
+            permission: None,
             cwd: Some("/tmp/dsh-project".to_string()),
             prompt: "return WAN-DUAL".to_string(),
         })

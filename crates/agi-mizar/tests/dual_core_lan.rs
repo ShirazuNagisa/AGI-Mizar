@@ -286,6 +286,7 @@ async fn a_remote_delegate_uses_the_lan_route_end_to_end() {
     let started = client
         .dispatch(Command::RemoteDelegate {
             peer: "b-device".to_string(),
+            permission: None,
             cwd: Some("/tmp/dsh-project".to_string()),
             prompt: "return DUAL-CORE-LAN".to_string(),
         })
