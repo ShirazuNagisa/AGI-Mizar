@@ -273,10 +273,22 @@ impl RelayClient {
         let writer = tokio::spawn(async move {
             while let Some(frame) = out_rx.recv().await {
                 let text = frame.to_string();
-                if sink.send(Message::Text(text)).await.is_err() {
-                    break;
+                // A relay that stops reading must not hold every phone request
+                // behind a full TCP window forever. The reader below notices a
+                // closed socket; a timed-out writer has to close it too.
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    sink.send(Message::Text(text)),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    _ => break,
                 }
             }
+            // Read loop wakes on EOF and redials instead of leaving a half-open
+            // tunnel in the room.
+            let _ = sink.close().await;
         });
 
         let mut kick = self.kick.subscribe();

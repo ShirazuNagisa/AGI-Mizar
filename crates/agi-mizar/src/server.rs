@@ -978,6 +978,12 @@ impl MizarServer {
                 match engine.records(&key, limit, before).await {
                     Ok(records) => {
                         let as_of = records.last().map(|record| record.seq).unwrap_or(0);
+                        // The oldest *raw* position, not the oldest record the
+                        // phone can draw. DSH's page may be mostly tool calls,
+                        // which are deliberately not on the phone wire; without
+                        // this cursor the client cannot ask for the next page
+                        // after one that projects to nothing.
+                        let oldest_raw = records.first().map(|record| record.seq);
                         // `records[]` is a list of *envelopes*, not of bare
                         // events: `{"type":"event","event":{…}}`, the shape the
                         // golden fixture pins. The
@@ -998,6 +1004,7 @@ impl MizarServer {
                             json!({
                                 "sessionId": key.to_string(),
                                 "asOfSeq": as_of,
+                                "oldestRawSeq": oldest_raw,
                                 "records": records_out,
                                 "hasMore": records.len() >= limit,
                                 // The phone merges this into its cached usage frame;
