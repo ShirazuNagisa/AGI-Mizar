@@ -1901,11 +1901,15 @@ impl Core {
 
     /// Everything a freshly opened window needs.
     pub fn snapshot(&self) -> StateSnapshot {
-        let store = self.store_read();
+        // `status_of` takes the store read lock itself. Taking it here first
+        // makes that a recursive read; once a writer is queued, the second read
+        // waits behind it while the first is still held, and every caller of
+        // snapshot blocks. Compute the engine rows before taking the guard.
         let engines = EngineId::all()
             .into_iter()
             .filter_map(|id| self.status_of(id))
             .collect();
+        let store = self.store_read();
 
         let mut sessions: Vec<Session> = store.sessions.values().cloned().collect();
         // Newest first, which is the only order a session list is ever read in.
