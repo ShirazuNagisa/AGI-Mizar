@@ -37,6 +37,13 @@ async fn command(
             "peers": [{ "deviceId": "b", "name": "B", "online": true,
                         "remote": { "enabled": true, "workspaces": ["/work"] } }]
         }),
+        "remote_options" => json!({
+            "peer": "b",
+            "route": "wan",
+            "workspaces": [{ "path": "/work", "title": "work" }],
+            "permissions": { "defaultPreset": "default",
+                             "options": [{ "value": "default", "name": "Default" }] }
+        }),
         "remote_delegate" => json!({
             "delegation": { "id": "d1", "state": "running", "peer": "b" }
         }),
@@ -91,7 +98,7 @@ fn spawn(dir: &std::path::Path) -> (Child, ChildStdin, BufReader<ChildStdout>) {
 }
 
 #[tokio::test]
-async fn the_mcp_face_lists_seven_tools_and_calls_the_kernel() {
+async fn the_mcp_face_lists_eight_tools_and_calls_the_kernel() {
     let (port, seen, server) = fake_api().await;
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -125,9 +132,10 @@ async fn the_mcp_face_lists_seven_tools_and_calls_the_kernel() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names.len(), 7, "{names:?}");
+    assert_eq!(names.len(), 8, "{names:?}");
     for expected in [
         "remote_agents",
+        "remote_options",
         "remote_delegate",
         "remote_result",
         "remote_wait",
@@ -153,13 +161,28 @@ async fn the_mcp_face_lists_seven_tools_and_calls_the_kernel() {
         .unwrap()
         .contains("\"deviceId\": \"b\""));
 
-    let delegate = send(
+    let options = send(
         &mut stdin,
         &mut stdout,
         json!({
             "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+            "params": { "name": "remote_options", "arguments": { "peer": "b" } }
+        }),
+    )
+    .await;
+    assert!(options["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("\"defaultPreset\": \"default\""));
+
+    let delegate = send(
+        &mut stdin,
+        &mut stdout,
+        json!({
+            "jsonrpc": "2.0", "id": 5, "method": "tools/call",
             "params": { "name": "remote_delegate",
-                        "arguments": { "peer": "b", "workspace": "/work", "prompt": "say done" } }
+                        "arguments": { "peer": "b", "workspace": "/work",
+                                       "permission": "default", "prompt": "say done" } }
         }),
     )
     .await;
@@ -169,6 +192,7 @@ async fn the_mcp_face_lists_seven_tools_and_calls_the_kernel() {
         *seen.0.lock().await,
         vec![
             "remote_peers Bearer tool-token",
+            "remote_options Bearer tool-token",
             "remote_delegate Bearer tool-token",
         ]
     );

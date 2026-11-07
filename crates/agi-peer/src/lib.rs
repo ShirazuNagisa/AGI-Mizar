@@ -386,6 +386,25 @@ impl PeerClient {
     }
 
     /// Send one prompt and return the engine's acceptance.
+    /// The workspaces the target permits this peer to see.
+    pub async fn workspaces(&self) -> Result<Value, PeerError> {
+        self.request("workspace.list", json!({})).await
+    }
+
+    /// The permission presets the target engine exposes.
+    pub async fn permissions(&self) -> Result<Value, PeerError> {
+        self.request("permissions.catalog", json!({})).await
+    }
+
+    /// Set the permission preset on one remote session.
+    pub async fn set_permission(&self, session: &str, preset: &str) -> Result<Value, PeerError> {
+        self.request(
+            "session.permission.set",
+            json!({ "sessionId": session, "preset": preset }),
+        )
+        .await
+    }
+
     pub async fn prompt(&self, session: &str, text: &str) -> Result<Value, PeerError> {
         self.request(
             "session.prompt",

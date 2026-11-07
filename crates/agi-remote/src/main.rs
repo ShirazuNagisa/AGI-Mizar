@@ -27,6 +27,7 @@ fn main() -> Result<()> {
     match command {
         "mcp" => mcp(&runtime),
         "agents" => runtime.block_on(cli_agents()),
+        "options" => runtime.block_on(cli_options(&args[1..])),
         "delegate" => runtime.block_on(cli_delegate(&args[1..])),
         "result" | "status" => runtime.block_on(cli_result(&args[1..])),
         "wait" => runtime.block_on(cli_wait(&args[1..])),
@@ -47,7 +48,8 @@ fn usage() {
         "agi-remote — drive a same-account AGI Mizar computer\n\
 \n\
   agi-remote agents\n\
-  agi-remote delegate --peer <id> [--workspace <path>] --prompt <text>\n\
+  agi-remote options --peer <id>\n\
+  agi-remote delegate --peer <id> [--workspace <path>] [--permission <preset>] --prompt <text>\n\
   agi-remote result <delegationId>\n\
   agi-remote wait <delegationId> [--timeout-ms <ms>]\n\
   agi-remote cancel <delegationId>\n\
@@ -165,16 +167,29 @@ async fn cli_agents() -> Result<()> {
     Ok(())
 }
 
+async fn cli_options(args: &[String]) -> Result<()> {
+    let peer = flag(args, "--peer").ok_or_else(|| anyhow!("--peer is required"))?;
+    let value = command(json!({
+        "op": "remote_options",
+        "peer": peer,
+    }))
+    .await?;
+    banner(&serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
 async fn cli_delegate(args: &[String]) -> Result<()> {
     let peer = flag(args, "--peer").ok_or_else(|| anyhow!("--peer is required"))?;
     let prompt = flag(args, "--prompt")
         .or_else(|| flag(args, "-p"))
         .ok_or_else(|| anyhow!("--prompt is required"))?;
     let cwd = flag(args, "--workspace").or_else(|| flag(args, "--cwd"));
+    let permission = flag(args, "--permission");
     let value = command(json!({
         "op": "remote_delegate",
         "peer": peer,
         "cwd": cwd,
+        "permission": permission,
         "prompt": prompt,
     }))
     .await?;
@@ -355,6 +370,18 @@ fn tools() -> Value {
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         },
         {
+            "name": "remote_options",
+            "description": "Ask one peer which workspaces it permits and which permission presets its engine exposes. Call this after the operator chooses a peer and before remote_delegate, so the operator can choose a workspace and default permission.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "peer": { "type": "string", "description": "deviceId from remote_agents" }
+                },
+                "required": ["peer"],
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "remote_delegate",
             "description": "Start a self-contained task on a same-account peer. Returns immediately with a delegation id whose marker is AGI_MIZAR_DELEGATION <id>. The remote agent cannot see this conversation.",
             "inputSchema": {
@@ -362,6 +389,7 @@ fn tools() -> Value {
                 "properties": {
                     "peer": { "type": "string", "description": "deviceId from remote_agents" },
                     "workspace": { "type": "string", "description": "one of the peer's allowed workspace paths; omit only if the peer allows its default" },
+                    "permission": { "type": "string", "description": "permission preset value returned by remote_options" },
                     "description": { "type": "string", "description": "a short human-readable label" },
                     "prompt": { "type": "string", "description": "self-contained goal, inputs, constraints, deliverable and acceptance checks" }
                 },
@@ -441,6 +469,15 @@ async fn call_tool(name: &str, arguments: &Value) -> Result<String> {
             let value = command(json!({ "op": "remote_peers" })).await?;
             Ok(serde_json::to_string_pretty(&value)?)
         }
+        "remote_options" => {
+            let peer = required(arguments, "peer")?;
+            let value = command(json!({
+                "op": "remote_options",
+                "peer": peer,
+            }))
+            .await?;
+            Ok(serde_json::to_string_pretty(&value)?)
+        }
         "remote_delegate" => {
             let peer = required(arguments, "peer")?;
             let prompt = required(arguments, "prompt")?;
@@ -448,10 +485,15 @@ async fn call_tool(name: &str, arguments: &Value) -> Result<String> {
                 .get("workspace")
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty());
+            let permission = arguments
+                .get("permission")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty());
             let value = command(json!({
                 "op": "remote_delegate",
                 "peer": peer,
                 "cwd": cwd,
+                "permission": permission,
                 "prompt": prompt,
             }))
             .await?;

@@ -1987,6 +1987,96 @@ impl Core {
             .count() as u64
     }
 
+    /// Ask a peer what it permits before the conversation chooses a workspace
+    /// and a permission preset.
+    async fn remote_options(&self, peer: String) -> CommandResponse {
+        if self.remote_prefs().allow_lan {
+            if let Some(lan) = self
+                .lan_peers()
+                .into_iter()
+                .find(|candidate| candidate.device_id == peer)
+            {
+                let credentials = self.lan_credentials().await.ok();
+                let address = format!("{}:{}", lan.address, lan.port)
+                    .parse::<std::net::SocketAddr>()
+                    .ok();
+                if let (Some(credentials), Some(address)) = (credentials, address) {
+                    if let Ok(client) =
+                        agi_lan::LanMizarClient::connect(address, &credentials).await
+                    {
+                        let workspaces = client.workspaces().await;
+                        let permissions = client.permissions().await;
+                        if let (Ok(workspaces), Ok(permissions)) = (workspaces, permissions) {
+                            return CommandResponse::ok(json!({
+                                "peer": peer,
+                                "route": "lan",
+                                "workspaces": workspaces.get("items").cloned().unwrap_or_else(|| json!([])),
+                                "permissions": permissions,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+
+        let desktops = match self.account.desktops().await {
+            Ok(desktops) => desktops,
+            Err(error) => return CommandResponse::error(error.code, error.message),
+        };
+        let Some(target) = desktops
+            .into_iter()
+            .find(|desktop| desktop.device_id == peer)
+        else {
+            return CommandResponse::error(
+                "REMOTE_PEER_UNKNOWN",
+                "that computer is not on this account",
+            );
+        };
+        if !target.online {
+            return CommandResponse::error(
+                "REMOTE_PEER_OFFLINE",
+                "that computer is not connected to the relay",
+            );
+        }
+        let connection = match self.account.connect(&peer, "dsh").await {
+            Ok(connection) => connection,
+            Err(error) => return CommandResponse::error(error.code, error.message),
+        };
+        let credentials = agi_peer::Credentials {
+            base: connection.base,
+            room: connection.room,
+            account_session: connection.account_session,
+            device_id: connection.device_id,
+            account_id: connection.account_id,
+            peer_token: connection.token,
+            app_version: self.version.clone(),
+        };
+        let client = match agi_peer::PeerClient::connect(credentials).await {
+            Ok(client) => client,
+            Err(error) => {
+                return CommandResponse::error("REMOTE_OPTIONS_FAILED", error.to_string())
+            }
+        };
+        let workspaces = match client.workspaces().await {
+            Ok(workspaces) => workspaces,
+            Err(error) => {
+                return CommandResponse::error("REMOTE_OPTIONS_FAILED", error.to_string())
+            }
+        };
+        let permissions = match client.permissions().await {
+            Ok(permissions) => permissions,
+            Err(error) => {
+                return CommandResponse::error("REMOTE_OPTIONS_FAILED", error.to_string())
+            }
+        };
+        CommandResponse::ok(json!({
+            "peer": peer,
+            "route": "wan",
+            "workspaces": workspaces.get("items").cloned().unwrap_or_else(|| json!([])),
+            "permissions": permissions,
+        }))
+    }
+
     /// Run one command.
     pub async fn dispatch(&self, command: Command) -> CommandResponse {
         match command {
@@ -2169,7 +2259,13 @@ impl Core {
                 }
                 Err(error) => CommandResponse::error(error.code, error.message),
             },
-            Command::RemoteDelegate { peer, cwd, prompt } => {
+            Command::RemoteOptions { peer } => self.remote_options(peer).await,
+            Command::RemoteDelegate {
+                peer,
+                cwd,
+                permission,
+                prompt,
+            } => {
                 // A beacon seen recently is the free LAN route; use it before
                 // asking the relay for a token.
                 if self.remote_prefs().allow_lan {
@@ -2197,11 +2293,12 @@ impl Core {
                                     device_id: lan.device_id,
                                     name: lan.name,
                                 };
-                                if let Ok(record) = self.remote.start_lan(
+                                if let Ok(record) = self.remote.start_lan_with_options(
                                     reference,
                                     address,
                                     credentials,
                                     cwd.clone(),
+                                    permission.clone(),
                                     prompt.clone(),
                                 ) {
                                     return CommandResponse::ok(json!({ "delegation": record }));
@@ -2246,7 +2343,13 @@ impl Core {
                     device_id: target.device_id,
                     name: target.name,
                 };
-                match self.remote.start(reference, credentials, cwd, prompt) {
+                match self.remote.start_with_options(
+                    reference,
+                    credentials,
+                    cwd,
+                    permission,
+                    prompt,
+                ) {
                     Ok(record) => CommandResponse::ok(json!({ "delegation": record })),
                     Err(message) => CommandResponse::error("REMOTE_START_FAILED", message),
                 }

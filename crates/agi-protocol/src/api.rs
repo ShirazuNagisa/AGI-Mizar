@@ -464,11 +464,16 @@ pub enum Command {
     },
     /// Same-account computers this install may delegate to.
     RemotePeers,
+    /// Ask a peer for its permitted workspaces and permission presets.
+    RemoteOptions { peer: String },
     /// Start one remote delegation. Returns immediately with its id.
     RemoteDelegate {
         peer: String,
         #[serde(default)]
         cwd: Option<String>,
+        /// Permission preset to apply to the new remote session.
+        #[serde(default)]
+        permission: Option<String>,
         prompt: String,
     },
     /// Every delegation this install knows about.
@@ -558,6 +563,7 @@ impl Command {
         matches!(
             self,
             Self::RemotePeers
+                | Self::RemoteOptions { .. }
                 | Self::RemoteDelegate { .. }
                 | Self::RemoteDelegations
                 | Self::RemoteResult { .. }
@@ -768,9 +774,11 @@ mod tests {
     #[test]
     fn the_tool_scope_is_exactly_the_remote_commands() {
         assert!(Command::RemotePeers.is_remote());
+        assert!(Command::RemoteOptions { peer: "p".into() }.is_remote());
         assert!(Command::RemoteDelegate {
             peer: "p".into(),
             cwd: None,
+            permission: None,
             prompt: "t".into(),
         }
         .is_remote());

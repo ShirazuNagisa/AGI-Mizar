@@ -84,6 +84,23 @@ async fn fake_peer(mut socket: WebSocket) {
                 "v": 1, "type": "ok", "id": id,
                 "result": { "sessionId": "dsh:test-session" }
             }),
+            "workspace.list" => json!({
+                "v": 1, "type": "ok", "id": id,
+                "result": { "items": [{ "workspaceId": "dsh:0", "path": "/work", "title": "work" }],
+                            "complete": true }
+            }),
+            "permissions.catalog" => json!({
+                "v": 1, "type": "ok", "id": id,
+                "result": {
+                    "defaultPreset": "default",
+                    "defaults": [{ "value": "default", "name": "Default" }],
+                    "options": [{ "value": "default", "name": "Default" }]
+                }
+            }),
+            "session.permission.set" => json!({
+                "v": 1, "type": "ok", "id": id,
+                "result": { "commandResult": { "kind": "success" } }
+            }),
             "session.prompt" => {
                 prompted = true;
                 json!({
@@ -194,9 +211,19 @@ async fn a_remote_delegation_runs_through_the_kernel_commands() {
     assert_eq!(peers["peers"][0]["deviceId"], "peer-1");
     assert_eq!(peers["peers"][0]["online"], true);
 
+    let options = ok(core
+        .dispatch(Command::RemoteOptions {
+            peer: "peer-1".to_string(),
+        })
+        .await);
+    assert_eq!(options["route"], "wan");
+    assert_eq!(options["workspaces"][0]["path"], "/work");
+    assert_eq!(options["permissions"]["defaultPreset"], "default");
+
     let started = ok(core
         .dispatch(Command::RemoteDelegate {
             peer: "peer-1".to_string(),
+            permission: Some("default".to_string()),
             cwd: None,
             prompt: "say P1-OK".to_string(),
         })
@@ -207,8 +234,8 @@ async fn a_remote_delegation_runs_through_the_kernel_commands() {
         .to_string();
     assert_eq!(
         *seen.connected.lock().unwrap(),
-        vec!["connect peer-1 peer"],
-        "the delegation must ask the relay for a peer token"
+        vec!["connect peer-1 peer", "connect peer-1 peer"],
+        "remote_options and the delegation must both ask for a peer token"
     );
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);

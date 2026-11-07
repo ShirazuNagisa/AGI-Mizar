@@ -129,6 +129,25 @@ impl LanMizarClient {
             .ok_or_else(|| LanError::Remote("session.create returned no sessionId".to_string()))
     }
 
+    /// The workspaces the target permits this peer to see.
+    pub async fn workspaces(&self) -> Result<Value, LanError> {
+        self.request("workspace.list", json!({})).await
+    }
+
+    /// The permission presets the target engine exposes.
+    pub async fn permissions(&self) -> Result<Value, LanError> {
+        self.request("permissions.catalog", json!({})).await
+    }
+
+    /// Set the permission preset on one remote session.
+    pub async fn set_permission(&self, session: &str, preset: &str) -> Result<Value, LanError> {
+        self.request(
+            "session.permission.set",
+            json!({ "sessionId": session, "preset": preset }),
+        )
+        .await
+    }
+
     pub async fn prompt(&self, session: &str, text: &str) -> Result<Value, LanError> {
         self.request(
             "session.prompt",
