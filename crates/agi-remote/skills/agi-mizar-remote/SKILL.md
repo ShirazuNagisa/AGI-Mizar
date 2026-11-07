@@ -43,6 +43,9 @@ Rules:
 
 - Use only a path returned by `remote_options.workspaces` or listed in the
   peer's `remote.workspaces`. Never invent a path.
+- If `remote_options.workspaces` is empty, offer each path in
+  `remote_agents.remote.workspaces` as an option; those are permitted even if
+  DSH has not opened a session there yet.
 - If the operator picks **新建工作区**, ask for the absolute path and explain
   that the target machine's operator must first add that exact path under
   Settings → 远程Agent → 可远程使用的工作区. Do not bypass the allowlist and do
