@@ -1987,6 +1987,30 @@ impl Core {
             .count() as u64
     }
 
+    /// The rows a peer may see, without the target's session ids.
+    ///
+    /// The target already strips these for a real peer, but a relay that still
+    /// issues a phone token would not; dropping them here keeps the options
+    /// response about paths, not about unrelated sessions.
+    fn remote_workspace_rows(workspaces: &Value) -> Vec<Value> {
+        workspaces
+            .get("items")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .cloned()
+                    .map(|mut row| {
+                        if let Some(object) = row.as_object_mut() {
+                            object.remove("sessionIds");
+                        }
+                        row
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Ask a peer what it permits before the conversation chooses a workspace
     /// and a permission preset.
     async fn remote_options(&self, peer: String) -> CommandResponse {
@@ -2010,7 +2034,7 @@ impl Core {
                             return CommandResponse::ok(json!({
                                 "peer": peer,
                                 "route": "lan",
-                                "workspaces": workspaces.get("items").cloned().unwrap_or_else(|| json!([])),
+                                "workspaces": Self::remote_workspace_rows(&workspaces),
                                 "permissions": permissions,
                             }));
                         }
@@ -2072,7 +2096,7 @@ impl Core {
         CommandResponse::ok(json!({
             "peer": peer,
             "route": "wan",
-            "workspaces": workspaces.get("items").cloned().unwrap_or_else(|| json!([])),
+            "workspaces": Self::remote_workspace_rows(&workspaces),
             "permissions": permissions,
         }))
     }

@@ -86,7 +86,8 @@ async fn fake_peer(mut socket: WebSocket) {
             }),
             "workspace.list" => json!({
                 "v": 1, "type": "ok", "id": id,
-                "result": { "items": [{ "workspaceId": "dsh:0", "path": "/work", "title": "work" }],
+                "result": { "items": [{ "workspaceId": "dsh:0", "path": "/work", "title": "work",
+                                            "sessionIds": ["dsh:secret"] }],
                             "complete": true }
             }),
             "permissions.catalog" => json!({
@@ -218,6 +219,7 @@ async fn a_remote_delegation_runs_through_the_kernel_commands() {
         .await);
     assert_eq!(options["route"], "wan");
     assert_eq!(options["workspaces"][0]["path"], "/work");
+    assert!(options["workspaces"][0].get("sessionIds").is_none());
     assert_eq!(options["permissions"]["defaultPreset"], "default");
 
     let started = ok(core
