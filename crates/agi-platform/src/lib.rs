@@ -303,14 +303,48 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
     }
     #[cfg(windows)]
     {
-        // `start` treats the first quoted argument as the window title, so the
-        // empty title is not decoration: without it a quoted URL would be taken
-        // as a title and nothing would open.
-        std::process::Command::new("cmd")
-            .args(["/C", "start", ""])
-            .arg(url)
-            .spawn()
-            .map(|_| ())
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        fn wide(value: &OsStr) -> Vec<u16> {
+            value.encode_wide().chain(std::iter::once(0)).collect()
+        }
+
+        // ShellExecuteW instead of `cmd /C start`. cmd.exe parses the command
+        // line a second time, so the `&` in every OAuth authorize URL (GitHub,
+        // Apple: client_id, redirect_uri, response_type, ...) split the URL at
+        // the first parameter: the browser opened a truncated authorize URL and
+        // Apple answered "invalid_request: Invalid response type". ShellExecute
+        // receives the URL as data, not as a command line, so no escaping is
+        // involved.
+        let operation = wide(OsStr::new("open"));
+        let file = wide(OsStr::new(url));
+        // SAFETY: both strings are NUL-terminated UTF-16 owned by this frame,
+        // and the null HWND is the documented "no parent window" value. The
+        // call only launches a URL handler; it does not retain the pointers.
+        let result = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                operation.as_ptr(),
+                file.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        // ShellExecute returns a value cast to HINSTANCE; anything <= 32 is an
+        // error code (0 = out of memory, 2 = file not found, 5 = access denied,
+        // ...). See the ShellExecuteW documentation.
+        if result as isize <= 32 {
+            return Err(std::io::Error::other(format!(
+                "ShellExecuteW could not open the URL (code {})",
+                result as isize
+            )));
+        }
+        Ok(())
     }
     #[cfg(all(not(target_os = "macos"), not(windows)))]
     {
