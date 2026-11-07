@@ -70,8 +70,9 @@ Rules:
 ```
 
 Show every option with its `name` and `description`; mark `defaultPreset` as the
-recommended default. Ask the operator to choose. Pass the chosen `value` as
-`remote_delegate.permission`.
+recommended default. Prefer the least privilege that can finish the task; offer
+`danger-full-access` only if the operator explicitly asks for it. Ask the
+operator to choose. Pass the chosen `value` as `remote_delegate.permission`.
 
 After all three are answered, show a short confirmation:
 
