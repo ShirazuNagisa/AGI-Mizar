@@ -13,8 +13,9 @@ your files, or your credentials. It is a worker, not a continuation of you.
 
 When this skill is invoked, **do not call `remote_delegate` yet**. Gather these
 three answers from the operator first. Present real options, not a blank
-question. If the operator already named one in their message, confirm it instead
-of asking again.
+question. Ask in the operator's language; the `value` strings stay canonical.
+If the operator already named one in their message, confirm it instead of
+asking again.
 
 ### 1. Which computer should be the worker?
 
