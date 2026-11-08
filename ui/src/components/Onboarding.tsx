@@ -38,6 +38,9 @@ const STEP_TITLES = [
   '完成',
 ] as const
 
+/** The phone app's current distribution channel; the guide links to it. */
+const MOBILE_APP_TESTFLIGHT = 'https://testflight.apple.com/join/MyaqdT1z'
+
 const WELCOME = 0
 const LOGIN = 1
 const CHOOSE = 2
@@ -284,6 +287,7 @@ export function Onboarding({
             {step === WELCOME ? <WelcomeStep /> : null}
             {step === LOGIN ? (
               <LoginStep
+                kernel={kernel}
                 account={account}
                 serverConnected={serverConnected}
                 busy={accountBusy}
@@ -385,6 +389,7 @@ function WelcomeStep() {
 }
 
 interface LoginStepProps {
+  kernel: Kernel
   account: AccountUser | null
   serverConnected: boolean
   busy: boolean
@@ -404,6 +409,7 @@ interface LoginStepProps {
  * keeps its own shape for the case where someone signs in later.
  */
 function LoginStep({
+  kernel,
   account,
   serverConnected,
   busy,
@@ -561,6 +567,30 @@ function LoginStep({
           </p>
         </div>
       )}
+
+      <div className="mt-5 mz-border px-4 py-3">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <div className="text-[12px] text-fg">下载手机端 DSH Mizar 配合使用</div>
+            <p className="mt-0.5 text-[12px] leading-5 text-muted">
+              手机与这台电脑登录同一个账户后，就能查看并操控这里的会话；当前通过 TestFlight 分发。
+            </p>
+            <p className="mt-1 selectable break-all font-mono text-[11px] leading-4 text-muted">
+              {MOBILE_APP_TESTFLIGHT}
+            </p>
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            className="shrink-0"
+            onClick={() =>
+              void kernel.send({ op: 'open_external', url: MOBILE_APP_TESTFLIGHT })
+            }
+          >
+            打开 TestFlight 链接 ↗
+          </Button>
+        </div>
+      </div>
 
       <div className="mt-6 flex items-center gap-3">
         <Button
