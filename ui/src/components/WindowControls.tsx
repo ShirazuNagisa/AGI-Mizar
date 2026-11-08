@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 
+import { isWindows } from '../platform'
 import { windowClose, windowIsMaximized, windowMinimize, windowToggleMaximize } from '../shell'
 
 /**
@@ -17,8 +18,21 @@ import { windowClose, windowIsMaximized, windowMinimize, windowToggleMaximize } 
  * The container is fixed to the window's top-right corner. The page leaves room
  * for it by padding the toolbar's right edge (see `Toolbar`), so page actions
  * never slide underneath.
+ *
+ * Only Windows draws this. macOS overlays its traffic lights on the strip the
+ * page reserves and Linux keeps the system title bar; rendering the caption
+ * there too put Windows buttons beside a Mac's traffic lights. The gate is a
+ * wrapper rather than an early return after the hooks, so a platform that
+ * arrives late (the snapshot rewrites `<html data-platform>`) mounts or
+ * unmounts the whole caption instead of changing the hook count mid-render.
  */
 export function WindowControls() {
+  if (!isWindows()) return null
+  return <WindowsCaption />
+}
+
+/** The three buttons; only ever mounted on Windows. */
+function WindowsCaption() {
   const [maximized, setMaximized] = useState(false)
 
   useEffect(() => {

@@ -24,10 +24,19 @@ const EDGES: readonly { edge: ResizeEdge; className: string }[] = [
 ]
 
 export function WindowResizeHandles() {
+  // Same gate as the caption: these edges exist because the Windows frame is
+  // gone. A resizable Mac window already has eight native resize targets, and
+  // a Mac user who found Windows 3px strips on its edges would be right to
+  // call it a bug.
+  if (!isWindows()) return null
+  return <WindowsResizeEdges />
+}
+
+/** The eight strips, only ever mounted on Windows. */
+function WindowsResizeEdges() {
   const [maximized, setMaximized] = useState(false)
 
   useEffect(() => {
-    if (!isWindows()) return
     let alive = true
     const refresh = () => {
       void windowIsMaximized()
@@ -45,7 +54,7 @@ export function WindowResizeHandles() {
   }, [])
 
   // A maximized window has no size to drag; its edges are the screen's.
-  if (!isWindows() || maximized) return null
+  if (maximized) return null
 
   return (
     <div className="pointer-events-none fixed inset-0 z-50">
