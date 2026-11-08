@@ -11,6 +11,7 @@
 //! permission means it is denied; that is the intended failure.
 
 use tauri::{AppHandle, Manager};
+use tauri_plugin_dialog::DialogExt;
 
 use crate::login_item;
 use crate::shell::{self, ShellSettings};
@@ -84,6 +85,50 @@ pub fn shell_login_item(enabled: bool) -> Result<bool, String> {
 #[tauri::command]
 pub fn app_quit(app: AppHandle) {
     app.exit(0);
+}
+
+/// Save one text file where the person chooses.
+///
+/// The kernel can read its own log files but cannot put a file in the person's
+/// Downloads folder without a dialog, and a WebView's blob download is not a
+/// save in either WKWebView or WebView2. The dialog plugin already owns the
+/// native panel (it is initialised for the updater); only the write is ours.
+///
+/// Answers with the path written, or `null` when the dialog was closed: a
+/// cancelled save is not a failure.
+#[tauri::command]
+pub async fn app_export_text(
+    app: AppHandle,
+    file_name: String,
+    text: String,
+) -> Result<Option<String>, String> {
+    // The name comes from the page; keep it a name, not a path.
+    let suggested = std::path::Path::new(&file_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("agi-mizar-log.txt")
+        .to_string();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_file_name(suggested)
+        .add_filter("文本", &["txt"])
+        .save_file(move |path| {
+            let _ = sender.send(path);
+        });
+    let Some(picked) = receiver
+        .await
+        .map_err(|_| "保存对话框没有返回".to_string())?
+    else {
+        return Ok(None);
+    };
+    let path = picked
+        .into_path()
+        .map_err(|error| format!("无法使用所选路径：{error}"))?;
+    std::fs::write(&path, text)
+        .map_err(|error| format!("写入 {} 失败：{error}", path.display()))?;
+    Ok(Some(path.display().to_string()))
 }
 
 /// The tray page sizes itself to its rows.

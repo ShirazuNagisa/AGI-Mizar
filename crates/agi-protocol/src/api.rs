@@ -132,6 +132,27 @@ pub struct DependencyReport {
     pub error: Option<String>,
 }
 
+/// Whether the remote-agent feature has everything it needs on this computer.
+///
+/// Separate from [`DependencyReport`] because there is no engine: the feature is
+/// the whole product, and its pieces (the sidecar, the DSH entry and skill, the
+/// scoped tool token, the account, the two routes) have their own owners. Same
+/// item shape so the window can draw both lists the same way.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteHealthReport {
+    /// Whether no item is `missing` or `outdated`; `unknown` is tolerated, as in
+    /// a dependency report.
+    pub ok: bool,
+    /// The sentence above the list.
+    pub summary: String,
+    pub items: Vec<DependencyItem>,
+    /// What a repair changed; empty for a read-only check.
+    pub changed: Vec<String>,
+    /// Why a repair could not finish, when it could not.
+    pub error: Option<String>,
+}
+
 /// Whether this install anonymously shares its turns to help train Mizarllm.
 ///
 /// The choice is per machine, stored beside the window's other preferences. The
@@ -430,6 +451,16 @@ pub enum Command {
     AccountLogout,
     /// Recent delegation audit lines (UI token only).
     RemoteAudit,
+    /// Check the pieces the remote-agent feature needs; `repair` also rewrites
+    /// the DSH MCP entry and skill when they are missing or stale (UI token
+    /// only).
+    RemoteHealth {
+        #[serde(default)]
+        repair: bool,
+    },
+    /// Every remote-agent log line on disk, plus what the check found, as one
+    /// text file for a bug report (UI token only).
+    RemoteLogs,
     /// Install/repair the DSH MCP entry and skill (UI token only).
     RemoteInstall {
         #[serde(default)]
@@ -807,6 +838,26 @@ mod tests {
         ] {
             assert!(!command.is_remote());
         }
+    }
+
+    #[test]
+    fn the_remote_check_and_log_commands_are_window_only() {
+        // The tool token drives delegations; it has no business reading the log
+        // export or rewriting the DSH profile.
+        assert!(!Command::RemoteHealth { repair: false }.is_remote());
+        assert!(!Command::RemoteLogs.is_remote());
+
+        let command: Command = serde_json::from_value(serde_json::json!({
+            "op": "remote_health"
+        }))
+        .unwrap();
+        assert!(matches!(command, Command::RemoteHealth { repair: false }));
+        let command: Command = serde_json::from_value(serde_json::json!({
+            "op": "remote_health",
+            "repair": true
+        }))
+        .unwrap();
+        assert!(matches!(command, Command::RemoteHealth { repair: true }));
     }
 
     #[test]

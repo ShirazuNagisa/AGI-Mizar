@@ -41,6 +41,11 @@ description = "Quit the app; closing the window only hides it."
 commands.allow = ["app_quit"]
 
 [[permission]]
+identifier = "allow-app-export-text"
+description = "Save a text file (the remote-agent log export) where the person chooses."
+commands.allow = ["app_export_text"]
+
+[[permission]]
 identifier = "allow-tray-panel-resize"
 description = "Size the tray page to its rows."
 commands.allow = ["tray_panel_resize"]

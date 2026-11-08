@@ -277,6 +277,14 @@ html[data-theme="oled"] ::-webkit-scrollbar-thumb {
   clip-path: inset(0 0 0 0);
 }
 
+/* The inverted copy inherits the page colour from `.wipe-overlay`, but a label
+   that spells its own colour out — the `（实验性）` stamp is `text-muted` —
+   keeps it, and in this theme muted *is* ink. The stamp then sits in ink on the
+   incoming ink fill and vanishes mid-sweep instead of inverting. */
+html[data-theme="oled"] .wipe-overlay .text-muted {
+  color: var(--bg);
+}
+
 
 @media (prefers-reduced-motion: reduce) {
   .wipe-layer,

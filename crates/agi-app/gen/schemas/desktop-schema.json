@@ -177,6 +177,12 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Save a text file (the remote-agent log export) where the person chooses.",
+          "type": "string",
+          "const": "allow-app-export-text",
+          "markdownDescription": "Save a text file (the remote-agent log export) where the person chooses."
+        },
+        {
           "description": "Quit the app; closing the window only hides it.",
           "type": "string",
           "const": "allow-app-quit",

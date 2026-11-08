@@ -7,6 +7,7 @@ import type {
   Kernel,
   ModelCheck,
   ModelState,
+  RemotePrefs,
 } from '../api'
 import { AGENTS } from '../navigation'
 import { ENGINE_INSTALL_HINTS } from '../engines'
@@ -25,16 +26,26 @@ import { WindowControls } from './WindowControls'
 import { WindowResizeHandles } from './WindowResizeHandles'
 import { cn, failureMessage } from '../lib/utils'
 
-/** The seven steps, in the order the guide walks them. */
-const STEP_TITLES = ['欢迎', '登录', '选择 Agent', '下载模型', '偏好', '共享会话数据', '完成'] as const
+/** The eight steps, in the order the guide walks them. */
+const STEP_TITLES = [
+  '欢迎',
+  '登录',
+  '选择 Agent',
+  '下载模型',
+  '远程 Agent',
+  '偏好',
+  '共享会话数据',
+  '完成',
+] as const
 
 const WELCOME = 0
 const LOGIN = 1
 const CHOOSE = 2
 const MODEL = 3
-const PREFERENCES = 4
-const SHARING = 5
-const FINISH = 6
+const REMOTE = 4
+const PREFERENCES = 5
+const SHARING = 6
+const FINISH = 7
 
 interface OnboardingProps {
   kernel: Kernel
@@ -59,7 +70,7 @@ interface OnboardingProps {
 }
 
 /**
- * The first-run guide: seven steps, full window, no sidebar.
+ * The first-run guide: eight steps, full window, no sidebar.
  *
  * It cannot be skipped — the account is what makes the phone side work, so the
  * login step will not let the window past until it has one. The two deliberate
@@ -103,7 +114,41 @@ export function Onboarding({
   )
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Read once, at the start: the step is one screen of switches and the answer
+  // saves on its 下一步, not on every click.
+  const [remote, setRemote] = useState<RemotePrefs | null>(null)
+  const [remoteError, setRemoteError] = useState<string | null>(null)
+  const [remoteLoading, setRemoteLoading] = useState(true)
   const shell = useShellSettings()
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const next = await kernel.send<RemotePrefs>({ op: 'remote_target_settings' })
+        if (!cancelled) setRemote(next)
+      } catch (failure) {
+        if (!cancelled) setRemoteError(failureMessage(failure, '读取远程 Agent 设置失败'))
+      } finally {
+        if (!cancelled) setRemoteLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [kernel])
+
+  async function retryRemote() {
+    setRemoteLoading(true)
+    setRemoteError(null)
+    try {
+      setRemote(await kernel.send<RemotePrefs>({ op: 'remote_target_settings' }))
+    } catch (failure) {
+      setRemoteError(failureMessage(failure, '读取远程 Agent 设置失败'))
+    } finally {
+      setRemoteLoading(false)
+    }
+  }
 
   function toggle(engine: EngineId) {
     setSelected((current) => {
@@ -140,6 +185,31 @@ export function Onboarding({
         setStep(MODEL)
       } catch (failure) {
         setError(failureMessage(failure, '没有记住所选的 Agent'))
+      } finally {
+        setBusy(false)
+      }
+      return
+    }
+    if (step === REMOTE) {
+      // Nothing was read means nothing is remembered: it would replace whatever
+      // the machine already had with defaults.
+      if (remote === null) {
+        setStep(PREFERENCES)
+        return
+      }
+      setBusy(true)
+      try {
+        await kernel.send({
+          op: 'set_remote_target_settings',
+          enabled: remote.enabled,
+          allow_lan: remote.allowLan,
+          allow_wan: remote.allowWan,
+          workspaces: remote.workspaces,
+          blocked: remote.blocked,
+        })
+        setStep(PREFERENCES)
+      } catch (failure) {
+        setError(failureMessage(failure, '没有记住远程 Agent 的选择'))
       } finally {
         setBusy(false)
       }
@@ -240,8 +310,17 @@ export function Onboarding({
                 model={model}
                 onLater={() => {
                   setError(null)
-                  setStep(PREFERENCES)
+                  setStep(REMOTE)
                 }}
+              />
+            ) : null}
+            {step === REMOTE ? (
+              <RemoteStep
+                prefs={remote}
+                loading={remoteLoading}
+                error={remoteError}
+                onChange={setRemote}
+                onRetry={() => void retryRemote()}
               />
             ) : null}
             {step === PREFERENCES ? <PreferenceStep shell={shell} platform={platform} /> : null}
@@ -257,6 +336,7 @@ export function Onboarding({
                 shell={shell}
                 platform={platform}
                 sharing={share}
+                remote={remote}
               />
             ) : null}
           </div>
@@ -816,6 +896,111 @@ function ModelStep({ kernel, model, onLater }: ModelStepProps) {
   )
 }
 
+/**
+ * The remote-agent question, asked once.
+ *
+ * It is here because the feature only works when both computers say yes, and a
+ * person is most likely to have both in front of them while setting up. The
+ * routes are separate because one is free and physical (same LAN) and the other
+ * costs money (through the relay), so turning the feature on must not turn the
+ * paid route on with it.
+ */
+function RemoteStep({
+  prefs,
+  loading,
+  error,
+  onChange,
+  onRetry,
+}: {
+  prefs: RemotePrefs | null
+  loading: boolean
+  error: string | null
+  onChange: (next: RemotePrefs) => void
+  onRetry: () => void
+}) {
+  return (
+    <section>
+      <h2 className="text-[24px] leading-8">远程 Agent</h2>
+      <p className="mt-1.5 text-[12px] leading-5 text-muted">
+        同账户的另一台电脑可以把任务交给这台电脑上的 Agent，反过来也可以。这里先决定这台电脑是否接受；
+        之后随时可以在「设置 → 远程Agent」里改。
+      </p>
+
+      {loading ? (
+        <p className="mt-4 flex items-center gap-1.5 text-[12px] text-muted">
+          <Spinner size={12} />
+          正在读取这台电脑的设置…
+        </p>
+      ) : prefs === null ? (
+        <div className="mt-4 flex items-center justify-between gap-4 mz-border px-4 py-2.5">
+          <span className="text-[12px] leading-5 text-muted">{error ?? '没有读到这台电脑的设置'}</span>
+          <Button size="sm" variant="outline" onClick={onRetry}>
+            重试
+          </Button>
+        </div>
+      ) : (
+        <div className="mt-4 mz-border">
+          <div className="flex flex-col gap-3 px-4 py-3">
+            <RemoteRow
+              label="允许远程 Agent"
+              hint="总开关。关着时这台电脑不接受任何其他电脑的任务。"
+              checked={prefs.enabled}
+              onChange={(enabled) => onChange({ ...prefs, enabled })}
+            />
+            <RemoteRow
+              label="允许局域网（免费）"
+              hint="同一局域网、同账户；不经过中继。"
+              checked={prefs.allowLan}
+              disabled={!prefs.enabled}
+              onChange={(allowLan) => onChange({ ...prefs, allowLan })}
+            />
+            <RemoteRow
+              label="允许跨网（付费）"
+              hint="通过账户中继；需要付费账户。"
+              checked={prefs.allowWan}
+              disabled={!prefs.enabled}
+              onChange={(allowWan) => onChange({ ...prefs, allowWan })}
+            />
+          </div>
+          <p className="mz-divide-t px-4 py-2 text-[12px] leading-5 text-muted">
+            打开总开关后再选允许的线路；全部关着也能继续，之后在设置里改。
+          </p>
+        </div>
+      )}
+    </section>
+  )
+}
+
+function RemoteRow({
+  label,
+  hint,
+  checked,
+  disabled,
+  onChange,
+}: {
+  label: string
+  hint: string
+  checked: boolean
+  disabled?: boolean
+  onChange: (checked: boolean) => void
+}) {
+  return (
+    <div className="flex items-start justify-between gap-4">
+      <div className="min-w-0">
+        <div className="text-[12px] text-fg">{label}</div>
+        <div className="text-[11px] text-muted">{hint}</div>
+      </div>
+      <Switch
+        className="mt-0.5"
+        checked={checked}
+        disabled={disabled}
+        onCheckedChange={onChange}
+        label={label}
+      />
+    </div>
+  )
+}
+
 /** How this computer behaves once it is closed and reopened. */
 function PreferenceStep({
   shell,
@@ -906,10 +1091,20 @@ interface DoneStepProps {
   shell: ShellSettingsState
   platform: DesktopPlatform
   sharing: boolean
+  remote: RemotePrefs | null
 }
 
 /** What is in place, so the window does not leave the guide quietly wrong. */
-function DoneStep({ account, engines, selected, model, shell, platform, sharing }: DoneStepProps) {
+function DoneStep({
+  account,
+  engines,
+  selected,
+  model,
+  shell,
+  platform,
+  sharing,
+  remote,
+}: DoneStepProps) {
   const configured = AGENTS.filter(
     ({ engine }) =>
       selected.has(engine) ||
@@ -925,6 +1120,18 @@ function DoneStep({ account, engines, selected, model, shell, platform, sharing 
     }
     if (shell.settings.tray_menu_only) preferences.push('托盘只开快捷菜单')
   }
+  const remoteText =
+    remote === null
+      ? '未读取'
+      : !remote.enabled
+        ? '未开启'
+        : `已开启（${[
+            remote.allowLan ? '局域网' : null,
+            remote.allowWan ? '跨网' : null,
+          ]
+            .filter(Boolean)
+            .join('、') || '没有线路'}）`
+
   const preferenceText =
     shell.settings === null
       ? shell.available
@@ -948,6 +1155,7 @@ function DoneStep({ account, engines, selected, model, shell, platform, sharing 
         />
         <DoneRow label="模型" value={active === null ? '未下载' : `Mizarllm ${active.version}`} />
         <DoneRow label="偏好" value={preferenceText} />
+        <DoneRow label="远程 Agent" value={remoteText} />
         <DoneRow label="会话数据" value={sharing ? '匿名共享中' : '仅保留在本机'} />
       </div>
     </section>

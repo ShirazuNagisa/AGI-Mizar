@@ -142,6 +142,17 @@ export function quitApp(): Promise<void> {
 }
 
 /**
+ * Save a text file through the shell's save dialog.
+ *
+ * The page cannot write to disk, and a blob download is not a file in a
+ * WebView. Answers with where it was written, or `null` when the person closed
+ * the dialog — a cancel is not an error and must not be reported as one.
+ */
+export function exportText(fileName: string, text: string): Promise<string | null> {
+  return call<string | null>('app_export_text', { fileName, text })
+}
+
+/**
  * The tray panel's window sizes itself to its rows, because a fixed height
  * shows the empty half — which is what the native menu did wrong.
  */

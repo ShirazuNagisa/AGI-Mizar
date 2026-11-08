@@ -274,6 +274,14 @@ impl RemoteManager {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(path);
     }
 
+    /// Where the audit lines are being written, once boot pointed us there.
+    pub fn audit_path(&self) -> Option<PathBuf> {
+        self.audit_path
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
     /// The most recent audit lines, newest last.
     pub fn audit(&self, limit: usize) -> Vec<AuditEvent> {
         let audit = self

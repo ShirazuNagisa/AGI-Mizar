@@ -31,6 +31,7 @@ pub mod endpoint;
 pub mod models;
 pub mod plugin;
 pub mod remote;
+pub mod remote_health;
 pub mod server;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -252,7 +253,11 @@ fn normalize_workspace(path: &str) -> String {
 }
 
 /// Run the `agi-remote` installer next to this executable, without a shell.
-fn run_remote_installer(uninstall: bool, profile: Option<&str>, dry_run: bool) -> CommandResponse {
+pub(crate) fn run_remote_installer(
+    uninstall: bool,
+    profile: Option<&str>,
+    dry_run: bool,
+) -> CommandResponse {
     let path = std::env::var("AGI_REMOTE_BIN")
         .ok()
         .map(std::path::PathBuf::from)
@@ -304,7 +309,7 @@ fn run_remote_installer(uninstall: bool, profile: Option<&str>, dry_run: bool) -
 /// - next to the executable (a dev `cargo build` puts it beside `agi-mizar.exe`);
 /// - under `bin/` (the Windows bundler maps `resources/bin` there);
 /// - under `../Resources/bin` (the macOS `.app` bundle layout).
-fn find_remote_installer(exe: &std::path::Path) -> Option<std::path::PathBuf> {
+pub(crate) fn find_remote_installer(exe: &std::path::Path) -> Option<std::path::PathBuf> {
     let parent = exe.parent()?;
     [
         parent.join("agi-remote"),
@@ -774,6 +779,16 @@ impl Core {
     /// The session and device id the tunnel presents, when signed in.
     pub fn relay_account(&self) -> Option<(String, String)> {
         self.account.session()
+    }
+
+    /// Whether the tunnel is up, for the remote check and anything else that
+    /// needs to know before it promises the paid route.
+    pub fn relay_connected(&self) -> bool {
+        self.relay_status
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .is_some_and(|source| source.relay_status().connected)
     }
 
     /// Follow sign-ins and sign-outs.
@@ -2415,6 +2430,13 @@ impl Core {
             Command::RemoteAudit => CommandResponse::ok(json!({
                 "events": self.remote.audit(100),
             })),
+            Command::RemoteHealth { repair } => {
+                CommandResponse::ok(remote_health::check(self, repair))
+            }
+            Command::RemoteLogs => {
+                let (path, text) = remote_health::log_text(self);
+                CommandResponse::ok(json!({ "path": path, "text": text }))
+            }
             Command::RemoteInstall { profile, dry_run } => {
                 run_remote_installer(false, profile.as_deref(), dry_run)
             }

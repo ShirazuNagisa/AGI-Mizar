@@ -144,6 +144,9 @@ export function SettingsPage({
 
           {tab === 'approval' ? (
             <Section title="审批模型">
+              <p className="text-[12px] leading-6 text-muted">
+                审批模型是用于判断用户轮次是否结束的端侧模型，旨在实现更好的手机端会话查看体验。
+              </p>
               <ModelSection kernel={kernel} model={model} />
             </Section>
           ) : null}
@@ -316,6 +319,30 @@ function AboutRow({ label, value }: { label: string; value: string }) {
       <span className="shrink-0 text-muted">{label}</span>
       <span className="selectable truncate text-fg">{value}</span>
     </div>
+  )
+}
+
+/** One row of 关于 that opens a page in the browser. */
+function AboutLink({
+  kernel,
+  label,
+  value,
+  url,
+}: {
+  kernel: Kernel
+  label: string
+  value: string
+  url: string
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => void kernel.send({ op: 'open_external', url })}
+      className="flex w-full items-center justify-between gap-4 px-4 py-2.5 text-left text-[12px] outline-none hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-accent/60"
+    >
+      <span className="shrink-0 text-muted">{label}</span>
+      <span className="selectable truncate text-fg">{value}</span>
+    </button>
   )
 }
 
@@ -811,19 +838,18 @@ function AboutSection({ version, kernel }: { version: string; kernel: Kernel }) 
       <div className="divide-y divide-ink">
         <AboutRow label="版本" value={version === '' ? '—' : version} />
         <AboutRow label="构建" value={status === null || status.current === '' ? '—' : status.current} />
-        <button
-          type="button"
-          onClick={() =>
-            void kernel.send({
-              op: 'open_external',
-              url: 'https://github.com/ShirazuNagisa/AGI-Mizar',
-            })
-          }
-          className="flex w-full items-center justify-between gap-4 px-4 py-2.5 text-left text-[12px] outline-none hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-accent/60"
-        >
-          <span className="shrink-0 text-muted">查看源代码</span>
-          <span className="selectable truncate text-fg">GitHub ↗</span>
-        </button>
+        <AboutLink
+          kernel={kernel}
+          label="查看源代码"
+          value="GitHub ↗"
+          url="https://github.com/ShirazuNagisa/AGI-Mizar"
+        />
+        <AboutLink
+          kernel={kernel}
+          label="查看文档站"
+          value="文档 ↗"
+          url="https://dsh-mizar.shirazu-nagisa.com/docs/"
+        />
         <div className="flex items-start justify-between gap-4 px-4 py-2.5">
           <div className="min-w-0 text-[12px] leading-5">
             <UpdateSummary checking={checking} status={status} error={error} />

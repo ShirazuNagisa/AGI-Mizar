@@ -198,6 +198,7 @@ fn main() {
             ipc::shell_settings_set,
             ipc::shell_login_item,
             ipc::app_quit,
+            ipc::app_export_text,
             ipc::tray_panel_resize,
             ipc::tray_panel_open_settings,
         ])

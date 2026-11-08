@@ -273,6 +273,26 @@ export interface DependencyReport {
   error: string | null
 }
 
+/** Whether the remote-agent feature has what it needs on this computer. */
+export interface RemoteHealthReport {
+  ok: boolean
+  summary: string
+  items: DependencyItem[]
+  /** What a repair changed; empty for a read-only check. */
+  changed: string[]
+  /** Why a repair could not finish. */
+  error: string | null
+}
+
+/** This computer's policy for accepting same-account peers. */
+export interface RemotePrefs {
+  enabled: boolean
+  allowLan: boolean
+  allowWan: boolean
+  workspaces: string[]
+  blocked: string[]
+}
+
 export interface StateSnapshot {
   version: string
   /** `macos`, `windows` or `linux`: which machine this window draws for. */
@@ -415,6 +435,8 @@ export type Command =
   | { op: 'remote_target_settings' }
   | { op: 'set_remote_target_settings'; enabled: boolean; allow_lan: boolean; allow_wan: boolean; workspaces: string[]; blocked: string[] }
   | { op: 'remote_audit' }
+  | { op: 'remote_health'; repair?: boolean }
+  | { op: 'remote_logs' }
   | { op: 'remote_install'; profile?: string; dry_run?: boolean }
   | { op: 'remote_uninstall'; profile?: string; dry_run?: boolean }
   | { op: 'remote_delegations' }

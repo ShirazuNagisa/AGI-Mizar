@@ -20,6 +20,7 @@
     "allow-shell-settings-set",
     "allow-shell-login-item",
     "allow-app-quit",
+    "allow-app-export-text",
     "allow-tray-panel-resize",
     "allow-tray-panel-open-settings"
   ]
