@@ -3739,6 +3739,43 @@ async fn serve_peer(server: Arc<MizarServer>, peer: String, connection: Peer) {
             loop {
                 match events.recv().await {
                     Ok(event) => {
+                        // The session list is a live surface too. Without this
+                        // a session started on the desktop only reached the
+                        // phone on the next manual refresh: the phone's poll is
+                        // about a running turn, and a new row is not one.
+                        let changed = match &event {
+                            agi_protocol::api::ApiEvent::SessionUpdated { session } => {
+                                let key = &session.key;
+                                (MizarServer::in_scope(scope, key)
+                                    && forward_server.peer_owns(&forward_device, key))
+                                .then(|| (key, Some(session.running)))
+                            }
+                            agi_protocol::api::ApiEvent::SessionRemoved { session } => {
+                                (MizarServer::in_scope(scope, session)
+                                    && forward_server.peer_owns(&forward_device, session))
+                                .then(|| (session, None))
+                            }
+                            _ => None,
+                        };
+                        if let Some((key, running)) = changed {
+                            let data = match running {
+                                Some(running) => json!({
+                                    "sessionId": key.to_string(),
+                                    "running": running,
+                                }),
+                                None => json!({
+                                    "sessionId": key.to_string(),
+                                    "removed": true,
+                                }),
+                            };
+                            if send(&out, ServerFrame::event("session.changed", data))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                            continue;
+                        }
                         if !interaction_in_scope(&forward_server, &forward_device, &event, scope) {
                             continue;
                         }
