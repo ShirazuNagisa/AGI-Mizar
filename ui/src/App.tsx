@@ -20,6 +20,8 @@ import { LoginPage } from './components/LoginPage'
 import { Onboarding } from './components/Onboarding'
 import { SettingsPage } from './components/SettingsPage'
 import { TrayPanel } from './components/TrayPanel'
+import { WindowControls } from './components/WindowControls'
+import { WindowResizeHandles } from './components/WindowResizeHandles'
 
 const kernel = new Kernel()
 
@@ -475,6 +477,8 @@ export function App() {
   return (
     <OledScope oled={theme === 'oled'}>
     <div className="flex h-full w-full overflow-hidden bg-bg text-fg">
+      <WindowControls />
+      <WindowResizeHandles />
       <Sidebar
         engines={snapshot?.engines ?? []}
         page={page}

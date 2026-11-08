@@ -136,7 +136,7 @@ async fn a_lan_peer_gets_a_scoped_token_and_can_create_a_session() {
     let listener = LanListener::bind(0, credentials(&ca, "acct", "server"))
         .await
         .unwrap();
-    let address = listener.local_addr().unwrap();
+    let address = listener.dial_addr().unwrap();
     let accept = tokio::spawn(async move {
         let session = listener.accept().await?;
         let remote = session.remote().clone();
@@ -198,7 +198,7 @@ async fn a_blocked_device_gets_no_lan_token_even_with_a_valid_certificate() {
     let listener = LanListener::bind(0, credentials(&ca, "acct", "server"))
         .await
         .unwrap();
-    let address = listener.local_addr().unwrap();
+    let address = listener.dial_addr().unwrap();
     let accept = tokio::spawn(async move {
         let session = listener.accept().await?;
         let remote = session.remote().clone();

@@ -524,3 +524,38 @@ Windows 任务在 macOS 之后串行。Authenticode 是**可选**的：只有发
 - 最终 NSIS（未签名与自签名两份都）安装/启动/关窗/退出/卸载全 PASS：安装 2.2–2.5s、55 文件 / 88,328,878 B、
   hook 在安装根、`bin\` 52 文件；退出删除 endpoint/hook；卸载后目录/快捷方式/注册表全清。
 - 证据：`docs/evidence/agi-mizar-windows-2026-11-02/fixed/limitations/packaging/`（工作区仓库）。
+
+### 2026-11-07 全量验证（origin/main `e0ed908` + 本轮 Windows 修复）
+
+本轮把 `e0ed908`（ags-lan/agi-peer/agi-remote、dataset/plugin/remote、Codex CDP、远程 Agent 设置页）
+在 Windows 上从零编译到安装跑通；完整记录在工作区
+`docs/session-notes/2026-11-07-agi-mizar-windows-full-verification.md`，证据在
+`docs/evidence/agi-mizar-windows-2026-11-07/`。要点：
+
+- 门禁：`cargo build --workspace` 通过 → `cargo test --workspace --no-fail-fast` **458 passed / 0 failed**
+  → `cargo clippy --all-targets -- -D warnings` **0 warning** → `cd ui && npm run build` 通过。
+  修掉的 Windows 编译阻断：`agi-engine-codex/src/gui_ipc.rs` 的 non-unix stub 签名、
+  `agi-core/tests/remote_installer.rs` 的 unix import。
+- 打包：`scripts\package.ps1 -Bundles nsis,msi` 一次出 NSIS **23,790,852 B** /
+  sha256 `50CA0FA55FBD89C265D42E72A0334840AEE73AB9B34145E37C1A15890556B0BD`、MSI **38,506,496 B** /
+  sha256 `9331DFF10851A6AC39184E07C0012D77DDB8817E66E696CE38BB8B34300DB677`。
+  `package.ps1` 现在会 `cargo build --release -p agi-remote` 并 stage 到 `resources/bin`（安装包 `bin\agi-remote.exe`），
+  SHA256 用 `.NET` 计算（本机从 Git Bash 起的 PowerShell 5.1 会丢 `Get-FileHash`；签名链路改用 `pwsh` 7 跑）。
+- 安装/生命周期：NSIS `/S` 安装 → 启动（0.1.1）→ 托盘面板 → 关窗隐藏 → 单实例 → 后台 `--background`
+  启动（无主窗）→ `app_quit` → `uninstall.exe /S` 全通过；安装版 `HKCU\...\Run` 写入
+  `"<install>\agi-mizar.exe" --background`，关闭即删除。
+- 判官/引擎：真模型 `live_judge` 2/2（chat completions → `Some(Done)` 7.58 s）；假手机租约后内核自动拉起
+  sidecar（ready, port 55601）；Codex 真 turn PONG；Codex GUI 只读来源 16 条 `codex_desktop`。
+- 平台缺口（非本轮回归）：Codex GUI 控制仅 unix；Claude Desktop GUI 来源仅 macOS 路径；上下文压缩没有
+  桌面 UI/API 入口。需要账户/手机的 LAN 证书、WAN、生产 dataset 上传未验证（本机未登录）。
+- 另：`../dsh-relay` 的两个 Windows 缺陷（直跑守卫、GNU tar `D:` 主机）已修，relay 334/334、dsh 74/74。
+
+### 2026-11-07 自绘标题栏
+
+Windows 不再显示系统标题栏：窗口 `decorations(false) + shadow(true)`，页面在右上角绘制
+最小化 / 最大化 / 关闭（46×48，关闭键 hover 变 Windows 红 `#c42b1c`），`Toolbar` 在 Windows 下
+`pr-[144px]` 让页面自己的右上角按钮左移。拖动靠 32px 拖动条 + 工具栏 `data-tauri-drag-region`
+（双击切换最大化）；缩放靠 8 个贴边热区调用 `start_resize_dragging`（tao 只接管有阴影窗口的顶边）。
+实现与验证记录见工作区 `docs/session-notes/2026-11-07-windows-custom-titlebar.md`；安装包
+23,796,282 B / SHA256 `7D0C54D9…DB1C5`。限制：窗口宽度固定 1034（年份格子），最大化按钮没有
+Windows 11 的 Snap Layouts 悬停面板（自绘按钮拿不到系统 caption 的贴靠面板）。

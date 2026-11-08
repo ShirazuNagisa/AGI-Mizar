@@ -298,6 +298,7 @@ dependencies = [
  "dunce",
  "tempfile",
  "tokio",
+ "windows-sys 0.59.0",
  "winreg",
 ]
 

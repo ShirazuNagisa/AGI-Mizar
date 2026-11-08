@@ -115,6 +115,20 @@ jobs:
           New-Item -ItemType Directory -Force crates/agi-app/resources | Out-Null
           Copy-Item target/release/agi-mizar-hook.exe crates/agi-app/resources/agi-mizar-hook.exe
 
+      # The remote-agent sidecar is the MCP/CLI bridge behind the settings
+      # page's install entry. tauri.windows.conf.json maps resources/bin to
+      # `bin/` next to the app, which is where find_remote_installer looks;
+      # without this step a released installer can only report
+      # REMOTE_INSTALLER_MISSING.
+      - name: Build the remote-agent sidecar
+        run: cargo build --release -p agi-remote
+
+      - name: Stage the remote-agent sidecar as a bundle resource
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force crates/agi-app/resources/bin | Out-Null
+          Copy-Item target/release/agi-remote.exe crates/agi-app/resources/bin/agi-remote.exe
+
       # Pinned tag + SHA256, same file the macOS release reads. The Windows
       # build of llama-server.exe needs its DLLs from the same directory, which
       # is why the whole archive directory is installed, not just the exe.

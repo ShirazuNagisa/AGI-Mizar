@@ -4,8 +4,9 @@ import { App } from './App'
 import { applyPlatformFromLocation } from './platform'
 import './styles.css'
 
-// Before the first render: macOS reserves a strip for its traffic lights and
-// Windows does not, and the window should not flash the other layout first.
+// Before the first render: macOS and Windows reserve a strip at the top of the
+// window for the title bar the page draws (Linux keeps the system one), and the
+// window should not flash the other layout first.
 applyPlatformFromLocation()
 
 const root = document.getElementById('root')

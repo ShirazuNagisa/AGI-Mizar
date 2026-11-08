@@ -18,6 +18,9 @@
 //! A future app can reject these; the caller turns that into an error instead
 //! of silently falling back to a second app-server writer.
 
+#[cfg(not(unix))]
+use serde_json::Value;
+
 #[cfg(unix)]
 mod unix {
     use std::path::PathBuf;
@@ -497,7 +500,11 @@ pub use unix::{
 };
 
 #[cfg(not(unix))]
-pub async fn start_turn(_conversation: &str, _text: &str) -> Result<String, String> {
+pub async fn start_turn(
+    _conversation: &str,
+    _text: &str,
+    _attachments: &[Value],
+) -> Result<String, String> {
     Err("Codex desktop control is only available on macOS and Linux".to_string())
 }
 
@@ -547,6 +554,7 @@ pub async fn answer_user_input(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
 
     #[cfg(unix)]

@@ -233,6 +233,24 @@ impl Default for Preferences {
     }
 }
 
+/// Normalise a workspace path for the remote-policy comparison.
+///
+/// A delegating peer spells the same directory the way its own platform does:
+/// Windows accepts both separators and is case-insensitive, macOS may hand back
+/// a path with or without the trailing slash. Comparing the raw strings means a
+/// legitimate delegation is refused as "not in the allowlist", so separators
+/// are folded, trailing separators dropped, and (on Windows) the case folded.
+fn normalize_workspace(path: &str) -> String {
+    let mut normalised = path.replace('\\', "/");
+    while normalised.len() > 1 && normalised.ends_with('/') {
+        normalised.pop();
+    }
+    if cfg!(windows) {
+        normalised = normalised.to_lowercase();
+    }
+    normalised
+}
+
 /// Run the `agi-remote` installer next to this executable, without a shell.
 fn run_remote_installer(uninstall: bool, profile: Option<&str>, dry_run: bool) -> CommandResponse {
     let path = std::env::var("AGI_REMOTE_BIN")
@@ -251,6 +269,11 @@ fn run_remote_installer(uninstall: bool, profile: Option<&str>, dry_run: bool) -
         );
     };
     let mut command = std::process::Command::new(path);
+    // Pin the DSH home the kernel reads onto the installer. A GUI launch on
+    // Windows has no HOME, so without this the two could resolve different
+    // profiles; `agi_platform::dsh_home()` is the same resolution the kernel's
+    // plugin reader uses.
+    command.env("DSH_HOME", agi_platform::dsh_home());
     command.arg(if uninstall { "uninstall" } else { "install" });
     if let Some(profile) = profile {
         command.arg("--profile").arg(profile);
@@ -276,12 +299,22 @@ fn run_remote_installer(uninstall: bool, profile: Option<&str>, dry_run: bool) -
 }
 
 /// Find the `agi-remote` sidecar beside a packaged app.
+///
+/// The sidecar is staged in three layouts, all of which are checked:
+/// - next to the executable (a dev `cargo build` puts it beside `agi-mizar.exe`);
+/// - under `bin/` (the Windows bundler maps `resources/bin` there);
+/// - under `../Resources/bin` (the macOS `.app` bundle layout).
 fn find_remote_installer(exe: &std::path::Path) -> Option<std::path::PathBuf> {
     let parent = exe.parent()?;
     [
         parent.join("agi-remote"),
+        parent.join("agi-remote.exe"),
+        parent.join("bin/agi-remote"),
+        parent.join("bin/agi-remote.exe"),
         parent.join("../Resources/bin/agi-remote"),
+        parent.join("../Resources/bin/agi-remote.exe"),
         parent.join("../Resources/agi-remote"),
+        parent.join("../Resources/agi-remote.exe"),
     ]
     .into_iter()
     .find(|path| path.is_file())
@@ -1138,11 +1171,12 @@ impl Core {
     /// Whether the remote policy would accept this exact workspace path.
     pub fn remote_workspace_allowed(&self, path: &str) -> bool {
         let prefs = self.remote_prefs();
+        let requested = normalize_workspace(path);
         prefs.enabled
             && prefs
                 .workspaces
                 .iter()
-                .any(|candidate| candidate.trim_end_matches('/') == path.trim_end_matches('/'))
+                .any(|candidate| normalize_workspace(candidate) == requested)
     }
 
     /// Write the preference file the way the endpoint file is written: private,
@@ -3126,10 +3160,39 @@ mod tests {
         });
         assert!(core.remote_workspace_allowed("/tmp/remote/"));
         assert!(!core.remote_workspace_allowed("/tmp/other"));
+        // The same directory, spelled the way another platform would: Windows
+        // separators, a trailing separator, and (on Windows) different case.
+        if cfg!(windows) {
+            assert!(core.remote_workspace_allowed("\\tmp\\remote\\"));
+            assert!(core.remote_workspace_allowed("/TMP/REMOTE"));
+        } else {
+            assert!(core.remote_workspace_allowed("/tmp/remote"));
+        }
 
         let again = Core::new(Vec::new());
         again.load_preferences(path);
         assert_eq!(again.remote_prefs(), core.remote_prefs());
+    }
+
+    #[test]
+    fn the_remote_installer_is_found_in_the_bundle_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join(if cfg!(windows) {
+            "AGI Mizar.exe"
+        } else {
+            "AGI Mizar"
+        });
+        std::fs::write(&app, b"app").unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let remote = bin.join(if cfg!(windows) {
+            "agi-remote.exe"
+        } else {
+            "agi-remote"
+        });
+        std::fs::write(&remote, b"remote").unwrap();
+        let found = find_remote_installer(&app).expect("the sidecar under bin/ is found");
+        assert_eq!(found.file_name(), remote.file_name());
     }
 
     #[test]

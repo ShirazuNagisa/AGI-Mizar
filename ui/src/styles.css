@@ -1,4 +1,10 @@
-@import "tailwindcss";
+/* Only the app's own sources are scanned for classes. Tailwind's automatic
+   detection also walks the committed `ui/dist`, so every build would inherit
+   every class the *previous* build emitted: the stylesheet could never settle
+   and CI's `git diff --exit-code -- ui/dist` would keep finding differences.
+   `index.html` has no classes of its own; `src/` holds all of them. */
+@import "tailwindcss" source(none);
+@source "./**/*.{ts,tsx}";
 
 /* The window's theme is a class on <html>, set by src/theme.ts: following the
    system means the class is rewritten when the desktop changes appearance. */
@@ -156,10 +162,11 @@ html[data-theme="oled"] :focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
-/* On macOS the window has no title bar; its top edge moves it. That is Tauri's
-   `data-tauri-drag-region` (see Toolbar and the sidebar's first strip), not the
-   old Electron `-webkit-app-region`, which WKWebView ignores. Windows keeps the
-   system title bar, so it has no drag region to paint. */
+/* On macOS and Windows the window has no system title bar; its top edge moves
+   it. That is Tauri's `data-tauri-drag-region` (see Toolbar and the sidebar's
+   first strip), not the old Electron `-webkit-app-region`, which WebView2/WKWebView
+   ignore. Windows paints the traffic lights in that strip; macOS gets them from
+   the system overlay. */
 
 ::-webkit-scrollbar {
   width: 10px;

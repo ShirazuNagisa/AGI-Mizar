@@ -21,6 +21,8 @@ import { CheckIcon, ENGINE_MARKS, RingMark, Spinner } from '../icons'
 import { DshPluginHint } from './DshPluginHint'
 import { useIsOled } from '../lib/oled'
 import { ShellSettingsList } from './ShellSettingsList'
+import { WindowControls } from './WindowControls'
+import { WindowResizeHandles } from './WindowResizeHandles'
 import { cn, failureMessage } from '../lib/utils'
 
 /** The seven steps, in the order the guide walks them. */
@@ -180,13 +182,17 @@ export function Onboarding({
 
   return (
     <div className="flex h-full w-full flex-col bg-bg text-fg">
-      {/* macOS draws no title bar, so the guide reserves the traffic lights'
-          strip; Windows keeps the system title bar and a small pad is enough. */}
-      {platform === 'macos' ? (
+      {/* The window draws its own chrome on macOS and Windows: this first row
+          is the drag strip. macOS overlays its traffic lights here; Windows
+          paints its window buttons in the top-right corner instead. Linux
+          keeps its title bar. */}
+      {platform === 'macos' || platform === 'windows' ? (
         <div data-tauri-drag-region className="h-8 shrink-0" />
       ) : (
         <div className="h-2 shrink-0" />
       )}
+      <WindowControls />
+      <WindowResizeHandles />
       <div className="flex min-h-0 flex-1 justify-center overflow-y-auto px-8 pb-8">
         <div className="flex min-h-full w-full max-w-[560px] flex-col pt-2">
           <div className="flex items-center gap-1.5">

@@ -1,4 +1,8 @@
 //! The UI-facing installer commands, with a fake `agi-remote` on disk.
+//!
+//! Unix-only: the fake installer is a `#!/bin/sh` script and the test makes it
+//! executable with `PermissionsExt`, neither of which exists on Windows.
+#![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;
 

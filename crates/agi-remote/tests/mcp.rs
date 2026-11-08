@@ -213,8 +213,8 @@ async fn dry_run_does_not_touch_the_dsh_profile() {
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_agi-remote"))
         .args(["install", "--profile", "desktop", "--dry-run"])
-        .env("HOME", home.path())
-        .env_remove("DSH_HOME")
+        .env("DSH_HOME", home.path().join(".dsh"))
+        .env_remove("HOME")
         .output()
         .unwrap();
     assert!(
@@ -247,8 +247,8 @@ async fn install_is_idempotent_and_uninstall_keeps_user_entries() {
     let run = |args: &[&str]| {
         std::process::Command::new(env!("CARGO_BIN_EXE_agi-remote"))
             .args(args)
-            .env("HOME", home.path())
-            .env_remove("DSH_HOME")
+            .env("DSH_HOME", home.path().join(".dsh"))
+            .env_remove("HOME")
             .output()
             .unwrap()
     };

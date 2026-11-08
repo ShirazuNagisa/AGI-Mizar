@@ -134,6 +134,25 @@ function Step([string]$name) {
     Write-Host "== $name" -ForegroundColor Cyan
 }
 
+# Get-FileHash ships in Microsoft.PowerShell.Utility, which a stripped Windows
+# PowerShell can fail to expose (observed on a Windows 11 box: Get-Command
+# Get-FileHash is a CommandNotFoundException while everything else works). The
+# artifact report must not turn a successful build into exit 1, so hash through
+# .NET directly and keep Get-FileHash out of the critical path.
+function Get-FileSha256([string]$Path) {
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        try {
+            return ([System.BitConverter]::ToString($algorithm.ComputeHash($stream)) -replace '-', '').ToLowerInvariant()
+        } finally {
+            $stream.Dispose()
+        }
+    } finally {
+        $algorithm.Dispose()
+    }
+}
+
 function Note([string]$text) {
     Write-Host "note: $text" -ForegroundColor Yellow
 }
@@ -275,6 +294,19 @@ if (-not (Test-Path $llamaServer)) {
     Write-Host ("llama: {0} files, {1:N1} MiB" -f $llamaFiles.Count, ($llamaSize / 1MB))
 }
 
+# 2b. The agi-remote sidecar. It is the MCP/CLI bridge behind the settings
+#     page's remote-agent install; Windows packages it in the same `bin/`
+#     resource directory as the llama runtime, and agi-core's
+#     find_remote_installer looks for `bin/agi-remote.exe` beside the app.
+Step 'agi-remote sidecar'
+& cargo build --release -p agi-remote
+if ($LASTEXITCODE -ne 0) { Fail "cargo build --release -p agi-remote failed (exit $LASTEXITCODE)" }
+$remoteBuilt = Join-Path $root 'target/release/agi-remote.exe'
+if (-not (Test-Path $remoteBuilt)) { Fail "expected $remoteBuilt to exist after the build" }
+$remoteResource = Join-Path $llamaDir 'agi-remote.exe'
+Copy-Item -Path $remoteBuilt -Destination $remoteResource -Force
+Write-Host ("agi-remote: {0} ({1:N0} KiB)" -f $remoteResource, ((Get-Item $remoteResource).Length / 1KB))
+
 # 3. Signing prerequisites, reported rather than assumed.
 Step 'signing'
 $configArgs = @()
@@ -344,7 +376,7 @@ if ($exitCode -ne 0) {
 }
 
 foreach ($artifact in ($artifacts | Sort-Object LastWriteTime)) {
-    $hash = (Get-FileHash -Algorithm SHA256 -Path $artifact.FullName).Hash
+    $hash = Get-FileSha256 $artifact.FullName
     Write-Host ''
     Write-Host ("installer: {0}" -f $artifact.FullName)
     Write-Host ("  size    {0:N1} MiB" -f ($artifact.Length / 1MB))
@@ -432,7 +464,7 @@ try {
             if ($signature.TimeStamperCertificate) {
                 Write-Host ("  timestamp  {0}" -f $signature.TimeStamperCertificate.Subject)
             }
-            Write-Host ("  sha256     {0}" -f (Get-FileHash -Algorithm SHA256 -Path $artifact.FullName).Hash)
+            Write-Host ("  sha256     {0}" -f (Get-FileSha256 $artifact.FullName))
             if (-not $signature.SignerCertificate) {
                 Fail ("no Authenticode signature is present on {0} after signing" -f $artifact.FullName)
             }

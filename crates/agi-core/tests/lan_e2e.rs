@@ -4,7 +4,6 @@
 //! server crate); it speaks the same frames by hand so the test covers the
 //! manager, the LAN client, the certificate check and the turn polling together.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -127,7 +126,7 @@ async fn the_manager_runs_a_lan_turn_and_returns_its_final_text() {
     let listener = LanListener::bind(0, credentials(&ca, "acct", "target"))
         .await
         .unwrap();
-    let address: SocketAddr = listener.local_addr().unwrap();
+    let address = listener.dial_addr().unwrap();
     let server = tokio::spawn(target(listener));
 
     let manager = RemoteManager::new();

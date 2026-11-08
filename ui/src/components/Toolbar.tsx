@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { isMac } from '../platform'
+import { isMac, isWindows } from '../platform'
 
 interface ToolbarProps {
  title: string
@@ -10,19 +10,23 @@ interface ToolbarProps {
 
 /**
  * The strip every page shares: what this page is, on the left, and what it can
- * do, on the right. On macOS it is also a drag region, so a window without a
- * title bar still moves by its top edge; Windows keeps its system title bar and
- * needs no drag region.
+ * do, on the right. On macOS and Windows it is also a drag region, so a window
+ * without a title bar still moves by its top edge; Linux keeps its system title
+ * bar and needs no drag region.
  *
  * 1-bit: the title is the same 12px as everything else, so a filled square
  * marks where it starts. Size alone cannot carry hierarchy in this theme.
  */
 export function Toolbar({ title, badge, children }: ToolbarProps) {
- const drag = isMac() ? { 'data-tauri-drag-region': 'deep' } : {}
+ const drag = isMac() || isWindows() ? { 'data-tauri-drag-region': 'deep' } : {}
+ // Windows paints its window buttons into the top-right corner of the window;
+ // reserve their 3 x 46px so the page's own actions stay clear of them. macOS
+ // has no such strip on this side (its traffic lights sit over the sidebar).
+ const reserved = isWindows() ? ' pr-[144px]' : ''
  return (
     <header
       {...drag}
-      className="flex h-12 shrink-0 items-center gap-2 mz-divide-b px-6"
+      className={'flex h-12 shrink-0 items-center gap-2 mz-divide-b px-6' + reserved}
     >
       <span className="size-2 shrink-0 bg-ink" aria-hidden />
       <h1 className="text-[12px] tracking-[1px]">{title}</h1>

@@ -3,7 +3,7 @@ import type { EngineStatus } from '../api'
 import { AGENT_TABS, type AgentTab, type Page, samePage } from '../navigation'
 import { ENGINE_MARKS, GearIcon, RingMark } from '../icons'
 import { cn } from '../lib/utils'
-import { isMac } from '../platform'
+import { isMac, isWindows } from '../platform'
 import { WipeButton } from './ui/wipe'
 import { useIsOled } from '../lib/oled'
 
@@ -109,11 +109,12 @@ export function Sidebar({
         oled ? 'border-ink' : 'border-border',
       )}
     >
-      {/* The window's title bar is gone on macOS; the first row is the traffic
-          lights' room, and the system draws them over this strip. Windows keeps
-          the system title bar, so the strip would be empty space there — a small
-          pad is all the Windows rows need. */}
-      {isMac() ? (
+      {/* The window draws its own chrome: the first row is the drag strip. On
+          macOS the system overlays the traffic lights there; on Windows the
+          window buttons live in the top-right corner of the window (see
+          WindowControls), so this strip is just something to grab. Linux keeps
+          the system title bar, so its rows only need a small pad. */}
+      {isMac() || isWindows() ? (
         <div data-tauri-drag-region className="h-8 shrink-0" />
       ) : (
         <div className="h-2 shrink-0" />

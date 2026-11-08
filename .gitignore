@@ -12,3 +12,6 @@ crates/agi-app/resources/
 # The built UI is committed, the same way the DSH plugin commits lib/: a fresh
 # clone has to be able to `cargo build` without a Node toolchain first.
 !ui/dist/
+
+# Ad-hoc CARGO_TARGET_DIR used for a one-off gate; never commit it.
+target-*/
