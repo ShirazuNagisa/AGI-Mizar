@@ -22,6 +22,7 @@ export function RemoteAgentSettings({ kernel }: { kernel: Kernel }) {
   const [blocked, setBlocked] = useState('')
   const [busy, setBusy] = useState<'save' | 'check' | 'export' | null>(null)
   const [health, setHealth] = useState<RemoteHealthReport | null>(null)
+  const [healthFailed, setHealthFailed] = useState(false)
   const [checking, setChecking] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
@@ -47,7 +48,9 @@ export function RemoteAgentSettings({ kernel }: { kernel: Kernel }) {
         const next = await kernel.send<RemoteHealthReport>({ op: 'remote_health' })
         if (!cancelled) setHealth(next)
       } catch {
-        // The button below reports the same failure with a sentence.
+        // The report box says so instead of waiting forever; the button retries
+        // with the sentence in the page's error line.
+        if (!cancelled) setHealthFailed(true)
       }
     })()
     return () => {
@@ -71,8 +74,15 @@ export function RemoteAgentSettings({ kernel }: { kernel: Kernel }) {
       })
       setSaved(true)
       // The policy is one of the items, so the verdict has to follow the switch
-      // rather than wait for the next page visit.
-      setHealth(await kernel.send<RemoteHealthReport>({ op: 'remote_health' }))
+      // rather than wait for the next page visit. A failed re-read is not a
+      // failed save: the switch stays where it was and the report says it
+      // could not be read.
+      try {
+        setHealth(await kernel.send<RemoteHealthReport>({ op: 'remote_health' }))
+        setHealthFailed(false)
+      } catch {
+        setHealthFailed(true)
+      }
     } catch (failure) {
       setError(failureMessage(failure, '没有记住远程 Agent 设置'))
     } finally {
@@ -86,6 +96,7 @@ export function RemoteAgentSettings({ kernel }: { kernel: Kernel }) {
     setError(null)
     try {
       setHealth(await kernel.send<RemoteHealthReport>({ op: 'remote_health', repair: true }))
+      setHealthFailed(false)
     } catch (failure) {
       setError(failureMessage(failure, '检查依赖完整性没有成功'))
     } finally {
@@ -155,7 +166,7 @@ export function RemoteAgentSettings({ kernel }: { kernel: Kernel }) {
         </div>
 
         <div className="mt-2">
-          <HealthReport report={health} />
+          <HealthReport report={health} failed={healthFailed} />
         </div>
       </section>
 
@@ -258,11 +269,19 @@ export function RemoteAgentSettings({ kernel }: { kernel: Kernel }) {
 }
 
 /** The verdict and its items; the same drawing the agent page uses. */
-function HealthReport({ report }: { report: RemoteHealthReport | null }) {
+function HealthReport({
+  report,
+  failed,
+}: {
+  report: RemoteHealthReport | null
+  failed: boolean
+}) {
   if (report === null) {
     return (
       <div className="mz-border px-4 py-3">
-        <p className="text-[12px] text-muted">正在读取依赖…</p>
+        <p className="text-[12px] text-muted">
+          {failed ? '没有读到依赖状态，点上面的按钮重试。' : '正在读取依赖…'}
+        </p>
       </div>
     )
   }
