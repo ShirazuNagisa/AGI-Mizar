@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { EngineStatus } from '../api'
 import { AGENT_TABS, type AgentTab, type Page, samePage } from '../navigation'
-import { ENGINE_MARKS, GearIcon } from '../icons'
+import { ENGINE_MARKS, GearIcon, RingMark } from '../icons'
 import { cn } from '../lib/utils'
 import { isMac } from '../platform'
 import { WipeButton } from './ui/wipe'
@@ -53,15 +53,6 @@ function Lamp({ state, label }: { state: 'on' | 'off' | 'absent'; label?: string
         backgroundSize: '2px 2px',
       }}
     />
-  )
-}
-
-/** The mark, drawn in the current colour so it inverts with its row. */
-function Star() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
-      <path d="M8 0 L9.6 5.23 L14.93 4 L11.2 8 L14.93 12 L9.6 10.77 L8 16 L6.4 10.77 L1.07 12 L4.8 8 L1.07 4 L6.4 5.23 Z" />
-    </svg>
   )
 }
 
@@ -134,7 +125,7 @@ export function Sidebar({
         contentClassName={cn(ROW_LABEL, 'gap-2')}
         aria-label="回到主页"
       >
-        <Star />
+        <RingMark />
         <span className="text-[12px] tracking-[1px]">AGI Mizar</span>
       </WipeButton>
 

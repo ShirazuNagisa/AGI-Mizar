@@ -17,7 +17,7 @@ import { quitApp, shellAvailable, shellFailure } from '../shell'
 import { Button } from './ui/button'
 import { Progress } from './ui/progress'
 import { Switch } from './ui/switch'
-import { CheckIcon, ENGINE_MARKS, Spinner, StarMark } from '../icons'
+import { CheckIcon, ENGINE_MARKS, RingMark, Spinner } from '../icons'
 import { DshPluginHint } from './DshPluginHint'
 import { useIsOled } from '../lib/oled'
 import { ShellSettingsList } from './ShellSettingsList'
@@ -284,7 +284,7 @@ export function Onboarding({
 function WelcomeStep() {
   return (
     <section>
-      <StarMark size={48} />
+      <RingMark size={48} />
       <h1 className="mt-5 text-[24px] font-semibold tracking-tight text-fg">欢迎使用 AGI Mizar</h1>
       <p className="mt-3 text-[12px] leading-6 text-muted">
         这是一台电脑端宿主：它把本机的 agent 交给你的手机。手机端 DSH Mizar 用同一个账户登录后，

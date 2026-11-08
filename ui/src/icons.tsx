@@ -60,11 +60,24 @@ export function CodexMark({ size = 20, className }: MarkProps) {
   )
 }
 
-/** The Mizar star, drawn in the current colour so it inverts with its row. */
-export function StarMark({ size = 16, className }: MarkProps) {
+/** The Mizar ring, drawn in the current colour so it inverts with its row.
+ *
+ * The five pieces are the same arcs as the app icon: long right-hand arc,
+ * bottom, lower-left, left, and the dot at ten o'clock. It is stroked rather
+ * than filled so the same component reads at 16 px in the sidebar and at 48 px
+ * on the welcome step.
+ */
+export function RingMark({ size = 16, className }: MarkProps) {
   return (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill="currentColor" className={className} aria-hidden>
-      <path d="M8 0 L9.6 5.23 L14.93 4 L11.2 8 L14.93 12 L9.6 10.77 L8 16 L6.4 10.77 L1.07 12 L4.8 8 L1.07 4 L6.4 5.23 Z" />
+    <svg width={size} height={size} viewBox="0 0 16 16" className={className} aria-hidden>
+      <path
+        d="M8 1.84 A6.16 6.16 0 0 1 12.2 12.5 M10.11 13.79 A6.16 6.16 0 0 1 5.99 13.82 M3.96 12.65 A6.16 6.16 0 0 1 2.11 9.8 M1.87 7.36 A6.16 6.16 0 0 1 2.46 5.3"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={1.376}
+        strokeLinecap="round"
+      />
+      <circle cx={4.04} cy={3.28} r={0.688} fill="currentColor" />
     </svg>
   )
 }
