@@ -77,7 +77,7 @@ pub struct RelayClient {
     /// Set when this client has been replaced by one pointed elsewhere.
     stopped: AtomicBool,
     /// Open phone WebSockets, by relay stream id.
-    streams: Mutex<HashMap<String, mpsc::Sender<StreamCommand>>>,
+    streams: Arc<Mutex<HashMap<String, mpsc::Sender<StreamCommand>>>>,
     /// The account session this desktop presents, when signed in.
     account: Mutex<Option<AccountSource>>,
     /// The roster tokens are minted from, when the relay brokers a phone.
@@ -94,6 +94,61 @@ enum StreamCommand {
     Close,
 }
 
+/// One frame for the tunnel's writer.
+///
+/// Control frames are JSON and stay JSON; a `ws-msg` may be binary when the
+/// relay advertised that it reads the framing (see [`encode_ws_msg`]). The
+/// writer is the only task that touches the sink, so the two kinds cannot
+/// interleave mid-frame.
+enum Outgoing {
+    Json(Value),
+    Bytes(Vec<u8>),
+}
+
+impl From<Value> for Outgoing {
+    fn from(value: Value) -> Self {
+        Outgoing::Json(value)
+    }
+}
+
+/// The first byte of a binary tunnel frame: a `ws-msg`.
+const FRAME_WS_MSG: u8 = 0x01;
+
+/// Encode one `ws-msg` as the binary framing.
+///
+/// `{kind, id length, id, flags, payload}`. The JSON + base64 spelling costs a
+/// third more bytes and two full passes over every conversation page, on the one
+/// hop that already knows the payload is a WebSocket message.
+pub fn encode_ws_msg(id: &str, binary: bool, payload: &[u8]) -> Vec<u8> {
+    let id = id.as_bytes();
+    let length = id.len().min(255);
+    let mut out = Vec::with_capacity(payload.len() + length + 3);
+    out.push(FRAME_WS_MSG);
+    out.push(length as u8);
+    out.extend_from_slice(&id[..length]);
+    out.push(if binary { 1 } else { 0 });
+    out.extend_from_slice(payload);
+    out
+}
+
+/// Decode one binary `ws-msg`.
+///
+/// `None` rather than a panic: this runs inside the tunnel reader, where one
+/// malformed frame must not end the tunnel.
+pub fn decode_ws_msg(data: &[u8]) -> Option<(String, bool, &[u8])> {
+    if data.len() < 3 || data[0] != FRAME_WS_MSG {
+        return None;
+    }
+    let length = data[1] as usize;
+    let start = 2 + length;
+    if length == 0 || data.len() < start + 1 {
+        return None;
+    }
+    let id = std::str::from_utf8(&data[2..start]).ok()?.to_string();
+    let binary = data[start] == 1;
+    Some((id, binary, &data[start + 1..]))
+}
+
 impl RelayClient {
     /// Build a client for one relay and one local port.
     pub fn new(base: impl Into<String>, token: impl Into<String>, local_port: u16) -> Arc<Self> {
@@ -104,7 +159,7 @@ impl RelayClient {
             room: Mutex::new(None),
             connected: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
-            streams: Mutex::new(HashMap::new()),
+            streams: Arc::new(Mutex::new(HashMap::new())),
             account: Mutex::new(None),
             store: Mutex::new(None),
             peer_policy: Mutex::new(None),
@@ -262,23 +317,40 @@ impl RelayClient {
             );
         }
 
+        // Advertised per dial: the relay answers `wsMsgBinary` in `welcome` when
+        // it will carry framed `ws-msg`, and only then does this side send one.
+        // A relay older than the header keeps receiving JSON + base64.
+        request.headers_mut().insert(
+            "x-mizar-tunnel-frames",
+            "binary"
+                .parse()
+                .map_err(|_| anyhow::anyhow!("the frame capability is not a header value"))?,
+        );
+
         let (socket, _) = tokio_tungstenite::connect_async(request).await?;
         tracing::info!("relay: tunnel established with {}", self.base);
 
         let (mut sink, mut stream) = socket.split();
-        let (out, mut out_rx) = mpsc::channel::<Value>(64);
+        let (out, mut out_rx) = mpsc::channel::<Outgoing>(64);
+        // Shared with every stream task: set once, when `welcome` says the relay
+        // reads framed `ws-msg`. Until then (and on a relay that never says so)
+        // the JSON + base64 spelling is what goes out.
+        let binary_frames = Arc::new(AtomicBool::new(false));
 
         // One writer task: every frame from every replayed request goes through
         // it, so two handlers can never interleave on the socket.
         let writer = tokio::spawn(async move {
             while let Some(frame) = out_rx.recv().await {
-                let text = frame.to_string();
+                let message = match frame {
+                    Outgoing::Json(value) => Message::Text(value.to_string()),
+                    Outgoing::Bytes(bytes) => Message::Binary(bytes),
+                };
                 // A relay that stops reading must not hold every phone request
                 // behind a full TCP window forever. The reader below notices a
                 // closed socket; a timed-out writer has to close it too.
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(15),
-                    sink.send(Message::Text(text)),
+                    sink.send(message),
                 )
                 .await
                 {
@@ -299,8 +371,17 @@ impl RelayClient {
             };
             let Some(message) = message else { break };
             let Ok(message) = message else { break };
-            let Message::Text(text) = message else {
-                continue;
+            let text = match message {
+                Message::Text(text) => text,
+                Message::Binary(bytes) => {
+                    // Only a `ws-msg` is ever framed; the relay sends none until
+                    // `welcome` said so, so an old build never sees one.
+                    if let Some((id, binary, payload)) = decode_ws_msg(&bytes) {
+                        self.forward_stream_frame(&id, binary, payload, &out).await;
+                    }
+                    continue;
+                }
+                _ => continue,
             };
             let Ok(frame) = serde_json::from_str::<Value>(&text) else {
                 continue;
@@ -322,21 +403,25 @@ impl RelayClient {
                         );
                         break;
                     }
+                    if frame.get("wsMsgBinary").and_then(Value::as_bool) == Some(true) {
+                        binary_frames.store(true, Ordering::Relaxed);
+                        tracing::info!("relay: framed ws-msg enabled");
+                    }
                     tracing::info!("relay: room {room}");
                     *self.room() = Some(room);
                     self.connected.store(true, Ordering::Relaxed);
                 }
                 Some("ping") => {
                     let id = frame.get("id").cloned().unwrap_or(Value::Null);
-                    let _ = out.send(json!({ "t": "pong", "id": id })).await;
+                    let _ = out.send(json!({ "t": "pong", "id": id }).into()).await;
                 }
                 Some("req") => {
                     let client = self.clone_handle();
                     let out = out.clone();
                     tokio::spawn(async move { replay_request(client, frame, out).await });
                 }
-                Some("ws-open") => self.open_stream(frame, out.clone()),
-                Some("ws-msg") => self.forward_stream_message(&frame),
+                Some("ws-open") => self.open_stream(frame, out.clone(), Arc::clone(&binary_frames)),
+                Some("ws-msg") => self.forward_stream_message(&frame, &out).await,
                 Some("ws-close") => self.close_stream(&frame),
                 Some("provision") => self.provision_phone(frame, out.clone()),
                 Some("error") => {
@@ -373,7 +458,7 @@ impl RelayClient {
     }
 
     /// Mint a token for one phone, or say why it could not be done.
-    fn provision_phone(&self, frame: Value, out: mpsc::Sender<Value>) {
+    fn provision_phone(&self, frame: Value, out: mpsc::Sender<Outgoing>) {
         let id = frame.get("id").cloned().unwrap_or(Value::Null);
         let account = frame
             .get("accountId")
@@ -415,7 +500,7 @@ impl RelayClient {
                     .send(json!({
                         "t": "error", "id": id,
                         "message": "this computer does not accept remote peers"
-                    }))
+                    }).into())
                     .await;
             });
             return;
@@ -443,12 +528,12 @@ impl RelayClient {
                     "message": "this computer cannot mint a token right now"
                 }),
             };
-            let _ = out.send(frame).await;
+            let _ = out.send(frame.into()).await;
         });
     }
 
     /// Start proxying one phone WebSocket.
-    fn open_stream(&self, frame: Value, out: mpsc::Sender<Value>) {
+    fn open_stream(&self, frame: Value, out: mpsc::Sender<Outgoing>, binary_frames: Arc<AtomicBool>) {
         let Some(id) = frame.get("id").and_then(Value::as_str).map(str::to_string) else {
             return;
         };
@@ -461,12 +546,20 @@ impl RelayClient {
 
         let (commands, mut command_rx) = mpsc::channel::<StreamCommand>(64);
         self.streams().insert(id.clone(), commands);
+        let streams = Arc::clone(&self.streams);
 
         tokio::spawn(async move {
             let url = format!("ws://127.0.0.1:{port}{path}");
             let socket = match tokio_tungstenite::connect_async(url).await {
                 Ok((socket, _)) => socket,
                 Err(error) => {
+                    // The map entry was inserted before this task started; with
+                    // no local socket behind it nothing would ever remove it
+                    // until the whole tunnel reconnected.
+                    streams
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .remove(&id);
                     // Not `ws-close`: the relay has not heard `ws-open-ok` yet,
                     // so a close lands on a stream with no phone attached, and
                     // the relay drops its own deadline instead of failing the
@@ -476,7 +569,7 @@ impl RelayClient {
                         .send(json!({
                             "t": "error", "id": id,
                             "message": format!("the local listener refused the stream: {error}")
-                        }))
+                        }).into())
                         .await;
                     return;
                 }
@@ -487,7 +580,7 @@ impl RelayClient {
             // The relay holds the phone until the computer says the stream is
             // up, and gives up on a timer if it never hears: `ws-open-ok` is not
             // optional bookkeeping.
-            let _ = out.send(json!({ "t": "ws-open-ok", "id": id })).await;
+            let _ = out.send(json!({ "t": "ws-open-ok", "id": id }).into()).await;
 
             // Local → relay.
             let relay_out = out.clone();
@@ -497,29 +590,51 @@ impl RelayClient {
                     let Ok(message) = message else { break };
                     match message {
                         Message::Text(text) => {
-                            // Base64 even for text: the tunnel is JSON, and the
-                            // relay decodes every `ws-msg` the same way.
-                            let _ = relay_out
-                                .send(json!({
-                                    "t": "ws-msg", "id": local_id,
-                                    "data": base64(text.as_bytes()), "binary": false
-                                }))
-                                .await;
+                            if binary_frames.load(Ordering::Relaxed) {
+                                // Framed: the payload goes as it is, with no
+                                // base64 and no outer JSON.
+                                let _ = relay_out
+                                    .send(Outgoing::Bytes(encode_ws_msg(
+                                        &local_id,
+                                        false,
+                                        text.as_bytes(),
+                                    )))
+                                    .await;
+                            } else {
+                                // Base64 even for text: the tunnel is JSON, and
+                                // the relay decodes every `ws-msg` the same way.
+                                let _ = relay_out
+                                    .send(json!({
+                                        "t": "ws-msg", "id": local_id,
+                                        "data": base64(text.as_bytes()), "binary": false
+                                    }).into())
+                                    .await;
+                            }
                         }
                         Message::Binary(bytes) => {
-                            let _ = relay_out
-                                .send(json!({
-                                    "t": "ws-msg", "id": local_id,
-                                    "data": base64(&bytes), "binary": true
-                                }))
-                                .await;
+                            if binary_frames.load(Ordering::Relaxed) {
+                                let _ = relay_out
+                                    .send(Outgoing::Bytes(encode_ws_msg(
+                                        &local_id,
+                                        true,
+                                        &bytes,
+                                    )))
+                                    .await;
+                            } else {
+                                let _ = relay_out
+                                    .send(json!({
+                                        "t": "ws-msg", "id": local_id,
+                                        "data": base64(&bytes), "binary": true
+                                    }).into())
+                                    .await;
+                            }
                         }
                         Message::Close(_) => break,
                         _ => {}
                     }
                 }
                 let _ = relay_out
-                    .send(json!({ "t": "ws-close", "id": local_id }))
+                    .send(json!({ "t": "ws-close", "id": local_id }).into())
                     .await;
             });
 
@@ -539,10 +654,54 @@ impl RelayClient {
             }
 
             reading.abort();
+            // Either side ending means this stream is over: the relay will
+            // learn it from the `ws-close` the reading task sent, and the map
+            // must not keep a sender nobody reads.
+            streams
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&id);
         });
     }
 
-    fn forward_stream_message(&self, frame: &Value) {
+    /// Route one already-decoded `ws-msg` to its local stream.
+    ///
+    /// The binary framing hands over bytes, not a JSON object; the local
+    /// listener is a Mizar socket that speaks JSON text, so a binary payload is
+    /// dropped rather than invented into text -- the same rule the JSON path
+    /// applies.
+    async fn forward_stream_frame(
+        &self,
+        id: &str,
+        binary: bool,
+        payload: &[u8],
+        out: &mpsc::Sender<Outgoing>,
+    ) {
+        if binary {
+            return;
+        }
+        let Ok(text) = std::str::from_utf8(payload) else {
+            return;
+        };
+        let sender = self.streams().get(id).cloned();
+        let delivered = sender.is_some_and(|sender| {
+            sender
+                .try_send(StreamCommand::Text(text.to_string()))
+                .is_ok()
+        });
+        if delivered {
+            return;
+        }
+        // Unknown, or its 64-slot command queue is full. A dropped frame is a
+        // phone waiting out its full timeout (or an upload discovering a gap
+        // chunks later), so end the stream instead of pretending it arrived.
+        self.streams().remove(id);
+        let _ = out
+            .send(json!({ "t": "ws-close", "id": id }).into())
+            .await;
+    }
+
+    async fn forward_stream_message(&self, frame: &Value, out: &mpsc::Sender<Outgoing>) {
         let Some(id) = frame.get("id").and_then(Value::as_str) else {
             return;
         };
@@ -559,12 +718,7 @@ impl RelayClient {
         let Some(bytes) = unbase64(data) else {
             return;
         };
-        let Ok(text) = String::from_utf8(bytes) else {
-            return;
-        };
-        if let Some(sender) = self.streams().get(id) {
-            let _ = sender.try_send(StreamCommand::Text(text));
-        }
+        self.forward_stream_frame(id, false, &bytes, out).await;
     }
 
     fn close_stream(&self, frame: &Value) {
@@ -583,7 +737,7 @@ struct LocalTarget {
 }
 
 /// Replay one relayed HTTP request onto the local listener and answer it.
-async fn replay_request(target: LocalTarget, frame: Value, out: mpsc::Sender<Value>) {
+async fn replay_request(target: LocalTarget, frame: Value, out: mpsc::Sender<Outgoing>) {
     let id = frame
         .get("id")
         .and_then(Value::as_str)
@@ -637,7 +791,7 @@ async fn replay_request(target: LocalTarget, frame: Value, out: mpsc::Sender<Val
         }),
     };
 
-    let _ = out.send(answer).await;
+    let _ = out.send(answer.into()).await;
 }
 
 /// One HTTP response from the local listener.
@@ -747,20 +901,22 @@ fn dechunk(body: &[u8]) -> Option<Vec<u8>> {
 /// Turn `https://relay` into `wss://relay/tunnel`.
 pub fn tunnel_url(base: &str) -> anyhow::Result<String> {
     let trimmed = base.trim_end_matches('/');
-    let scheme = if trimmed.starts_with("https://") {
-        "wss://"
-    } else if trimmed.starts_with("http://") {
-        "ws://"
-    } else if trimmed.starts_with("wss://") || trimmed.starts_with("ws://") {
-        ""
+    // A `ws`/`wss` base keeps its own scheme. The first version stripped every
+    // scheme and then re-added one only for http/https, so a caller that passed
+    // an already-WebSocket relay URL got a scheme-less `host:port/tunnel` -- a
+    // URL that cannot be dialled. Every current caller passes https, which is
+    // why it went unnoticed; the tests below pin the ws spelling too.
+    let (scheme, rest) = if let Some(rest) = trimmed.strip_prefix("https://") {
+        ("wss://", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("http://") {
+        ("ws://", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("wss://") {
+        ("wss://", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("ws://") {
+        ("ws://", rest)
     } else {
         anyhow::bail!("{base} is not a relay URL");
     };
-    let rest = trimmed
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .trim_start_matches("wss://")
-        .trim_start_matches("ws://");
     Ok(format!("{scheme}{rest}{TUNNEL_PATH}"))
 }
 
@@ -909,6 +1065,16 @@ mod tests {
         assert_eq!(
             tunnel_url("http://127.0.0.1:8080").unwrap(),
             "ws://127.0.0.1:8080/tunnel"
+        );
+        // A base that is already a WebSocket URL keeps its scheme: stripping it
+        // produces a URL with no scheme at all, which cannot be dialled.
+        assert_eq!(
+            tunnel_url("ws://127.0.0.1:8080").unwrap(),
+            "ws://127.0.0.1:8080/tunnel"
+        );
+        assert_eq!(
+            tunnel_url("wss://relay.example.com").unwrap(),
+            "wss://relay.example.com/tunnel"
         );
         assert!(tunnel_url("ftp://nope").is_err());
     }

@@ -17,7 +17,9 @@ use std::time::Duration;
 use agi_core::Core;
 use agi_engine::{Engine, EngineEvent};
 use agi_mizar::{DeviceStore, MizarServer};
-use agi_protocol::domain::{Interaction, Record, RecordKind, Session, SessionKey, Workspace};
+use agi_protocol::domain::{
+    ContextPressure, Interaction, Record, RecordKind, Session, SessionKey, Workspace,
+};
 use agi_protocol::engine::{Capabilities, EngineId};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
@@ -37,6 +39,12 @@ struct Fake {
     id: EngineId,
     workspace: Workspace,
     sessions: Vec<Session>,
+    /// The transcript every session has: three assistant messages, seq 1..3.
+    ///
+    /// Small on purpose. It is enough to prove a delta read returns only what is
+    /// newer than the position the phone named, which is the difference between
+    /// an incremental sync costing one record and costing a whole page.
+    records: Vec<Record>,
     events: broadcast::Sender<EngineEvent>,
 }
 
@@ -54,10 +62,31 @@ impl Fake {
         session.cwd = Some(workspace.path.clone());
         session.title = Some(format!("{id_text} conversation"));
         session.turns = 1;
+        // The two fields `session.list` now carries so the phone does not have
+        // to ask `session.stats` once per row to draw the model and the context
+        // ring. Values are recognisable rather than realistic.
+        session.model = Some(format!("{id_text}-model"));
+        session.context = Some(ContextPressure {
+            window: 128_000,
+            used: 32_000,
+            percent: 25.0,
+        });
+        let records = (1..=3)
+            .map(|seq| Record {
+                seq,
+                time: seq * 1_000,
+                turn: Some(1),
+                step: Some(1),
+                kind: RecordKind::AssistantMessage,
+                text: Some(format!("answer {seq}")),
+                tool: None,
+            })
+            .collect();
         Arc::new(Self {
             id,
             workspace,
             sessions: vec![session],
+            records,
             events,
         })
     }
@@ -123,10 +152,17 @@ impl Engine for Fake {
     async fn records(
         &self,
         _session: &SessionKey,
-        _limit: usize,
-        _before: Option<i64>,
+        limit: usize,
+        before: Option<i64>,
     ) -> Result<Vec<agi_protocol::domain::Record>, agi_engine::EngineError> {
-        Ok(Vec::new())
+        let mut kept: Vec<Record> = self
+            .records
+            .iter()
+            .filter(|record| before.is_none_or(|cut| record.seq < cut))
+            .cloned()
+            .collect();
+        let start = kept.len().saturating_sub(limit);
+        Ok(kept.split_off(start))
     }
 
     async fn prompt(
@@ -276,6 +312,273 @@ async fn host_info_names_the_agents_the_computer_serves() {
     // A phone that did not choose is told so, rather than being handed a filter
     // it never asked for.
     assert_eq!(value["result"]["engine"], Value::Null);
+}
+
+#[tokio::test]
+async fn a_session_row_carries_the_title_model_and_context_ring() {
+    // The phone's history sync used to fetch every row's title, model and
+    // context with one `session.stats` request each -- 342 sessions meant 342
+    // round trips over the relay for three fields the host already had. They
+    // ride on the list now, so this pins all three (and that a field the host
+    // cannot say stays `null` rather than becoming a made-up zero).
+    let (server, store, _core, _fakes, _dir) = start().await;
+    let issued = store.issue("iPhone", None).unwrap();
+    let (mut socket, _) = connect(server.port(), &issued.token, None).await;
+
+    let sessions = call(&mut socket, "session.list", json!({})).await;
+    let items = sessions["result"]["items"].as_array().unwrap();
+    let dsh = items
+        .iter()
+        .find(|row| row["sessionId"] == "dsh:session-1")
+        .expect("DSH's session is listed");
+    assert_eq!(dsh["title"], "dsh conversation");
+    assert_eq!(dsh["model"], "dsh-model");
+    assert_eq!(dsh["context"]["window"], 128_000);
+    // `pressureTokens`, not the domain type's `used`: this is the same spelling
+    // `session.messages` and `session.stats` already put on the wire, and the
+    // phone's `ContextPressure` decodes it.
+    assert_eq!(dsh["context"]["pressureTokens"], 32_000);
+    assert_eq!(dsh["context"]["percent"], 25);
+}
+
+#[tokio::test]
+async fn session_sync_answers_a_batch_and_names_what_it_left_out() {
+    // The phone's history sync asks one frame for a window of sessions. What
+    // has to hold: the row's `updatedAt` plus a numeric `afterSeq` is enough to
+    // answer `unchanged` without a read, a batch that is full names the rest in
+    // `remaining` instead of dropping them, and a page comes back in the same
+    // shape `session.messages` uses (so the phone's merge code is one code path,
+    // not two).
+    let (server, store, _core, _fakes, _dir) = start().await;
+    let issued = store.issue("iPhone", None).unwrap();
+    let (mut socket, _) = connect(server.port(), &issued.token, None).await;
+
+    let sync = call(
+        &mut socket,
+        "session.sync",
+        json!({
+            "maxItems": 1,
+            "items": [
+                {"sessionId": "dsh:session-1", "updatedAt": 1_700_000_000_000_i64, "afterSeq": 10},
+                {"sessionId": "claude:session-1", "updatedAt": 0, "afterSeq": 0},
+                {"sessionId": "codex:session-1", "updatedAt": 0, "afterSeq": 0},
+            ]
+        }),
+    )
+    .await;
+    let items = sync["result"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "the batch was capped at one item: {sync}");
+    assert_eq!(items[0]["sessionId"], "dsh:session-1");
+    assert_eq!(items[0]["unchanged"], true);
+    let remaining: Vec<&str> = sync["result"]["remaining"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(remaining, vec!["claude:session-1", "codex:session-1"]);
+
+    // A second round asks for the two that were left; each comes back as a page.
+    let sync = call(
+        &mut socket,
+        "session.sync",
+        json!({
+            "items": [
+                {"sessionId": "claude:session-1", "updatedAt": 0, "afterSeq": 0},
+                {"sessionId": "codex:session-1", "updatedAt": 0, "afterSeq": 0},
+            ]
+        }),
+    )
+    .await;
+    let items = sync["result"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2, "both pages ride in one frame: {sync}");
+    for item in items {
+        assert!(item["messages"].is_object(), "no page: {item}");
+        assert_eq!(
+            item["messages"]["records"].as_array().map(Vec::len),
+            Some(3),
+            "the fake transcript has three records: {item}"
+        );
+        // `session.sync` deliberately carries no stats: the title and model ride
+        // on `session.list`, and a stats call per session is the plugin work this
+        // method exists to remove.
+        assert!(item.get("stats").is_none(), "a batch must not pay for stats: {item}");
+    }
+    assert_eq!(sync["result"]["remaining"], json!([]));
+}
+
+#[tokio::test]
+async fn session_sync_reports_one_scoped_session_without_losing_the_rest() {
+    // A batch is also a place where scope can be widened by accident: asking for
+    // another agent's session must fail *that item* and leave the others alone.
+    let (server, store, _core, _fakes, _dir) = start().await;
+    let issued = store
+        .issue("iPhone", Some("account:acct-1:phone-1:dsh".to_string()))
+        .unwrap();
+    let (mut socket, _) = connect(server.port(), &issued.token, None).await;
+
+    let sync = call(
+        &mut socket,
+        "session.sync",
+        json!({
+            "items": [
+                {"sessionId": "dsh:session-1", "updatedAt": 0, "afterSeq": 0},
+                {"sessionId": "claude:session-1", "updatedAt": 0, "afterSeq": 0},
+            ]
+        }),
+    )
+    .await;
+    let items = sync["result"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(items[0]["messages"].is_object(), "DSH's page: {sync}");
+    assert_eq!(items[1]["sessionId"], "claude:session-1");
+    assert_eq!(items[1]["error"]["code"], "MALFORMED_FRAME");
+    assert!(items[1].get("messages").is_none());
+}
+
+#[tokio::test]
+async fn a_delta_read_returns_only_what_is_new() {
+    // `afterSeq` is the phone saying what it already holds. Ignoring it made
+    // every incremental sync of a changed session pay for the newest page to
+    // receive the one record that was new -- and, worse, made `hasMore` claim
+    // older history on every such read.
+    let (server, store, _core, _fakes, _dir) = start().await;
+    let issued = store.issue("iPhone", None).unwrap();
+    let (mut socket, _) = connect(server.port(), &issued.token, None).await;
+
+    // The fake session has records 1, 2 and 3.
+    let full = call(
+        &mut socket,
+        "session.messages",
+        json!({ "sessionId": "dsh:session-1", "maxMessages": 200 }),
+    )
+    .await;
+    assert_eq!(full["result"]["records"].as_array().unwrap().len(), 3);
+    assert_eq!(full["result"]["asOfSeq"], 3);
+
+    let delta = call(
+        &mut socket,
+        "session.messages",
+        json!({ "sessionId": "dsh:session-1", "maxMessages": 200, "afterSeq": 2 }),
+    )
+    .await;
+    let records = delta["result"]["records"].as_array().unwrap();
+    assert_eq!(records.len(), 1, "only seq 3 is new: {delta}");
+    assert_eq!(records[0]["event"]["seq"], 3);
+    // The log cut still moves: a delta with something new must not make the
+    // phone's stored `throughSeq` go backwards.
+    assert_eq!(delta["result"]["asOfSeq"], 3);
+    // A delta does not claim older history; the phone's own backfill tracks it.
+    assert_eq!(delta["result"]["hasMore"], false);
+
+    // Nothing new is an empty page, not an error, and the cut survives it.
+    let empty = call(
+        &mut socket,
+        "session.messages",
+        json!({ "sessionId": "dsh:session-1", "maxMessages": 200, "afterSeq": 3 }),
+    )
+    .await;
+    assert_eq!(empty["result"]["records"].as_array().unwrap().len(), 0);
+    assert_eq!(empty["result"]["asOfSeq"], 3);
+
+    // Explicit `null` is "I hold nothing" (a reinstall), not "no claim".
+    let all = call(
+        &mut socket,
+        "session.messages",
+        json!({ "sessionId": "dsh:session-1", "maxMessages": 200, "afterSeq": null }),
+    )
+    .await;
+    assert_eq!(all["result"]["records"].as_array().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn two_phones_with_the_same_name_show_their_models() {
+    // One iPhone and one iPad both named "iPhone" used to be two identical
+    // rows. The hardware is what tells them apart, and it is only worth
+    // showing when the name alone cannot.
+    let (server, store, _core, _fakes, _dir) = start().await;
+    let first = store.issue("iPhone", Some("account:acct:phone-1:dsh".to_string())).unwrap();
+    store.describe(&first.device.id, "iPhone17,1").unwrap();
+    let second = store.issue("iPhone", Some("account:acct:phone-2:dsh".to_string())).unwrap();
+    store.describe(&second.device.id, "iPhone18,1").unwrap();
+
+    let views = agi_core::DeviceStatusSource::device_views(&*server);
+    let names: Vec<&str> = views.iter().map(|view| view.name.as_str()).collect();
+    assert_eq!(names, vec!["iPhone (iPhone17,1)", "iPhone (iPhone18,1)"], "{views:?}");
+}
+
+#[tokio::test]
+async fn a_generic_name_is_corrected_by_the_hardware() {
+    // Before the app reported the idiom, an iPad paired as "iPhone". The name
+    // is what the person reads, so the model has to be able to overrule the
+    // generic name -- but not a name the person chose.
+    let (server, store, _core, _fakes, _dir) = start().await;
+    let ipad = store.issue("iPhone", Some("account:acct:phone-1:dsh".to_string())).unwrap();
+    store.describe(&ipad.device.id, "iPad13,18").unwrap();
+    let named = store.issue("Studio iPad", Some("account:acct:phone-2:dsh".to_string())).unwrap();
+    store.describe(&named.device.id, "iPhone17,1").unwrap();
+
+    let views = agi_core::DeviceStatusSource::device_views(&*server);
+    let names: Vec<&str> = views.iter().map(|view| view.name.as_str()).collect();
+    assert_eq!(names, vec!["iPad", "Studio iPad"], "{views:?}");
+}
+
+#[tokio::test]
+async fn the_same_phone_paired_twice_merges_before_it_reconnects() {
+    // The iPhone was paired locally months ago and through its account later.
+    // The account record only learns the hardware when the phone next says
+    // hello; until then the local record's model is the only thing that knows
+    // this is one phone, and the list must not show it twice.
+    let (server, store, _core, _fakes, _dir) = start().await;
+    store.issue("iPhone", Some("iPhone17,1".to_string())).unwrap();
+    let account = store
+        .issue("iPhone", Some("account:acct:phone-1:dsh".to_string()))
+        .unwrap();
+
+    let views = agi_core::DeviceStatusSource::device_views(&*server);
+    assert_eq!(views.len(), 1, "{views:?}");
+    assert_eq!(views[0].name, "iPhone");
+    assert_eq!(views[0].model.as_deref(), Some("iPhone17,1"));
+    assert_eq!(views[0].id, account.device.id, "the account record stays canonical");
+}
+
+#[tokio::test]
+async fn the_device_list_shows_phones_not_this_computer() {
+    // The tray listed every live record in the roster: the computer's own
+    // account device (named after the Mac), the same iPhone twice (paired
+    // locally once, then through its account), and an iPad stuck as "Phone"
+    // because the relay that minted its token had no name for it. The list
+    // should be one row per phone, named for what the phone says it is.
+    let (server, store, _core, _fakes, _dir) = start().await;
+    let host_name = store.host_name();
+    // Signing in provisions a device for this computer itself.
+    store
+        .issue(&host_name, Some("account:acct:self:dsh".to_string()))
+        .unwrap();
+    // The same iPhone, first paired locally, then through its account.
+    store.issue("iPhone", Some("iPhone17,1".to_string())).unwrap();
+    let linked = store
+        .issue("iPhone", Some("account:acct:phone-1:dsh".to_string()))
+        .unwrap();
+    store.describe(&linked.device.id, "iPhone17,1").unwrap();
+    // The iPad's token came from a relay that did not know its name.
+    let ipad = store
+        .issue("Phone", Some("account:acct:phone-2:dsh".to_string()))
+        .unwrap();
+    store.describe(&ipad.device.id, "iPad13,18").unwrap();
+
+    let views = agi_core::DeviceStatusSource::device_views(&*server);
+    let names: Vec<&str> = views.iter().map(|view| view.name.as_str()).collect();
+    assert_eq!(names, vec!["iPhone", "iPad"], "{views:?}");
+    assert!(
+        views.iter().all(|view| view.name != host_name),
+        "the computer itself is not a phone: {views:?}"
+    );
+    // The merged row kept the account-backed id: a later rotation revokes the
+    // local pairing's token, and the account record is the one that stays live.
+    let iphone = views.iter().find(|view| view.name == "iPhone").unwrap();
+    assert_eq!(iphone.id, linked.device.id);
+    assert_eq!(iphone.model.as_deref(), Some("iPhone17,1"));
 }
 
 #[tokio::test]
@@ -781,4 +1084,202 @@ async fn a_peer_only_sees_its_own_sessions_and_allowed_workspaces() {
         rows[0].get("sessionIds").is_none(),
         "peer must not see other sessions"
     );
+}
+
+/// The whole path, through the real relay.
+///
+/// This is the only test in the crate that starts another process: the relay is
+/// a Node program, and the phone reaches the computer through it exactly the way
+/// the app does -- upgrade, binary/JSON `ws-msg` framing, the local listener,
+/// and back. A stand-in relay would prove the desktop's side of the protocol and
+/// nothing about the relay's, which is where the transfer's real cost lives.
+///
+/// Ignored by default because it needs `cd dsh-relay && npm run build` and a
+/// `node` on PATH; run it with:
+///
+///     cargo test -p agi-mizar --test agent_scope -- --ignored a_phone_reaches
+#[tokio::test]
+#[ignore = "needs the relay built (cd dsh-relay && npm run build) and node on PATH"]
+async fn a_phone_reaches_the_host_through_the_real_relay() {
+    use std::process::Stdio;
+    use tokio::process::Command;
+
+    let (server, store, _core, _fakes, _dir) = start().await;
+    let issued = store.issue("iPhone", None).unwrap();
+
+    // `MIZAR_E2E_RELAY_URL` runs the same test through a deployed relay (the
+    // production one, for a release check); without it, a throwaway relay is
+    // started from `dsh-relay/lib`.
+    let deployed = std::env::var("MIZAR_E2E_RELAY_URL").ok();
+    let mut relay = None;
+    let base = match deployed {
+        Some(url) => url.trim_end_matches('/').to_string(),
+        None => {
+            // A free port for the relay: bind, read, release. The race is
+            // theoretical on a test machine and a fixed port would collide with
+            // a developer's own relay.
+            let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let relay_port = probe.local_addr().unwrap().port();
+            drop(probe);
+
+            let relay_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../dsh-relay");
+            assert!(
+                std::path::Path::new(relay_dir).join("lib/index.js").exists(),
+                "build the relay first: cd dsh-relay && npm run build"
+            );
+            relay = Some(
+                Command::new("node")
+                    .arg("lib/index.js")
+                    .current_dir(relay_dir)
+                    .env("MIZAR_RELAY_HOST", "127.0.0.1")
+                    .env("MIZAR_RELAY_PORT", relay_port.to_string())
+                    .env("MIZAR_RELAY_PROBE_PORT", "0")
+                    .env("MIZAR_RELAY_STUN_PORT", "0")
+                    .env("MIZAR_RELAY_TRUST_PROXY", "0")
+                    .env("MIZAR_RELAY_REQUEST_TIMEOUT", "10000")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .kill_on_drop(true)
+                    .spawn()
+                    .expect("node could not start the relay"),
+            );
+
+            // Wait for the listener. A successful connect is the whole
+            // readiness signal: the relay binds before it serves anything.
+            let mut ready = false;
+            for _ in 0..100 {
+                if tokio::net::TcpStream::connect(("127.0.0.1", relay_port))
+                    .await
+                    .is_ok()
+                {
+                    ready = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert!(ready, "the relay never started listening");
+            format!("http://127.0.0.1:{relay_port}")
+        }
+    };
+
+    // The desktop dials the relay; the relay tells it the room.
+    let client = agi_mizar::RelayClient::new(
+        base,
+        "e2e-tunnel-token-0123456789",
+        server.port(),
+    );
+    tokio::spawn({
+        let client = Arc::clone(&client);
+        async move { client.run().await }
+    });
+    let mut phone_base = None;
+    for _ in 0..100 {
+        if let Some(base) = client.phone_base_url() {
+            phone_base = Some(base);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let phone_base = phone_base.expect("the tunnel never joined a room");
+    let url = format!(
+        "{}/mizar/v1/ws",
+        phone_base
+            .replacen("https://", "wss://", 1)
+            .replacen("http://", "ws://", 1)
+    );
+
+    let (mut phone, _) = connect_to(&url).await;
+    phone
+        .send(Message::Text(
+            json!({ "v": 1, "type": "hello", "id": "h1", "token": issued.token }).to_string(),
+        ))
+        .await
+        .unwrap();
+    let welcome = read_json(&mut phone).await;
+    assert_eq!(welcome["type"], "welcome", "handshake failed: {welcome}");
+
+    // One batched read, through the relay, answered by the real server.
+    phone
+        .send(Message::Text(
+            json!({
+                "v": 1, "type": "session.sync", "id": "s1",
+                "payload": {
+                    "items": [
+                        { "sessionId": "dsh:session-1", "updatedAt": 0, "afterSeq": 0 },
+                        { "sessionId": "claude:session-1", "updatedAt": 0, "afterSeq": 0 }
+                    ]
+                }
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let answer = read_json(&mut phone).await;
+    assert_eq!(answer["type"], "ok", "session.sync failed through the relay: {answer}");
+    assert_eq!(
+        answer["result"]["items"].as_array().map(Vec::len),
+        Some(2),
+        "both pages should ride in one frame: {answer}"
+    );
+    for item in answer["result"]["items"].as_array().unwrap() {
+        assert!(item["messages"].is_object(), "no page for {item}");
+    }
+
+    // A burst of batched reads. Before 0.3.7 the relay priced every bridged
+    // frame as a request -- 300 a minute with a burst of 50 -- and dropped
+    // everything past the burst without telling the phone, so forty syncs (eighty
+    // frames) would have hung. This is the regression that must not come back.
+    for index in 0..40 {
+        phone
+            .send(Message::Text(
+                json!({
+                    "v": 1, "type": "session.sync", "id": format!("burst-{index}"),
+                    "payload": {
+                        "items": [
+                            { "sessionId": "dsh:session-1", "updatedAt": 0, "afterSeq": 0 }
+                        ]
+                    }
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+    }
+    for index in 0..40 {
+        let answer = read_json(&mut phone).await;
+        assert_eq!(
+            answer["type"], "ok",
+            "burst frame {index} was dropped: {answer}"
+        );
+    }
+
+    if let Some(mut relay) = relay {
+        let _ = relay.kill().await;
+    }
+}
+
+/// Connect a phone WebSocket to a URL.
+async fn connect_to(
+    url: &str,
+) -> (
+    tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    tokio_tungstenite::tungstenite::handshake::client::Response,
+) {
+    connect_async(url).await.expect("the phone could not reach the relay")
+}
+
+/// Read one JSON frame from a phone socket, with a deadline.
+async fn read_json(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> Value {
+    let message = tokio::time::timeout(Duration::from_secs(10), socket.next())
+        .await
+        .expect("the relay answered nothing")
+        .expect("the phone socket closed")
+        .unwrap();
+    serde_json::from_str(&message.into_text().unwrap()).unwrap()
 }

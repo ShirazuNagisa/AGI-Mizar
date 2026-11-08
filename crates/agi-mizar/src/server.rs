@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use agi_core::Core;
 use agi_engine::MAX_SLICE_BYTES;
-use agi_protocol::domain::{AttachmentKind, Balance, InteractionKind, SessionKey, Wallet};
+use agi_protocol::domain::{AttachmentKind, Balance, InteractionKind, RecordKind, SessionKey, Wallet};
 use agi_protocol::engine::EngineId;
 use agi_protocol::usage::UsageContext;
 use agi_protocol::SessionState;
@@ -44,8 +44,9 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::frames::{
-    record_to_envelope, ClientFrame, ErrorCode, Hello, ServerFrame, SessionRow, WelcomeInput,
-    HTTP_PREFIX, PROTOCOL_VERSION, WS_PATH,
+    envelope_seq, record_to_envelope, trim_page_bytes, ClientFrame, ErrorCode, Hello, ServerFrame,
+    SessionRow, SessionRowContext, WelcomeInput, HTTP_PREFIX, PAGE_BYTES_MAX, PROTOCOL_VERSION,
+    WS_PATH,
 };
 use crate::pairing::{self, PairingCode};
 use crate::relay::RelayClient;
@@ -164,16 +165,108 @@ impl agi_core::DeviceStatusSource for MizarServer {
             .live
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.store
+        let host_name = self.store.host_name();
+        let mut rows: Vec<(String, Option<String>, bool, agi_protocol::api::DeviceView)> =
+            Vec::new();
+        for device in self
+            .store
             .devices()
             .into_iter()
             .filter(|device| device.is_live())
-            .map(|device| agi_protocol::api::DeviceView {
-                online: live.get(&device.id).copied().unwrap_or(0) > 0,
-                last_seen_ms: device.last_seen_at,
-                id: device.id,
-                name: device.name,
-                model: device.model,
+        {
+            // Signing in to an account also provisions a device for this
+            // computer itself -- the same roster file, a name that is the host
+            // name. It is the machine the tray belongs to, not a phone, and
+            // showing it there is how a Mac ended up beside two iPhones.
+            if device.name == host_name {
+                continue;
+            }
+            // `model` is the provisioning marker for account devices; the
+            // hardware the phone reported in its hello is what a person can
+            // read. Older records and phones that never reconnected fall back
+            // to the local pairing's hardware model.
+            let hardware = device.hardware.clone().or_else(|| {
+                device
+                    .model
+                    .clone()
+                    .filter(|model| !model.starts_with("account:") && !model.starts_with("peer:"))
+            });
+            // A record minted through a relay that had no name is called
+            // "Phone", and before the app learned to ask, an iPad paired as
+            // "iPhone" too. The hardware is the only thing that can say what it
+            // actually is; keep a name the person chose.
+            let generic = matches!(device.name.trim(), "" | "Phone" | "iPhone" | "iPad");
+            let label = if generic {
+                match hardware.as_deref() {
+                    Some(model) if model.starts_with("iPad") => "iPad".to_string(),
+                    Some(model) if model.starts_with("iPhone") => "iPhone".to_string(),
+                    Some(model) if model.starts_with("Mac") => "Mac".to_string(),
+                    _ => device.name.clone(),
+                }
+            } else {
+                device.name.clone()
+            };
+            let online = live.get(&device.id).copied().unwrap_or(0) > 0;
+            let account_backed = device
+                .model
+                .as_deref()
+                .is_some_and(|model| model.starts_with("account:"));
+            match rows.iter_mut().find(|(name, known, _, _)| {
+                // Same name and the same hardware, or one side that has not
+                // reported hardware yet: the local pairing carries the model
+                // the account record only learns when the phone reconnects, and
+                // waiting for that reconnect left the same phone twice in the
+                // list. Contradicting models (two different iPhones) stay apart.
+                *name == label
+                    && match (known.as_ref(), hardware.as_ref()) {
+                        (Some(known), Some(hardware)) => known == hardware,
+                        _ => true,
+                    }
+            }) {
+                Some((_, known, existing_account, existing)) => {
+                    // The same phone paired locally and through its account is
+                    // one row. Prefer the account record's id: that is the one
+                    // that still authenticates after a token rotation.
+                    existing.online |= online;
+                    existing.last_seen_ms = existing.last_seen_ms.max(device.last_seen_at);
+                    if known.is_none() {
+                        *known = hardware.clone();
+                        existing.model = hardware;
+                    }
+                    if account_backed && !*existing_account {
+                        existing.id = device.id;
+                        *existing_account = true;
+                    }
+                }
+                None => rows.push((
+                    label.clone(),
+                    hardware.clone(),
+                    account_backed,
+                    agi_protocol::api::DeviceView {
+                        online,
+                        last_seen_ms: device.last_seen_at,
+                        id: device.id,
+                        name: label,
+                        model: hardware,
+                    },
+                )),
+            }
+        }
+        // Two devices can honestly share a name -- two iPhones are the obvious
+        // case. Show the hardware only then, so one iPhone does not become
+        // "iPhone (iPhone17,1)" for no reason.
+        let mut names: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for (name, _, _, _) in &rows {
+            *names.entry(name.clone()).or_default() += 1;
+        }
+        rows.into_iter()
+            .map(|(label, hardware, _, mut view)| {
+                if names.get(&label).copied().unwrap_or(0) > 1 {
+                    if let Some(hardware) = hardware {
+                        view.name = format!("{label} ({hardware})");
+                    }
+                }
+                view
             })
             .collect()
     }
@@ -686,8 +779,27 @@ impl MizarServer {
                 loop {
                     tokio::select! {
                         _ = reconcile.tick() => {
-                            if retry && server.publish_current_card().await {
-                                retry = false;
+                            // A safety net for an approval event the broadcast
+                            // missed: the snapshot is the authority, and a
+                            // change there is worth one push. Rows are not
+                            // compared here because `running_since` moves with
+                            // every session update; a row change has its own
+                            // event.
+                            if let Some(card) = server.current_card() {
+                                let known = tracker.card().approvals;
+                                // Compare as a set: the snapshot's interaction
+                                // order and the tracker's request-id order are
+                                // not the same, and two approvals must not look
+                                // like a change on every tick.
+                                let changed = card.approvals.len() != known.len()
+                                    || card
+                                        .approvals
+                                        .iter()
+                                        .any(|approval| !known.contains(approval));
+                                if retry || changed {
+                                    tracker.reconcile(&card);
+                                    retry = !server.publish_card(&card).await;
+                                }
                             }
                         }
                         event = events.recv() => match event {
@@ -718,6 +830,22 @@ impl MizarServer {
                             }
                             Ok(agi_protocol::api::ApiEvent::InteractionResolved { id }) => {
                                 if let Some(card) = tracker.approval_resolved(&id) {
+                                    // An empty card means the approval was the
+                                    // only thing on it; `publish_turn_end` owns
+                                    // ending an activity with no rows, and this
+                                    // loop has no session to name in that end
+                                    // push.
+                                    if !card.is_empty() {
+                                        retry = !server.publish_card(&card).await;
+                                    }
+                                } else if let Some(card) = server.current_card() {
+                                    // The tracker started after this approval was
+                                    // already pending, so it never saw the
+                                    // request and has no card to send. Re-read
+                                    // the snapshot: the approval is gone from it,
+                                    // and reconciling stops the same gap on the
+                                    // next resolve.
+                                    tracker.reconcile(&card);
                                     retry = !server.publish_card(&card).await;
                                 }
                             }
@@ -927,6 +1055,21 @@ impl MizarServer {
                         origin: session.origin.clone(),
                         engine: session.key.engine.as_str().to_string(),
                         source: session.source.clone(),
+                        // The three fields the phone used to fetch one
+                        // `session.stats` call per row for. They are already in
+                        // this snapshot, so carrying them here turns a
+                        // round-trip-per-session into bytes on a frame the
+                        // phone was reading anyway.
+                        title: session.title.clone(),
+                        model: session.model.clone(),
+                        // The wire shape, not the domain struct: the phone
+                        // decodes `pressureTokens`, the domain type calls the
+                        // same number `used`.
+                        context: session.context.map(|pressure| SessionRowContext {
+                            window: pressure.window,
+                            pressure_tokens: pressure.used,
+                            percent: pressure.percent.round().clamp(0.0, 100.0) as u64,
+                        }),
                     })
                     .collect();
                 ServerFrame::ok(id, json!({ "items": items }))
@@ -955,6 +1098,24 @@ impl MizarServer {
                         format!("no engine for {}", key.engine),
                     );
                 };
+                // What the phone already holds. `null` is an explicit "nothing"
+                // (a reinstall), and an absent key is "no claim" -- the host's
+                // own memory, which this host has none of, so it answers with
+                // the newest page. A numeric position filters the page: without
+                // it every incremental sync of a changed session paid for the
+                // newest two hundred raw records to receive the three that were
+                // new.
+                let after = frame.payload.get("afterSeq");
+                let after_seq: Option<i64> = match after {
+                    None => None,
+                    Some(Value::Null) => Some(-1),
+                    Some(value) => value
+                        .as_i64()
+                        .or_else(|| value.as_f64().map(|number| number as i64)),
+                };
+                // A numeric position is a delta: the phone is asking for what is
+                // new, and `hasMore` describes older history it already tracks.
+                let delta = after_seq.is_some_and(|position| position >= 0);
                 let context = self
                     .core
                     .snapshot()
@@ -976,14 +1137,22 @@ impl MizarServer {
                     .unwrap_or(Value::Null);
 
                 match engine.records(&key, limit, before).await {
-                    Ok(records) => {
+                    Ok(mut records) => {
+                        // The log cut is the newest record the engine returned,
+                        // taken before the delta filter: a delta with nothing
+                        // new must still report where the log stands, or the
+                        // phone's stored `throughSeq` would go backwards.
                         let as_of = records.last().map(|record| record.seq).unwrap_or(0);
+                        let page_was_full = records.len() >= limit;
+                        if let Some(position) = after_seq {
+                            records.retain(|record| record.seq > position);
+                        }
                         // The oldest *raw* position, not the oldest record the
                         // phone can draw. DSH's page may be mostly tool calls,
                         // which are deliberately not on the phone wire; without
                         // this cursor the client cannot ask for the next page
                         // after one that projects to nothing.
-                        let oldest_raw = records.first().map(|record| record.seq);
+                        let mut oldest_raw = records.first().map(|record| record.seq);
                         // `records[]` is a list of *envelopes*, not of bare
                         // events: `{"type":"event","event":{…}}`, the shape the
                         // golden fixture pins. The
@@ -996,8 +1165,32 @@ impl MizarServer {
                         // always empty. An engine that cannot say answers with an
                         // empty map, so the footer falls back to its own words
                         // rather than to a number nobody counted.
-                        if let Ok(totals) = engine.turn_usage(&key).await {
-                            attach_turn_usage(&mut records_out, &totals);
+                        //
+                        // Only when this page actually carries a finished turn:
+                        // `turn_usage` is a second page read through the engine
+                        // (a `session/follow` open plus one fetch), and paying it
+                        // for a page of prompts mid-turn was the single largest
+                        // host cost of a history sync -- 342 sessions meant 342
+                        // extra engine reads whose answers had nowhere to hang.
+                        if records.iter().any(|record| record.kind == RecordKind::TurnEnd) {
+                            if let Ok(totals) = engine.turn_usage(&key).await {
+                                attach_turn_usage(&mut records_out, &totals);
+                            }
+                        }
+                        // One frame has to carry the page: the relay drops an
+                        // oversized frame without telling anyone and iOS closes
+                        // the socket above a mebibyte, so a page that would not
+                        // fit is cut at its oldest end here and `hasMore` sends
+                        // the phone back for the rest.
+                        let (records_out, trimmed) =
+                            trim_page_bytes(records_out, PAGE_BYTES_MAX);
+                        if trimmed > 0 {
+                            // The cursor now names the first record that
+                            // actually shipped, not the one that was cut.
+                            oldest_raw = records_out.first().and_then(envelope_seq).or(oldest_raw);
+                            tracing::debug!(
+                                "mizar: trimmed {trimmed} record(s) from a {key} page to fit one frame"
+                            );
                         }
                         ServerFrame::ok(
                             id,
@@ -1006,7 +1199,12 @@ impl MizarServer {
                                 "asOfSeq": as_of,
                                 "oldestRawSeq": oldest_raw,
                                 "records": records_out,
-                                "hasMore": records.len() >= limit,
+                                // A delta page is not the head of history:
+                                // whether older records exist is a fact the
+                                // phone's own backfill already tracks, and
+                                // overwriting it here made every incremental
+                                // sync claim there was more to fetch.
+                                "hasMore": !delta && (page_was_full || trimmed > 0),
                                 // The phone merges this into its cached usage frame;
                                 // `null` means "this host cannot say", not zero.
                                 "context": context,
@@ -2307,6 +2505,147 @@ impl MizarServer {
                 ServerFrame::ok(id, json!({ "accepted": true }))
             }
 
+            // A batch of conversation reads in one round trip.
+            //
+            // The history sync used to spend one request per session, then two
+            // (messages + stats) per session; on a phone over the relay that is
+            // the whole cost of the button, because each request is a public
+            // round trip through two hops. This answers up to `maxItems` of them
+            // from one frame, stops before the answer would be too large to
+            // carry, and names the rest in `remaining` rather than dropping them.
+            //
+            // It does **not** include `session.stats`. The title and model now
+            // ride on `session.list` rows, and a stats call per session is
+            // exactly the plugin work this method exists to remove.
+            //
+            // Each item is re-dispatched through the same match the single-call
+            // methods use, so scope, peer ownership, the delivery ledger and the
+            // envelope shape cannot drift between the two paths.
+            "session.sync" => {
+                // Room under the relay's 900 KiB frame cap for the envelope and
+                // the host's own fields. The phone asks for less when it knows
+                // better; this is the default for a client that does not.
+                let max_bytes = frame
+                    .payload
+                    .get("maxBytes")
+                    .and_then(Value::as_u64)
+                    .map(|value| value.clamp(16 * 1024, 800 * 1024) as usize)
+                    .unwrap_or(600 * 1024);
+                let max_items = frame
+                    .payload
+                    .get("maxItems")
+                    .and_then(Value::as_u64)
+                    .map(|value| value.clamp(1, 64) as usize)
+                    .unwrap_or(32);
+                let items = frame
+                    .payload
+                    .get("items")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+
+                // One snapshot for the whole batch, not one per item: the row's
+                // `updatedAt` is the only thing the skip decision needs, and a
+                // phone that sends thirty items must not make the host clone the
+                // session list thirty times.
+                let updated: std::collections::HashMap<String, i64> = self
+                    .core
+                    .snapshot()
+                    .sessions
+                    .into_iter()
+                    .map(|session| (session.key.to_string(), session.updated_at))
+                    .collect();
+
+                let mut answered: Vec<Value> = Vec::new();
+                let mut remaining: Vec<Value> = Vec::new();
+                let mut used = 0usize;
+                for (index, item) in items.iter().enumerate() {
+                    let Some(session_id) = item.get("sessionId").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    if answered.len() >= max_items {
+                        remaining.extend(items[index..].iter().filter_map(|rest| {
+                            rest.get("sessionId").and_then(Value::as_str).map(|id| json!(id))
+                        }));
+                        break;
+                    }
+
+                    // A numeric `afterSeq` is the phone saying what it already
+                    // holds, and it is the only thing that makes the row's
+                    // timestamp meaningful: with no cursor the phone may have
+                    // been reinstalled and hold nothing it can vouch for.
+                    let has_watermark = item
+                        .get("afterSeq")
+                        .is_some_and(|value| value.is_number());
+                    let client_updated = item
+                        .get("updatedAt")
+                        .and_then(Value::as_f64)
+                        .map(|value| value as i64);
+                    if has_watermark
+                        && client_updated.is_some_and(|seen| {
+                            updated.get(session_id).is_some_and(|row| *row <= seen)
+                        })
+                    {
+                        answered.push(json!({ "sessionId": session_id, "unchanged": true }));
+                        continue;
+                    }
+
+                    let mut messages_payload = json!({ "sessionId": session_id });
+                    for key in ["afterSeq", "beforeSeq", "maxMessages", "parentSessionId"] {
+                        if let Some(value) = item.get(key) {
+                            messages_payload[key] = value.clone();
+                        }
+                    }
+                    let messages_frame = ClientFrame::method(
+                        format!("{id}#{index}"),
+                        "session.messages",
+                        messages_payload,
+                    );
+                    // Boxed because `call` is the function this arm lives in:
+                    // the recursion is one level deep and never re-enters
+                    // `session.sync`, so the indirection is the whole cost.
+                    let messages = Box::pin(self.call(device, scope, &messages_frame)).await;
+
+                    let messages = match messages {
+                        ServerFrame::Ok { result, .. } => result,
+                        ServerFrame::Error { code, message, .. } => {
+                            // One session that cannot be read must not discard
+                            // the pages that could, and the phone needs to know
+                            // *which* one failed so it can retry that one on the
+                            // path that knows how to reconnect.
+                            answered.push(json!({
+                                "sessionId": session_id,
+                                "error": { "code": code, "message": message },
+                            }));
+                            continue;
+                        }
+                        _ => continue,
+                    };
+
+                    let entry = json!({ "sessionId": session_id, "messages": messages });
+                    let size = entry.to_string().len();
+                    // The first item always goes, even over budget: a single
+                    // conversation larger than the whole batch would otherwise
+                    // be named in `remaining` for ever.
+                    if !answered.is_empty() && used + size > max_bytes {
+                        remaining.extend(items[index..].iter().filter_map(|rest| {
+                            rest.get("sessionId").and_then(Value::as_str).map(|id| json!(id))
+                        }));
+                        break;
+                    }
+                    used += size;
+                    answered.push(entry);
+                }
+
+                ServerFrame::ok(
+                    id,
+                    json!({
+                        "items": answered,
+                        "remaining": remaining,
+                    }),
+                )
+            }
+
             // Everything else is a method this build has not grown yet. Saying so
             // is what lets the phone tell "older host" from "broken host".
             other => ServerFrame::error(
@@ -2404,12 +2743,18 @@ impl MizarServer {
         }
     }
 
-    /// Publish the card for whatever is running right now.
+    /// The card the computer would draw right now, from the latest snapshot.
     ///
     /// This is the resynchronisation path for a phone that registered its push
     /// address after a session had already started: the original start push
-    /// happened before the relay could address this install.
-    async fn publish_current_card(&self) -> bool {
+    /// happened before the relay could address this install. It is also how the
+    /// event loop learns about rows and approvals that were already pending when
+    /// the loop started -- see `Tracker::reconcile`.
+    ///
+    /// Approvals are read even when no turn is running: an approval-only card is
+    /// a valid card, and the old early return on `rows.is_empty()` meant a
+    /// reconciliation could never publish (or remove) one.
+    fn current_card(&self) -> Option<crate::activity::Card> {
         let snapshot = self.core.snapshot();
         let mut rows: Vec<crate::activity::Row> = snapshot
             .sessions
@@ -2423,9 +2768,6 @@ impl MizarServer {
             .collect();
         rows.sort_by_key(|row| row.running_since);
         rows.truncate(crate::activity::MAX_ROWS);
-        if rows.is_empty() {
-            return false;
-        }
         let approvals = snapshot
             .interactions
             .iter()
@@ -2443,8 +2785,22 @@ impl MizarServer {
                 detail: interaction.detail.clone().unwrap_or_default(),
             })
             .collect();
-        self.publish_card(&crate::activity::Card { rows, approvals })
-            .await
+        let card = crate::activity::Card { rows, approvals };
+        (!card.is_empty()).then_some(card)
+    }
+
+    /// Publish the card for whatever is running right now.
+    ///
+    /// The resynchronisation path for a phone that registered its push address
+    /// after a session had already started, and for the activity loop's first
+    /// tick. The snapshot is read once; an empty card is `false`, because ending
+    /// an activity is `publish_turn_end`'s job rather than an update with
+    /// nothing in it.
+    async fn publish_current_card(&self) -> bool {
+        match self.current_card() {
+            Some(card) => self.publish_card(&card).await,
+            None => false,
+        }
     }
 
     /// Publish what the island should say.
@@ -3224,9 +3580,15 @@ async fn serve_peer(server: Arc<MizarServer>, peer: String, connection: Peer) {
     } = connection;
 
     // The handshake is the only frame allowed to be unauthenticated.
-    let Some(first) = inbound.recv().await else {
-        tracing::warn!("mizar: {peer} connected and sent no hello");
-        return;
+    // Bounded: a LAN client (this path has no relay deadline) that opens a
+    // socket and says nothing would otherwise hold a connection -- and the
+    // pairing rate limiter behind it -- for as long as it likes.
+    let first = match tokio::time::timeout(Duration::from_secs(20), inbound.recv()).await {
+        Ok(Some(first)) => first,
+        Ok(None) | Err(_) => {
+            tracing::warn!("mizar: {peer} connected and sent no hello");
+            return;
+        }
     };
     let Some(frame) = ClientFrame::parse(&first) else {
         tracing::warn!("mizar: {peer} opened a connection with a frame that is not JSON");
@@ -3283,6 +3645,15 @@ async fn serve_peer(server: Arc<MizarServer>, peer: String, connection: Peer) {
         device.name,
         hello.app_version.as_deref().unwrap_or("unknown version")
     );
+    // Remember the hardware for the roster. The provisioning marker in `model`
+    // cannot be overwritten, and without this the list had no way to tell an
+    // iPhone from an iPad -- or to name a "Phone" record minted by a relay that
+    // did not know the name.
+    if let Some(hardware) = hello.device_model.as_deref() {
+        if let Err(error) = server.store.describe(&device.id, hardware) {
+            tracing::warn!("mizar: could not record the device model: {error}");
+        }
+    }
 
     // A different account is a different operator. Refused before the welcome,
     // so nothing about this computer's sessions reaches the phone.
@@ -3333,8 +3704,18 @@ async fn serve_peer(server: Arc<MizarServer>, peer: String, connection: Peer) {
                             continue;
                         }
                         let id = session.to_string();
+                        // The prefix is one byte, so an id longer than 255 would
+                        // make the phone read part of the id as the frame header.
+                        // No engine produces one today; skipping with a warning
+                        // beats sending a frame that cannot be parsed.
+                        if id.len() > 255 {
+                            tracing::warn!(
+                                "state frame for a session id longer than 255 bytes was not sent"
+                            );
+                            continue;
+                        }
                         let mut payload = Vec::with_capacity(1 + id.len() + bytes.len());
-                        payload.push(id.len().min(255) as u8);
+                        payload.push(id.len() as u8);
                         payload.extend_from_slice(id.as_bytes());
                         payload.extend_from_slice(&bytes);
                         if out.send(payload).await.is_err() {

@@ -4,6 +4,7 @@
 //! conversation: the relay says `welcome` with a room, forwards a phone request,
 //! and gets an answer replayed from the local listener. Both sockets are real.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -229,6 +230,114 @@ async fn replays_requests_and_answers_pings() {
     });
 
     tokio::time::timeout(Duration::from_secs(10), done)
+        .await
+        .expect("the relay conversation never finished")
+        .expect("the relay task panicked");
+}
+
+/// A relay that negotiated the binary framing, and the desktop that must honour
+/// it in both directions.
+///
+/// The JSON + base64 spelling costs a third more bytes and two extra passes over
+/// every history page; the framing is therefore worth having. What must hold is
+/// that it is *negotiated*: a relay that never says `wsMsgBinary` (every relay
+/// before 0.3.7, and the test above) keeps receiving JSON, and a desktop that
+/// never advertises the header is never sent binary.
+#[tokio::test]
+async fn binary_ws_msg_frames_when_the_relay_advertises_them() {
+    use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+
+    let local_port = local_listener().await;
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (done_tx, done_rx) = oneshot::channel();
+
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let advertised = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&advertised);
+        let callback = move |request: &Request, response: Response| {
+            seen.store(
+                request
+                    .headers()
+                    .get("x-mizar-tunnel-frames")
+                    .is_some_and(|value| value == "binary"),
+                Ordering::Relaxed,
+            );
+            Ok(response)
+        };
+        let mut socket = tokio_tungstenite::accept_hdr_async(stream, callback)
+            .await
+            .unwrap();
+        assert!(
+            advertised.load(Ordering::Relaxed),
+            "the desktop did not advertise the binary framing on its upgrade"
+        );
+
+        socket
+            .send(Message::Text(
+                json!({
+                    "t": "welcome", "room": "room-1", "protocolVersion": 1,
+                    "wsMsgBinary": true
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+
+        socket
+            .send(Message::Text(
+                json!({
+                    "t": "ws-open", "id": "w1",
+                    "path": "/mizar/v1/ws", "headers": {}
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        let opened = read_frame(&mut socket).await;
+        assert_eq!(opened["t"], "ws-open-ok");
+
+        // Relay -> desktop is framed.
+        socket
+            .send(Message::Binary(agi_mizar::relay::encode_ws_msg(
+                "w1",
+                false,
+                b"{\"v\":1,\"type\":\"hello\"}",
+            )))
+            .await
+            .unwrap();
+
+        // Desktop -> relay must be framed too: the local listener echoes the
+        // text, and the answer is a binary `ws-msg`, not JSON + base64.
+        let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .expect("the tunnel sent nothing")
+            .expect("the tunnel closed")
+            .unwrap();
+        match message {
+            Message::Binary(bytes) => {
+                let (id, binary, payload) =
+                    agi_mizar::relay::decode_ws_msg(&bytes).expect("a framed ws-msg");
+                assert_eq!(id, "w1");
+                assert!(!binary, "a text frame must keep its kind");
+                assert_eq!(
+                    std::str::from_utf8(payload).unwrap(),
+                    "{\"v\":1,\"type\":\"hello\"}"
+                );
+            }
+            other => panic!("expected a binary ws-msg, got {other:?}"),
+        }
+
+        let _ = done_tx.send(());
+    });
+
+    let client = RelayClient::new(format!("ws://127.0.0.1:{port}"), "tunnel-secret", local_port);
+    tokio::spawn({
+        let client = Arc::clone(&client);
+        async move { client.run().await }
+    });
+    tokio::time::timeout(Duration::from_secs(10), done_rx)
         .await
         .expect("the relay conversation never finished")
         .expect("the relay task panicked");

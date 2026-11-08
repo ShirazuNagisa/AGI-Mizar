@@ -58,6 +58,31 @@ pub struct JournalEntry {
     pub final_: bool,
 }
 
+/// The largest text one state frame can carry, in bytes.
+///
+/// A u16 length on the wire (`state_frame.rs`), so this is also what every
+/// decoder accepts; a frame over it is dropped as a length mismatch.
+const MAX_FRAME_TEXT: usize = u16::MAX as usize;
+
+/// Split text into pieces a state frame can carry, at UTF-8 boundaries.
+fn text_pieces(text: &str) -> impl Iterator<Item = &str> {
+    let mut rest = text;
+    std::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+        let mut take = rest.len().min(MAX_FRAME_TEXT);
+        while take > 0 && !rest.is_char_boundary(take) {
+            take -= 1;
+        }
+        // `take` cannot be zero: MAX_FRAME_TEXT is far larger than one
+        // character, and byte 0 of a str is always a boundary.
+        let (piece, tail) = rest.split_at(take.max(1));
+        rest = tail;
+        Some(piece)
+    })
+}
+
 /// One session's state channel.
 #[derive(Debug)]
 pub struct StateMachine {
@@ -215,20 +240,29 @@ impl StateMachine {
                 out.push(frame);
             }
         }
-        let frame = StateFrame::append(
-            SessionState::StreamNarration,
-            self.interval,
-            self.text_seq,
-            chunk,
-        );
-        self.text_seq += chunk.len() as u32;
-        self.text.push_str(chunk);
-        if let Some(entry) = self.journal.last_mut() {
-            entry.text.push_str(chunk);
-            self.journal_bytes += chunk.len();
+        // A frame's text length is a u16 on the wire, and the engines deliver a
+        // whole assistant message at a time: one answer holding a large file is
+        // more than 65535 bytes, which used to encode a truncated frame every
+        // decoder rejects. The phone then dropped that append *and every later
+        // one for the interval* (its `textSeq` continuity check), so the live
+        // answer was missing a stretch. `text_seq` is exactly the field for
+        // splitting one message into several appends.
+        for piece in text_pieces(chunk) {
+            let frame = StateFrame::append(
+                SessionState::StreamNarration,
+                self.interval,
+                self.text_seq,
+                piece,
+            );
+            self.text_seq += piece.len() as u32;
+            self.text.push_str(piece);
+            if let Some(entry) = self.journal.last_mut() {
+                entry.text.push_str(piece);
+                self.journal_bytes += piece.len();
+            }
+            out.push(frame);
         }
         self.trim();
-        out.push(frame);
         out
     }
 
@@ -268,16 +302,32 @@ impl StateMachine {
                     self.trim();
                     self.text = text.clone();
                     self.text_seq = text.len() as u32;
-                    out.push(StateFrame::snapshot(
-                        SessionState::StreamFinal,
-                        self.interval,
-                        0,
-                        &text,
-                    ));
+                    // The snapshot carries the whole answer and is subject to
+                    // the same u16 limit as an append: the first piece is the
+                    // snapshot, the rest are appends at increasing offsets.
+                    let mut offset = 0u32;
+                    for (index, piece) in text_pieces(&text).enumerate() {
+                        if index == 0 {
+                            out.push(StateFrame::snapshot(
+                                SessionState::StreamFinal,
+                                self.interval,
+                                0,
+                                piece,
+                            ));
+                        } else {
+                            out.push(StateFrame::append(
+                                SessionState::StreamFinal,
+                                self.interval,
+                                offset,
+                                piece,
+                            ));
+                        }
+                        offset += piece.len() as u32;
+                    }
                     out.push(StateFrame::finish(
                         SessionState::StreamFinal,
                         self.interval,
-                        text.len() as u32,
+                        offset,
                     ));
                 }
             }
@@ -363,6 +413,58 @@ mod tests {
         assert_eq!(more.len(), 1, "no new interval for the same stream");
         assert_eq!(more[0].text_seq, "先说结论".len() as u32);
         assert_eq!(m.text(), "先说结论：改好了。");
+    }
+
+    #[test]
+    fn a_long_message_is_split_into_frames_every_decoder_accepts() {
+        // The wire's text length is a u16, and the engines deliver a whole
+        // assistant message at a time. A 90 KB answer used to encode a
+        // truncated frame that every decoder rejected -- and the phone then
+        // dropped every later append for the interval, so the live answer was
+        // missing a stretch. `text_seq` is the field that makes splitting safe.
+        let mut m = StateMachine::new();
+        let long = "答".repeat(30_000); // 90_000 bytes, 3 per character
+        let frames = m.on_text(&long);
+        // The first frame opens the interval and carries no text; the rest are
+        // the pieces.
+        let pieces: Vec<&StateFrame> = frames.iter().filter(|frame| !frame.text.is_empty()).collect();
+        assert_eq!(pieces.len(), 2, "one frame cannot carry 90 KB");
+        let mut offset = 0u32;
+        for frame in &pieces {
+            let decoded = StateFrame::decode(&frame.encode()).expect("every piece must decode");
+            assert!(decoded.text.len() <= u16::MAX as usize);
+            assert_eq!(decoded.text_seq, offset);
+            offset += decoded.text.len() as u32;
+        }
+        assert_eq!(offset as usize, long.len());
+        assert_eq!(m.text(), long, "the interval still holds the whole answer");
+        // A split must land on a character boundary: the pieces are valid &str
+        // by construction, and joining them is the original text.
+        assert_eq!(
+            pieces.iter().map(|frame| frame.text.as_str()).collect::<String>(),
+            long
+        );
+    }
+
+    #[test]
+    fn a_long_final_answer_is_reannounced_in_decodable_pieces() {
+        // The end-of-turn snapshot carries the whole answer too, and is subject
+        // to the same u16 limit.
+        let mut m = StateMachine::new();
+        let long = "x".repeat(70_000);
+        m.on_text(&long);
+        let frames = m.on_turn_end(&facts("completed", &long), Some(State::Done));
+        let mut reannounced = String::new();
+        for frame in &frames {
+            let decoded = StateFrame::decode(&frame.encode()).expect("every piece must decode");
+            if decoded.state == SessionState::StreamFinal
+                && decoded.flags.has(Flags::APPEND)
+                && !decoded.flags.has(Flags::FINAL)
+            {
+                reannounced.push_str(&decoded.text);
+            }
+        }
+        assert_eq!(reannounced, long);
     }
 
     #[test]

@@ -287,6 +287,31 @@ impl ClientFrame {
     }
 }
 
+impl ClientFrame {
+    /// Build one method frame, for a method that fans out into others.
+    ///
+    /// `session.sync` answers a batch by re-dispatching each item through the
+    /// same match the single-call methods use; this is the frame that lets it do
+    /// that without duplicating -- and then drifting from -- their logic. The
+    /// root object is unused by every method except `hello`, which the caller
+    /// here never builds.
+    ///
+    /// - Parameters:
+    ///   - id: the correlation id the answer would carry (the caller discards
+    ///     it; this is not a frame that goes to a phone).
+    ///   - kind: the method name.
+    ///   - payload: its arguments.
+    /// - Returns: the frame.
+    pub fn method(id: impl Into<String>, kind: &str, payload: Value) -> Self {
+        Self {
+            id: Some(id.into()),
+            kind: kind.to_string(),
+            payload,
+            root: Value::Null,
+        }
+    }
+}
+
 /// What a `hello` frame carries.
 #[derive(Debug, Clone)]
 pub struct Hello {
@@ -425,6 +450,95 @@ pub struct SessionRow {
     /// `claude_desktop` / `codex_desktop` for GUI transcripts, `null` for CLI.
     /// Additive: an old client ignores it.
     pub source: Option<String>,
+    /// The row's title, when the host knows one.
+    ///
+    /// Additive, and it is what removes a request per session from the phone's
+    /// history sync: the sidebar used to learn every title from a separate
+    /// `session.stats` call, so naming 342 rows was 342 round trips over the
+    /// relay. The host already holds the title in the same snapshot this row
+    /// comes from, so carrying it here costs bytes instead of round trips.
+    pub title: Option<String>,
+    /// The model the session is using, when the engine has said.
+    ///
+    /// Same reason as `title`, and it is what the phone draws above the
+    /// composer. Additive.
+    pub model: Option<String>,
+    /// How full the model's context window is, when the engine can tell.
+    ///
+    /// `null` is "this host cannot say", not zero. Additive, and it is the
+    /// third field that used to cost one `session.stats` request per row.
+    pub context: Option<SessionRowContext>,
+}
+
+/// The context reading on a `session.list` row, in the shape the phones decode.
+///
+/// Deliberately not `agi_protocol::domain::ContextPressure`: that struct's
+/// token field serialises as `used` for the desktop window, while the phone's
+/// `ContextPressure` decodes `pressureTokens` (the same spelling
+/// `session.messages` and `session.stats` already put on the wire). Reusing the
+/// domain type here would have produced a context object with a window and a
+/// percentage but no token count -- a ring that draws but cannot say how full
+/// it is.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct SessionRowContext {
+    /// The model's window, in tokens.
+    pub window: u64,
+    /// Tokens currently occupied, as the engine measures them.
+    #[serde(rename = "pressureTokens")]
+    pub pressure_tokens: u64,
+    /// Occupancy, rounded and clamped -- an integer, as the app decodes it.
+    pub percent: u64,
+}
+
+/// The largest `records[]` page this host puts in one frame, in serialized bytes.
+///
+/// The relay refuses to forward a frame over `maxMessageBytes` (900 KiB by
+/// default) and **drops it** -- the socket stays up, the phone waits out its
+/// 60 s timeout, and the session never syncs. iOS's `URLSessionWebSocketTask`
+/// closes the socket outright above one mebibyte, so "send it anyway and let the
+/// transport split it" is not available. The page is therefore cut here, with
+/// room for the envelope and the other fields.
+pub const PAGE_BYTES_MAX: usize = 700 * 1024;
+
+/// Cut a page down to what one frame can carry, dropping the oldest records.
+///
+/// Newest-first is the only order that can be cut safely: the phone merges what
+/// it receives, and `hasMore` tells it to page backwards for the rest. Cutting
+/// the newest instead would leave the conversation's tail missing with no cursor
+/// that asks for it.
+///
+/// One record is always kept, even over budget: a single assistant message
+/// larger than the cap cannot be split here, and dropping it would lose the
+/// answer rather than shorten the page.
+///
+/// - Parameters:
+///   - records: the page's envelopes, oldest first.
+///   - max_bytes: the budget for their serialized forms.
+/// - Returns: the kept envelopes and how many were dropped from the front.
+pub fn trim_page_bytes(records: Vec<Value>, max_bytes: usize) -> (Vec<Value>, usize) {
+    let sizes: Vec<usize> = records.iter().map(|value| value.to_string().len()).collect();
+    let mut total: usize = sizes.iter().sum();
+    let mut dropped = 0;
+    while total > max_bytes && dropped + 1 < records.len() {
+        total -= sizes[dropped];
+        dropped += 1;
+    }
+    if dropped == 0 {
+        return (records, 0);
+    }
+    (records.into_iter().skip(dropped).collect(), dropped)
+}
+
+/// The oldest log position an envelope carries, when it carries one.
+///
+/// Used after trimming: the page's `oldestRawSeq` has to name the first record
+/// the phone actually received, or the backwards page that fills the gap starts
+/// at the wrong place.
+pub fn envelope_seq(envelope: &Value) -> Option<i64> {
+    envelope
+        .get("event")
+        .and_then(|event| event.get("seq"))
+        .and_then(Value::as_i64)
 }
 
 /// Build the pairing URI the desktop shows as a QR code.
@@ -527,6 +641,43 @@ mod tests {
         assert!(ClientFrame::parse(r#"{"v":2,"type":"session.list","id":"m1"}"#).is_none());
         assert!(ClientFrame::parse("not json").is_none());
         assert!(ClientFrame::parse(r#"{"type":"session.list"}"#).is_none());
+    }
+
+    #[test]
+    fn a_page_that_does_not_fit_is_cut_at_its_oldest_end() {
+        // The relay drops an oversized frame and the phone waits out a timeout
+        // for an answer that was discarded; the page is therefore cut here.
+        // Newest-first is the only safe direction: the phone merges what it got
+        // and `hasMore` sends it back for the rest.
+        let page: Vec<Value> = (0..4)
+            .map(|seq| {
+                json!({
+                    "type": "event",
+                    "event": {
+                        "type": "assistant/message", "seq": seq, "time": seq,
+                        "data": { "text": "x".repeat(200) }
+                    }
+                })
+            })
+            .collect();
+        let each = page[0].to_string().len();
+        let (kept, dropped) = trim_page_bytes(page.clone(), each * 2);
+        assert_eq!(dropped, 2, "two records had to go");
+        assert_eq!(kept.len(), 2);
+        assert_eq!(envelope_seq(&kept[0]), Some(2), "the cursor names what shipped");
+        assert_eq!(envelope_seq(&kept[1]), Some(3));
+
+        // One record is always kept: an answer larger than the cap cannot be
+        // split here, and dropping it would lose the answer, not shorten a page.
+        let single = vec![page[0].clone()];
+        let (kept, dropped) = trim_page_bytes(single, 10);
+        assert_eq!(dropped, 0);
+        assert_eq!(kept.len(), 1);
+
+        // Nothing to cut is not a reason to reallocate.
+        let (kept, dropped) = trim_page_bytes(page, PAGE_BYTES_MAX);
+        assert_eq!(dropped, 0);
+        assert_eq!(kept.len(), 4);
     }
 
     #[test]

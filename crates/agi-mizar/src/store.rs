@@ -25,6 +25,14 @@ pub struct Device {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// What the phone said it is in its `hello` (`iPhone17,1`, `iPad13,18`).
+    ///
+    /// `model` stays the provisioning marker (`account:…`) because token
+    /// rotation matches on it; this is what the device list can show. Absent on
+    /// records written before the hello carried it, and on phones that never
+    /// reconnect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardware: Option<String>,
     /// SHA-256 of the token, hex. Never the token.
     #[serde(rename = "tokenHash")]
     pub token_hash: String,
@@ -133,6 +141,7 @@ impl DeviceStore {
             id: uuid::Uuid::new_v4().to_string(),
             name: name.to_string(),
             model,
+            hardware: None,
             token_hash: hash_token(&token),
             created_at: crate::pairing::now_ms(),
             last_seen_at: 0,
@@ -191,6 +200,31 @@ impl DeviceStore {
             self.save()?;
         }
         Ok(revoked)
+    }
+
+    /// Remember the hardware a phone reported in its hello.
+    ///
+    /// The account marker is what proves which phone a token belongs to, so it
+    /// stays in `model`; the hardware is what lets the roster tell an iPhone
+    /// from an iPad (or two iPhones apart). Returns whether anything changed, so
+    /// a reconnect that repeats the same model does not rewrite the file.
+    pub fn describe(&self, id: &str, hardware: &str) -> io::Result<bool> {
+        let hardware = hardware.trim();
+        if hardware.is_empty() || hardware.len() > 64 {
+            return Ok(false);
+        }
+        {
+            let mut state = self.state();
+            let Some(device) = state.devices.iter_mut().find(|device| device.id == id) else {
+                return Ok(false);
+            };
+            if device.hardware.as_deref() == Some(hardware) {
+                return Ok(false);
+            }
+            device.hardware = Some(hardware.to_string());
+        }
+        self.save()?;
+        Ok(true)
     }
 
     /// Every device, revoked ones included.

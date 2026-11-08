@@ -198,8 +198,22 @@ impl StateFrame {
     }
 
     /// Encode to bytes.
+    ///
+    /// The text length is a u16 on the wire. A producer that does not split long
+    /// messages (the state machines do -- `states::text_pieces`) would otherwise
+    /// write a length that does not match the body, and every decoder rejects the
+    /// frame as `LengthMismatch`. Clamping at a character boundary here keeps the
+    /// frame decodable; the missing tail is a bug in the producer, not a corrupt
+    /// frame, and the receiver's `textSeq` check reports it as a gap.
     pub fn encode(&self) -> Vec<u8> {
-        let payload = self.text.as_bytes();
+        let mut payload = self.text.as_bytes();
+        if payload.len() > u16::MAX as usize {
+            let mut take = u16::MAX as usize;
+            while take > 0 && !self.text.is_char_boundary(take) {
+                take -= 1;
+            }
+            payload = &payload[..take];
+        }
         let mut out = Vec::with_capacity(HEADER_LEN + payload.len());
         out.push(MAGIC);
         out.push(self.state.code());
@@ -302,6 +316,13 @@ impl StateChannel {
             if frame.flags.has(Flags::SNAPSHOT) {
                 self.text = frame.text.clone();
             } else if frame.flags.has(Flags::APPEND) {
+                // An append names its byte offset in the interval. A gap means a
+                // frame was lost, and splicing two unrelated stretches together
+                // would draw a sentence that was never said: wait for the next
+                // snapshot instead (the protocol's rule).
+                if frame.text_seq != self.text.len() as u32 {
+                    return Applied::Stale;
+                }
                 self.text.push_str(&frame.text);
             }
             if frame.flags.has(Flags::FINAL) {
@@ -424,6 +445,26 @@ mod tests {
             StateFrame::decode(&bytes),
             Err(FrameError::UnknownState(200))
         );
+    }
+
+    #[test]
+    fn an_append_that_skips_text_is_refused_rather_than_spliced() {
+        let mut channel = StateChannel::default();
+        let begin = StateFrame::begin(SessionState::StreamNarration, 1, "");
+        assert_eq!(channel.apply(&begin, 0), Applied::Began);
+        let first = StateFrame::append(SessionState::StreamNarration, 1, 0, "ab");
+        assert_eq!(channel.apply(&first, 1), Applied::Updated);
+        assert_eq!(channel.text(), "ab");
+
+        // Byte 5, not 2: the frame that carried bytes 2..5 was lost.
+        let gap = StateFrame::append(SessionState::StreamNarration, 1, 5, "cd");
+        assert_eq!(channel.apply(&gap, 2), Applied::Stale);
+        assert_eq!(channel.text(), "ab", "a gap must not be spliced");
+
+        // The snapshot after the gap is authoritative again.
+        let snapshot = StateFrame::snapshot(SessionState::StreamNarration, 1, 0, "abcde");
+        assert_eq!(channel.apply(&snapshot, 3), Applied::Updated);
+        assert_eq!(channel.text(), "abcde");
     }
 
     #[test]
