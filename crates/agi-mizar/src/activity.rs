@@ -165,6 +165,42 @@ impl Tracker {
         self.approvals.remove(id).map(|_| self.card())
     }
 
+    /// Replace this tracker's view of the world with an authoritative card.
+    ///
+    /// The event loop starts empty, and a session or an approval may already be
+    /// waiting when it does: the first reconciliation reads the snapshot and
+    /// publishes it, but publishing does not teach the tracker anything. Later,
+    /// an `InteractionResolved` for an approval the tracker never saw then has
+    /// no card to send, and the phone keeps showing an approval the computer has
+    /// already answered. Reconciliation is what closes that gap.
+    ///
+    /// The card's rows are already the published head of the list, which is the
+    /// only part the tracker needs: a third row that is not on screen cannot
+    /// become visible without a new card from a session event anyway.
+    pub fn reconcile(&mut self, card: &Card) {
+        // The snapshot's `session.updated_at` moves on every update, while the
+        // clock the card draws must stay on the instant this host first saw the
+        // turn running. Keep a row's existing `running_since`; only a row this
+        // tracker has never seen takes the snapshot's instant.
+        let mut rows = card.rows.clone();
+        for row in &mut rows {
+            if let Some(existing) = self
+                .rows
+                .iter()
+                .find(|known| known.session_id == row.session_id)
+            {
+                row.running_since = existing.running_since;
+            }
+        }
+        self.rows = rows;
+        self.approvals = card
+            .approvals
+            .iter()
+            .cloned()
+            .map(|approval| (approval.request_id.clone(), approval))
+            .collect();
+    }
+
     /// What the row for this session was called, before it leaves the card.
     ///
     /// Read first, because `finished` removes it: a turn-end notification that
@@ -374,6 +410,71 @@ mod tests {
         assert!(
             tracker.approval_resolved("r1").is_none(),
             "answered twice is not news"
+        );
+    }
+
+    #[test]
+    fn reconciliation_teaches_the_tracker_an_approval_it_started_too_late_for() {
+        let mut tracker = Tracker::default();
+        let card = Card {
+            rows: vec![Row {
+                session_id: "dsh:a".to_string(),
+                title: "Build".to_string(),
+                running_since: 1_000,
+            }],
+            approvals: vec![Approval {
+                request_id: "r1".to_string(),
+                session_id: "dsh:a".to_string(),
+                tool: "Bash".to_string(),
+                detail: "rm -rf build".to_string(),
+            }],
+        };
+
+        tracker.reconcile(&card);
+        assert_eq!(tracker.card(), card, "reconciliation adopts the snapshot");
+
+        let after = tracker.approval_resolved("r1").unwrap();
+        assert!(after.approvals.is_empty());
+        assert_eq!(after.rows, card.rows, "the running row stays");
+        assert_eq!(
+            tracker.card(),
+            Card {
+                approvals: Vec::new(),
+                ..card
+            },
+        );
+    }
+
+    #[test]
+    fn reconciliation_keeps_a_known_rows_clock_but_takes_a_new_rows_snapshot_time() {
+        let mut tracker = Tracker::default();
+        tracker.running(&session("a", Some("Build")), 1_000);
+        let card = Card {
+            rows: vec![
+                Row {
+                    session_id: "dsh:a".to_string(),
+                    title: "Build".to_string(),
+                    running_since: 5_000,
+                },
+                Row {
+                    session_id: "dsh:b".to_string(),
+                    title: "Tests".to_string(),
+                    running_since: 5_000,
+                },
+            ],
+            approvals: Vec::new(),
+        };
+
+        tracker.reconcile(&card);
+        assert_eq!(
+            tracker.card().rows[0].running_since,
+            1_000,
+            "the row this tracker already knew keeps the instant it first saw",
+        );
+        assert_eq!(
+            tracker.card().rows[1].running_since,
+            5_000,
+            "a row the tracker has never seen takes the snapshot's instant",
         );
     }
 
