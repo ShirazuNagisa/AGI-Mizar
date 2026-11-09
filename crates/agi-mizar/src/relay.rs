@@ -103,6 +103,8 @@ enum StreamCommand {
 enum Outgoing {
     Json(Value),
     Bytes(Vec<u8>),
+    /// A WebSocket ping, answered by the relay's protocol implementation.
+    Ping,
 }
 
 impl From<Value> for Outgoing {
@@ -344,6 +346,7 @@ impl RelayClient {
                 let message = match frame {
                     Outgoing::Json(value) => Message::Text(value.to_string()),
                     Outgoing::Bytes(bytes) => Message::Binary(bytes),
+                    Outgoing::Ping => Message::Ping(Vec::new()),
                 };
                 // A relay that stops reading must not hold every phone request
                 // behind a full TCP window forever. The reader below notices a
@@ -363,11 +366,36 @@ impl RelayClient {
             let _ = sink.close().await;
         });
 
+        // A Wi-Fi change leaves the old TCP tunnel half-open: writes are
+        // accepted by the kernel and nothing ever arrives. The relay's own
+        // 90 s sweeper eventually drops the room, but that is far too late for
+        // a phone that is already trying to reconnect. Ping every five seconds
+        // and treat fifteen seconds without any frame (including the pong) as
+        // a dead tunnel, then redial immediately.
+        let heartbeat_out = out.clone();
+        let heartbeat = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                if heartbeat_out.send(Outgoing::Ping).await.is_err() {
+                    break;
+                }
+            }
+        });
+
         let mut kick = self.kick.subscribe();
         'socket: loop {
             let message = tokio::select! {
                 _ = kick.recv() => break 'socket,
-                message = stream.next() => message,
+                message = tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    stream.next(),
+                ) => match message {
+                    Ok(message) => message,
+                    Err(_) => {
+                        tracing::warn!("relay: no frame or pong for 15s; redialling the tunnel");
+                        break 'socket;
+                    }
+                },
             };
             let Some(message) = message else { break };
             let Ok(message) = message else { break };
@@ -444,6 +472,7 @@ impl RelayClient {
         // return, so the redial loop above never ran and the room stayed dark
         // for hours. Drop the output channel, then abort the writer and reap it.
         self.streams().clear();
+        heartbeat.abort();
         drop(out);
         writer.abort();
         let _ = writer.await;
