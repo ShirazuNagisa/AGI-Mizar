@@ -6,8 +6,10 @@ and lets a phone drive all of them through one connection.
 This repository contains the whole desktop application: a kernel that serves its API, accepts the DSH
 plugin, drives a Codex app-server, reads and answers Claude Code through transcripts and hooks, and
 serves the shipped phone app over Mizar v1 — pairing, device tokens, and the conversation methods —
-plus a React front end and a Tauri window that loads the kernel's own page. There is no public
-installer yet; see [打包](#打包).
+plus a React front end and a Tauri window that loads the kernel's own page. The macOS 0.1.1
+universal DMG and updater artifacts are on
+[GitHub Releases](https://github.com/ShirazuNagisa/AGI-Mizar/releases); Windows installers are
+built locally by `scripts\package.ps1`, see [打包](#打包).
 
 ```
 手机 App ──▶ AGI Mizar ──┬──▶ DSH         （helper plugin 拨回环 WS 进来）
@@ -23,9 +25,9 @@ installer yet; see [打包](#打包).
 | M1 | 内核：引擎抽象、DSH 链路、状态聚合、本地 API、守护进程 | ✅ |
 | M2 | Codex 引擎（app-server JSON-RPC、审批、历史投影） | ✅ |
 | M3 | Claude Code 引擎（transcript 解析、hooks、`claude -p`） | ✅ |
-| M4 | `dsh-mizar` 0.9.0 联调 | 🔶 插件侧已完成，等真机联调 |
-| M5 | Mizar 服务端：**局域网配对 + 核心方法 + 中继隧道** ✅；桌面端文件预览 ✅；手机 `file.*` / 推送 / 上传 ⬜ |
-| M6 | Tauri 壳 ✅；打包签名脚本已备，需装 `tauri-cli` |
+| M4 | `dsh-mizar` 0.9.0 联调 | ✅ 插件 0.9.0 + iOS 0.9.9 真机 / TestFlight 已验证 |
+| M5 | Mizar 服务端：**局域网配对 + 核心方法 + 中继隧道** ✅；桌面端文件预览 ✅；手机附件上传 / 推送 / 交付文件预览 ✅ |
+| M6 | Tauri 壳 ✅；0.1.1 macOS universal DMG 已发布；Windows NSIS/MSI 打包脚本可用 |
 | M7 | React 前端（管理面板：主页用量统计 / Agent 配置 / 登录 / 设置；不再展示会话内容） | ✅ |
 
 ## 仓库结构
@@ -39,6 +41,11 @@ crates/
 ├─ agi-engine-claude/Claude Code 适配：transcript 解析 + hooks + `claude -p`
 ├─ agi-hook-shim/    Claude Code hooks 调用的无 GUI 小二进制
 ├─ agi-mizar/        手机侧服务端：配对、设备、Mizar v1 WebSocket
+├─ agi-platform/     平台缝隙：home、PATH、启动规则、打开 URL
+├─ agi-lan/          同账户局域网身份、证书与发现
+├─ agi-peer/         同账户远程 Agent 的出站 Mizar v1 客户端
+├─ agi-layout/       turn 完成度判断（结构 gate + Mizarllm）
+├─ agi-remote/       Agent 驱动同账户 peer 的 MCP/CLI 桥
 ├─ agi-core/         内核：状态聚合、本地 API、端点文件
 ├─ agi-boot/         daemon 与窗口共用的启动序列
 ├─ agi-app/          Tauri 壳：开窗并把端口 / 令牌交给页面
@@ -53,7 +60,7 @@ protocol/            Mizar v1 黄金帧（手机协议，未来服务端用）
 macOS / Linux：
 
 ```sh
-cargo test                     # 112 个测试
+cargo test                     # 427 个测试
 cargo run -p agi-daemon        # 内核，无窗口
 cargo run -p agi-app           # 窗口（会打印它加载的地址）
 scripts/dev-app.sh             # 同上，但包成带图标的 .app（Dock 与 Finder 显示应用图标）
@@ -83,7 +90,7 @@ Windows 上 `cargo build/test/clippy` 之前必须先准备 `crates/agi-app/reso
 内核启动后会打印：
 
 ```
-AGI Mizar kernel 0.1.0
+AGI Mizar kernel 0.1.1
   api    http://127.0.0.1:64222/api/v1/state
   events ws://127.0.0.1:64222/api/v1/events?token=…
   dsh    ws://127.0.0.1:64222/dsh
