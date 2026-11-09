@@ -1116,7 +1116,7 @@ impl MizarServer {
                 // A numeric position is a delta: the phone is asking for what is
                 // new, and `hasMore` describes older history it already tracks.
                 let delta = after_seq.is_some_and(|position| position >= 0);
-                let context = self
+                let mut context = self
                     .core
                     .snapshot()
                     .sessions
@@ -1138,6 +1138,39 @@ impl MizarServer {
 
                 match engine.records(&key, limit, before).await {
                     Ok(mut records) => {
+                        // The snapshot's context is folded from the projections
+                        // and does not move when a compaction rewrites the
+                        // history until the next projection arrives. That left
+                        // the phone showing the pre-compaction percentage after
+                        // a manual refresh while `session.stats` (which asks
+                        // DSH directly) already said 9%. The one page that
+                        // carries the compaction divider is exactly the page
+                        // that must also refresh the context from the engine.
+                        let compacted = records.iter().any(|record| {
+                            record.kind == RecordKind::Notice
+                                && record.text.as_deref().is_some_and(|text| {
+                                    text.to_ascii_lowercase().contains("compact")
+                                })
+                        });
+                        if compacted {
+                            if let Ok(usage) = engine.usage(&key).await {
+                                if let Some(fresh) = usage.context {
+                                    if let (Some(window), Some(pressure), Some(projected), Some(percent)) = (
+                                        fresh.window,
+                                        fresh.pressure_tokens,
+                                        fresh.projected_tokens,
+                                        fresh.percent,
+                                    ) {
+                                        context = json!({
+                                            "window": window,
+                                            "pressureTokens": pressure,
+                                            "projectedTokens": projected,
+                                            "percent": percent,
+                                        });
+                                    }
+                                }
+                            }
+                        }
                         // The log cut is the newest record the engine returned,
                         // taken before the delta filter: a delta with nothing
                         // new must still report where the log stands, or the

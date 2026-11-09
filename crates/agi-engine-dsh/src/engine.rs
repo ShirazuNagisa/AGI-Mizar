@@ -1475,15 +1475,12 @@ impl Engine for DshEngine {
             return Err(EngineError::UnknownSession(session.clone()));
         }
 
-        let cached: Vec<Record> = {
+        let mut cached: Vec<Record> = {
             let inner = self.inner();
             inner
                 .records
                 .get(&session.id)
                 .map(|bucket| {
-                    // `Filter` is not `ExactSizeIterator`, so a double-ended
-                    // take-and-reverse does not compile; taking the tail of a
-                    // collected window says the same thing more plainly.
                     let mut window: Vec<Record> = bucket
                         .iter()
                         .filter(|record| before.is_none_or(|cut| record.seq < cut))
@@ -1494,23 +1491,39 @@ impl Engine for DshEngine {
                     // scroll-up followed by a refresh from putting an older
                     // notice after a newer answer.
                     window.sort_by_key(|record| record.seq);
-                    let start = window.len().saturating_sub(limit);
-                    window.split_off(start)
+                    window
                 })
                 .unwrap_or_default()
         };
-        if !cached.is_empty() {
+        // A cache is a window, not the whole history. The old early return
+        // served any non-empty bucket no matter what the caller asked for: a
+        // 30-record head left by an incremental read made a later 200-record
+        // request return 30, say `hasMore: false`, and hide a compaction that
+        // was just outside that window. Fetch when the cache cannot satisfy the
+        // requested page, then merge rather than replace: the bucket may also
+        // hold newer delta records the engine page does not include.
+        if cached.len() >= limit {
+            let start = cached.len() - limit;
+            return Ok(cached.split_off(start));
+        }
+        if !self.connected() {
+            if cached.is_empty() {
+                return Err(EngineError::NotConnected {
+                    engine: EngineId::Dsh,
+                });
+            }
             return Ok(cached);
         }
-
-        if !self.connected() {
-            return Err(EngineError::NotConnected {
-                engine: EngineId::Dsh,
-            });
-        }
-        let mut fetched = self.fetch_page(session, limit, before).await?;
-        fetched.sort_by_key(|record| record.seq);
-        Ok(fetched)
+        let fetched = match self.fetch_page(session, limit, before).await {
+            Ok(fetched) => fetched,
+            Err(_) if !cached.is_empty() => return Ok(cached),
+            Err(error) => return Err(error),
+        };
+        cached.extend(fetched);
+        cached.sort_by_key(|record| record.seq);
+        cached.dedup_by_key(|record| record.seq);
+        let start = cached.len().saturating_sub(limit);
+        Ok(cached.split_off(start))
     }
 
     /// Every day of activity this host has recorded, folded from the sessions it

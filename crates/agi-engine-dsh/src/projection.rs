@@ -240,6 +240,24 @@ pub fn project(payload: &Value) -> Option<Projected> {
             }),
             ..base
         }),
+        // Context compaction is a divider in the transcript, not bookkeeping:
+        // DSH records the completed command with the count it removed. The
+        // phone used to drop this record entirely, so its history had no line
+        // where the context was compacted even though the desktop had one.
+        // `compaction/end` has no count; the command's own line is the useful
+        // record and the only one that should become the divider.
+        "command/done"
+            if text(data, "text").is_some_and(|text| {
+                let text = text.to_ascii_lowercase();
+                text.starts_with("compacted ") && text.contains("history items")
+            }) =>
+        {
+            Some(Projected {
+                kind: RecordKind::Notice,
+                text: text(data, "text"),
+                ..base
+            })
+        }
         // `assistant/attempt` is a stream that committed no message, and the rest
         // are request plumbing. Both are reachable through the raw payload; they
         // are not conversation.
@@ -502,6 +520,36 @@ mod tests {
         .unwrap();
         assert_eq!(step.kind, RecordKind::Step);
         assert!(step.record().is_none());
+    }
+
+    #[test]
+    fn a_compaction_command_becomes_the_divider() {
+        let done = project(&payload(json!({
+            "type": "command/done",
+            "seq": 11637,
+            "time": 1000,
+            "data": {
+                "commandId": "cmd-8bcefa0e-1",
+                "kind": "success",
+                "text": "Compacted 1207 history items (~495352 tokens).",
+            },
+        })))
+        .unwrap();
+        assert_eq!(done.kind, RecordKind::Notice);
+        assert_eq!(
+            done.text.as_deref(),
+            Some("Compacted 1207 history items (~495352 tokens).")
+        );
+
+        // Every other command is still plumbing: only the compaction command
+        // gets a line in the transcript.
+        assert!(project(&payload(json!({
+            "type": "command/done",
+            "seq": 11638,
+            "time": 1001,
+            "data": { "kind": "success", "text": "ok" },
+        })))
+        .is_none());
     }
 
     #[test]
