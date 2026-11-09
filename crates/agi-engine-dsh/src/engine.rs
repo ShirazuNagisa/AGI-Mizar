@@ -657,23 +657,12 @@ impl DshEngine {
     fn on_approval(&self, frame: ApprovalFrame) {
         let interaction = Interaction {
             id: frame.id.clone(),
-            session: frame
-                .request
-                .get("agent")
-                .and_then(|agent| agent.get("id"))
-                .and_then(Value::as_str)
-                .map(|id| SessionKey::new(EngineId::Dsh, id)),
+            session: Self::approval_session(&frame.request),
             kind: InteractionKind::Approval,
-            title: frame
-                .request
-                .get("toolName")
-                .and_then(Value::as_str)
+            title: Self::approval_text(&frame.request, &["toolName", "tool", "name"])
                 .unwrap_or("approval")
                 .to_string(),
-            detail: frame
-                .request
-                .get("reason")
-                .and_then(Value::as_str)
+            detail: Self::approval_text(&frame.request, &["reason", "detail", "message"])
                 .map(str::to_string),
             requested_at: now_ms(),
             questions: Vec::new(),
@@ -683,6 +672,37 @@ impl DshEngine {
             .insert(interaction.id.clone(), interaction.clone());
         self.emit(EngineEvent::InteractionRequested(interaction));
     }
+
+/// The session an approval belongs to.
+///
+/// DSH's documented shape is `request.agent.id`, but the bridge has also sent
+/// the agent as a scalar and as `sessionId`/`agentId` during version skew. A
+/// missing session is why a card appeared over every conversation: the phone
+/// draws a sessionless interaction globally. Read every spelling the host has
+/// used, and leave `None` only when the request really carries no identity.
+fn approval_session(request: &Value) -> Option<SessionKey> {
+    let agent = request.get("agent");
+    let id = agent
+        .and_then(Value::as_str)
+        .or_else(|| agent.and_then(|value| value.get("id")).and_then(Value::as_str))
+        .or_else(|| agent.and_then(|value| value.get("sessionId")).and_then(Value::as_str))
+        .or_else(|| request.get("agentId").and_then(Value::as_str))
+        .or_else(|| request.get("sessionId").and_then(Value::as_str))
+        .or_else(|| {
+            request
+                .get("session")
+                .and_then(|session| session.get("id"))
+                .and_then(Value::as_str)
+        })?;
+    Some(SessionKey::new(EngineId::Dsh, id))
+}
+
+/// Read the first text field present under one of the names DSH has used.
+fn approval_text<'a>(request: &'a Value, names: &[&str]) -> Option<&'a str> {
+    names
+        .iter()
+        .find_map(|name| request.get(*name).and_then(Value::as_str))
+}
 
     fn on_question(&self, frame: QuestionFrame) {
         let questions = read_questions(&frame.request);
@@ -2271,7 +2291,7 @@ fn workspace_id(path: &str, workspaces: &[Workspace]) -> Option<String> {
 
 #[cfg(test)]
 mod workspace_id_tests {
-    use super::{create_request, workspace_id, Workspace};
+    use super::{create_request, workspace_id, DshEngine, Workspace};
 
     fn workspace(id: &str, path: &str) -> Workspace {
         Workspace {
@@ -2325,6 +2345,40 @@ mod workspace_id_tests {
         assert_eq!(
             workspace_id("/Users/you/Projects/app", &all).as_deref(),
             Some("dsh:ws-1")
+        );
+    }
+
+    #[test]
+    fn an_approval_keeps_the_session_identity_in_every_wire_shape() {
+        use serde_json::json;
+        let expected = "session-a";
+        for request in [
+            json!({ "agent": { "id": "session-a" } }),
+            json!({ "agent": "session-a" }),
+            json!({ "agentId": "session-a" }),
+            json!({ "sessionId": "session-a" }),
+            json!({ "session": { "id": "session-a" } }),
+        ] {
+            assert_eq!(
+                DshEngine::approval_session(&request)
+                    .expect("the approval names a session")
+                    .raw(),
+                expected
+            );
+        }
+        assert!(DshEngine::approval_session(&json!({})).is_none());
+    }
+
+    #[test]
+    fn approval_text_accepts_the_names_the_bridge_has_used() {
+        use serde_json::json;
+        assert_eq!(
+            DshEngine::approval_text(&json!({ "tool": "bash" }), &["toolName", "tool"]),
+            Some("bash")
+        );
+        assert_eq!(
+            DshEngine::approval_text(&json!({ "detail": "why" }), &["reason", "detail"]),
+            Some("why")
         );
     }
 }
