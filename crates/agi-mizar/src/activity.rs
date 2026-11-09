@@ -108,12 +108,31 @@ impl Tracker {
     ///   those updates is a push).
     pub fn running(&mut self, session: &Session, now_ms: i64) -> Option<Card> {
         let session_id = session.key.to_string();
-        if self.rows.iter().any(|row| row.session_id == session_id) {
+        let title = session
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| "Session".to_string());
+        if let Some(row) = self
+            .rows
+            .iter_mut()
+            .find(|row| row.session_id == session_id)
+        {
+            // A turn often starts before DSH has named the session. The row was
+            // created with an empty title and then never touched again, which
+            // is why the island showed only a timer for that row. Publish the
+            // title when it arrives; an unchanged title still produces no card.
+            if row.title != title {
+                row.title = title;
+                return Some(self.card());
+            }
             return None;
         }
         self.rows.push(Row {
             session_id,
-            title: session.title.clone().unwrap_or_default(),
+            title,
             running_since: now_ms,
         });
         // Oldest first, and a tie broken by insertion so two turns that started
@@ -327,6 +346,22 @@ mod tests {
             requested_at: 1,
             questions: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_title_that_arrives_after_the_row_updates_the_card() {
+        let mut tracker = Tracker::default();
+        tracker.running(&session("a", None), 1_000);
+        // DSH names a session a moment after its turn starts. The row was
+        // created before that and used to keep an empty title for the whole
+        // turn -- the island showed a ticking clock with nothing in front of it.
+        let card = tracker
+            .running(&session("a", Some("Name the island row")), 2_000)
+            .expect("the title change is a card update");
+        assert_eq!(card.rows[0].title, "Name the island row");
+        assert_eq!(card.rows[0].running_since, 1_000);
+        // A repeat of the same title is not a push.
+        assert!(tracker.running(&session("a", Some("Name the island row")), 3_000).is_none());
     }
 
     #[test]
