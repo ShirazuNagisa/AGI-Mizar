@@ -657,7 +657,16 @@ impl DshEngine {
     fn on_approval(&self, frame: ApprovalFrame) {
         let interaction = Interaction {
             id: frame.id.clone(),
-            session: Self::approval_session(&frame.request),
+            // A bridge version that loses the agent identity still leaves a
+            // request that belongs to a turn. If exactly one session is running,
+            // that is the only turn it can be blocked on; tying it there is what
+            // keeps the card answerable instead of sessionless/global.
+            session: Self::approval_session(&frame.request).or_else(|| {
+                let inner = self.inner();
+                let mut running = inner.sessions.values().filter(|session| session.running);
+                let only = running.next().map(|session| session.key.clone())?;
+                running.next().is_none().then_some(only)
+            }),
             kind: InteractionKind::Approval,
             title: Self::approval_text(&frame.request, &["toolName", "tool", "name"])
                 .unwrap_or("approval")
