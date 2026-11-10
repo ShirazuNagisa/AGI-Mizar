@@ -1013,6 +1013,13 @@ function RemoteStep({
               disabled={!prefs.enabled}
               onChange={(allowWan) => onChange({ ...prefs, allowWan })}
             />
+            <RemoteRow
+              label="对委派机开放所有工作区"
+              hint="打开后，委派机可查询本机 DSH 的全部工作区，不再受白名单限制。"
+              checked={prefs.allowAllWorkspaces}
+              disabled={!prefs.enabled}
+              onChange={(allowAllWorkspaces) => onChange({ ...prefs, allowAllWorkspaces })}
+            />
           </div>
           <p className="mz-divide-t px-4 py-2 text-[12px] leading-5 text-muted">
             打开总开关后再选允许的线路；全部关着也能继续，之后在设置里改。
@@ -1183,7 +1190,7 @@ function DoneStep({
             remote.allowWan ? '跨网' : null,
           ]
             .filter(Boolean)
-            .join('、') || '没有线路'}）`
+            .join('、') || '没有线路'}${remote.allowAllWorkspaces ? ' · 全部工作区' : ''}）`
 
   const preferenceText =
     shell.settings === null

@@ -141,7 +141,19 @@ export function RemoteAgentSettings({ kernel }: { kernel: Kernel }) {
   return (
     <div className="flex flex-col gap-4">
       <p className="text-[12px] leading-6 text-muted">
-        本功能旨在为多设备间Agent任务指派提供支持。你可以在Agent中使用本功能指定的skill，然后使你的模型可以指派另一台电脑上的Agent模型作为子代理，从而实现多端的高效任务协同。
+        本功能旨在为多设备间Agent任务指派提供支持。你可以在Agent中使用本功能指定的skill：agi-mizar-remote，然后使你的模型可以指派另一台电脑上的Agent模型作为子代理，从而实现多端的高效任务协同。参考教程：
+        <button
+          type="button"
+          onClick={() =>
+            void kernel.send({
+              op: 'open_external',
+              url: 'https://dsh-mizar.shirazu-nagisa.com/docs/',
+            })
+          }
+          className="cursor-pointer break-all text-accent underline underline-offset-2 hover:opacity-80"
+        >
+          https://dsh-mizar.shirazu-nagisa.com/docs/
+        </button>
       </p>
 
       <section>
