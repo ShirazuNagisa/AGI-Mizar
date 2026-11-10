@@ -17,6 +17,7 @@ import { Toolbar } from './Toolbar'
 import { DshPluginHint } from './DshPluginHint'
 import { ENGINE_MARKS, Spinner } from '../icons'
 import { cn, failureMessage } from '../lib/utils'
+import { isWindows } from '../platform'
 
 interface AgentPageProps {
   tab: AgentTab
@@ -267,7 +268,7 @@ export function AgentPage({ tab, status, kernel, plugin, sessions, onReconnect }
             <section>
               <p className="text-[12px] leading-6 text-muted">
                 {surface === 'gui'
-                  ? `${name} 的会话来自桌面应用；Claude GUI 只读，Codex GUI 可以在最近会话里继续。模型与权限由桌面应用自己的设置管理。`
+                  ? guiSurfaceCopy(name)
                   : `${name} 在本机以命令行工具运行，模型与权限由它自己的配置文件管理。上方的「连接依赖」会检查它是否仍可用；装好或修好后可以点「重新检测」。`}
               </p>
             </section>
@@ -276,6 +277,21 @@ export function AgentPage({ tab, status, kernel, plugin, sessions, onReconnect }
       </div>
     </div>
   )
+}
+
+/**
+ * What this window can do with the sessions the desktop app wrote.
+ *
+ * macOS and Linux drive Codex's desktop app over its private Unix socket, so a
+ * GUI transcript there can be continued from this window. Windows has no such
+ * channel (the control side is compiled only for Unix), so promising "continue
+ * here" would be a lie the first click exposes; say what is true instead.
+ */
+function guiSurfaceCopy(name: string): string {
+  if (isWindows()) {
+    return `${name} 的会话来自桌面应用。Windows 上这些会话在这里只读：桌面控制通道只在 macOS 与 Linux 提供，要继续请在命令行面操作。模型与权限由那个桌面应用自己的设置管理。`
+  }
+  return `${name} 的会话来自桌面应用；Claude GUI 只读，Codex GUI 可以在最近会话里继续。模型与权限由桌面应用自己的设置管理。`
 }
 
 /**

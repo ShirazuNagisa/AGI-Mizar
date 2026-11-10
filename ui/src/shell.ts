@@ -63,7 +63,8 @@ const WINDOWS_ROWS: ShellSettingRow[] = [
   {
     field: 'show_dock_icon',
     title: '在任务栏显示图标',
-    detail: '关闭后只在通知区域留一个图标，任务栏里不再有它。',
+    detail:
+      '关闭后只在通知区域留一个图标，任务栏里不再有它。Windows 11 可能把通知区域的图标收进溢出区，可在系统设置里固定。',
   },
   {
     field: 'tray_menu_only',

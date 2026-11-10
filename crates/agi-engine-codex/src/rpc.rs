@@ -251,7 +251,7 @@ impl AppServer {
             // `taskkill /T` walks the tree the way a Unix process group would.
             #[cfg(windows)]
             if let Some(pid) = child.id() {
-                let _ = std::process::Command::new("taskkill")
+                let _ = agi_platform::std_command("taskkill")
                     .args(["/T", "/F", "/PID", &pid.to_string()])
                     .status();
             }

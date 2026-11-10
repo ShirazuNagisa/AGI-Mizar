@@ -283,10 +283,27 @@ fn main() {
             let url = format!("{url}&platform={}", agi_platform::platform());
 
             let parsed: tauri::Url = url.parse().expect("the kernel URL is not a URL");
+            // 802 logical pixels is the height the dashboard and the guide were
+            // drawn for, but it is a preference: a 1080p laptop at 150% scaling
+            // has about 672 logical pixels of work area, and a first screen
+            // whose footer is off the bottom is broken before it is used. Ask
+            // the monitor, keep 80 logical pixels of breathing room, and never
+            // go below the 480 floor or above the design height.
+            let height = app
+                .handle()
+                .primary_monitor()
+                .ok()
+                .flatten()
+                .map(|monitor| {
+                    let area = monitor.work_area();
+                    let logical = area.size.height as f64 / monitor.scale_factor();
+                    (logical - 80.0).clamp(480.0, 802.0)
+                })
+                .unwrap_or(802.0);
             let builder =
                 tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::External(parsed))
                     .title("AGI Mizar")
-                    .inner_size(WINDOW_WIDTH, 802.0)
+                    .inner_size(WINDOW_WIDTH, height)
                     // The dashboard's year of squares is the widest thing the
                     // window ever draws; at any narrower size the last weeks are
                     // cut off. The width is therefore not a preference — the

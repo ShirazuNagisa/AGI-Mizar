@@ -9,7 +9,7 @@ import {
   type UsageOverview,
 } from './api'
 import { agentTab, type Page } from './navigation'
-import { applyPlatform, platformOf } from './platform'
+import { applyPlatform, platformOf, isWindows } from './platform'
 import { applyTheme, onSystemThemeChange, storeTheme, storedTheme, type ThemePreference } from './theme'
 import { OledScope } from './lib/oled'
 import { Sidebar } from './components/Sidebar'
@@ -489,7 +489,12 @@ export function App() {
 
       <main className="flex min-w-0 flex-1 flex-col">
         {banner === null ? null : (
-          <div className="border-b border-ink bg-surface px-6 py-1.5 text-[12px] text-muted">
+          // The banner spans the window, so on Windows it also runs under the
+          // page-drawn caption. Reserving the same 144px as the toolbar keeps a
+          // long error string out from behind the three buttons.
+          <div
+            className={`border-b border-ink bg-surface px-6 py-1.5 text-[12px] text-muted${isWindows() ? ' pr-[144px]' : ''}`}
+          >
             {banner}
           </div>
         )}

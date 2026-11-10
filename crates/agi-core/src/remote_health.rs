@@ -230,6 +230,17 @@ fn mcp_item(
             format!("条目指向 {command}，不是这一个安装"),
             Some("把条目改为指向当前的 agi-remote"),
         ),
+        // Without a sidecar beside this app there is nothing to compare the entry
+        // against. Calling it "ok" would hide the failure a Windows install is
+        // most likely to have — `bin\agi-remote.exe` missing from the bundle —
+        // behind a green row, so the answer is "cannot tell" and what to do.
+        None => item(
+            "mcp",
+            "DSH 里的 MCP 条目",
+            "unknown",
+            format!("条目指向 {command}；应用旁边没有 agi-remote，无法比对"),
+            Some("重装应用，或用 AGI_REMOTE_BIN 指定 agi-remote"),
+        ),
         _ => item("mcp", "DSH 里的 MCP 条目", "ok", command.to_string(), None),
     }
 }
@@ -380,10 +391,29 @@ fn sidecar() -> Option<PathBuf> {
         .filter(|path| path.is_file())
 }
 
-/// The DSH profile the installer writes, by the same rule it uses.
+/// The DSH profile the installer writes, by the same rules it uses.
+///
+/// `DSH_PROFILE` comes first because `agi-remote install` honours it: a check
+/// that resolved a different directory would call the wrong profile ready and
+/// gate the repair button against a profile the installer would never touch.
 fn profile_dir() -> Result<PathBuf, String> {
     let home = agi_platform::dsh_home();
     let profiles = home.join("profiles");
+    if let Some(name) = std::env::var("DSH_PROFILE")
+        .ok()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+    {
+        let dir = profiles.join(&name);
+        return if dir.is_dir() {
+            Ok(dir)
+        } else {
+            Err(format!(
+                "DSH_PROFILE 指向的配置档 {} 不存在",
+                dir.display()
+            ))
+        };
+    }
     let has_patch = |dir: &Path| dir.join("cordis.patch.yml").is_file();
     let desktop = profiles.join("desktop");
     if has_patch(&desktop) {
@@ -452,7 +482,11 @@ fn unquote(value: &str) -> String {
 /// `/private` prefix on macOS would otherwise read as "outdated" on a perfectly
 /// good install, so both sides are canonicalised first when they resolve.
 fn same_path(left: &str, right: &Path) -> bool {
-    let resolved = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    // `agi_platform::canonicalize` is `dunce` on Windows, which strips the
+    // `\\?\` verbatim prefix `std::fs::canonicalize` adds; two spellings of the
+    // same file must not read as different installs.
+    let resolved =
+        |path: &Path| agi_platform::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let left = resolved(Path::new(left))
         .to_string_lossy()
         .replace('\\', "/");

@@ -273,7 +273,7 @@ pub(crate) fn run_remote_installer(
             "agi-remote is not beside this app; install it first or set AGI_REMOTE_BIN",
         );
     };
-    let mut command = std::process::Command::new(path);
+    let mut command = agi_platform::std_command(path);
     // Pin the DSH home the kernel reads onto the installer. A GUI launch on
     // Windows has no HOME, so without this the two could resolve different
     // profiles; `agi_platform::dsh_home()` is the same resolution the kernel's
@@ -323,7 +323,11 @@ pub(crate) fn find_remote_installer(exe: &std::path::Path) -> Option<std::path::
     ]
     .into_iter()
     .find(|path| path.is_file())
-    .and_then(|path| std::fs::canonicalize(&path).ok().or(Some(path)))
+    // `agi_platform::canonicalize` is `dunce` on Windows: it resolves the same
+    // way but leaves out the `\\?\` verbatim prefix, which would otherwise be
+    // shown to the operator in the dependency report and written into the
+    // `cordis.patch.yml` that the same value is compared against.
+    .and_then(|path| agi_platform::canonicalize(&path).ok().or(Some(path)))
 }
 
 /// Whether a theme name is one this window can paint.
@@ -3157,9 +3161,11 @@ mod tests {
         std::fs::write(&exe, b"app").unwrap();
         let sidecar = resources.join("agi-remote");
         std::fs::write(&sidecar, b"sidecar").unwrap();
+        // The same resolver the report and the YAML entry spell the path with:
+        // `dunce` on Windows, so no `\\?\` prefix reaches either surface.
         assert_eq!(
             find_remote_installer(&exe),
-            Some(std::fs::canonicalize(&sidecar).unwrap())
+            Some(agi_platform::canonicalize(&sidecar).unwrap())
         );
     }
 

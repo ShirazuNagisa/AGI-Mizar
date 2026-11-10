@@ -925,11 +925,11 @@ fn llama_server_name() -> &'static str {
 /// `tasklist`; the BSD-style systems answer with `/bin/ps`.
 fn stale_runtime_is_ours(pid: u32) -> bool {
     #[cfg(windows)]
-    let output = std::process::Command::new("tasklist")
+    let output = agi_platform::std_command("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
         .output();
     #[cfg(not(windows))]
-    let output = std::process::Command::new("/bin/ps")
+    let output = agi_platform::std_command("/bin/ps")
         .args(["-p", &pid.to_string(), "-o", "command="])
         .output();
     output
@@ -944,11 +944,11 @@ fn stale_runtime_is_ours(pid: u32) -> bool {
 /// Stop one process by pid, hard.
 fn stop_stale_runtime(pid: u32) {
     #[cfg(windows)]
-    let _ = std::process::Command::new("taskkill")
+    let _ = agi_platform::std_command("taskkill")
         .args(["/F", "/PID", &pid.to_string()])
         .status();
     #[cfg(not(windows))]
-    let _ = std::process::Command::new("/bin/kill")
+    let _ = agi_platform::std_command("/bin/kill")
         .args(["-9", &pid.to_string()])
         .status();
 }
@@ -1060,7 +1060,7 @@ impl Runtime {
         });
 
         let port = free_port().await?;
-        let child = tokio::process::Command::new(&binary)
+        let child = agi_platform::command(&binary)
             .arg("-m")
             .arg(weights)
             .arg("--port")

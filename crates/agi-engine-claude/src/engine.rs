@@ -1106,7 +1106,7 @@ impl Engine for ClaudeEngine {
         // process group is the unit that actually stops the work.
         #[cfg(unix)]
         if let Some(pid) = child.id() {
-            let _ = std::process::Command::new("kill")
+            let _ = agi_platform::std_command("kill")
                 .args(["-TERM", &format!("-{pid}")])
                 .status();
         }
@@ -1116,7 +1116,7 @@ impl Engine for ClaudeEngine {
         // which is the same intent as the group kill above.
         #[cfg(windows)]
         if let Some(pid) = child.id() {
-            let _ = std::process::Command::new("taskkill")
+            let _ = agi_platform::std_command("taskkill")
                 .args(["/T", "/F", "/PID", &pid.to_string()])
                 .status();
         }

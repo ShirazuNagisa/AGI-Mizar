@@ -38,8 +38,9 @@ const STEP_TITLES = [
   '完成',
 ] as const
 
-/** The phone app's current distribution channel; the guide links to it. */
+/** The phone app's current distribution channels; the guide links to both. */
 const MOBILE_APP_TESTFLIGHT = 'https://testflight.apple.com/join/MyaqdT1z'
+const MOBILE_APP_ANDROID = 'https://github.com/ShirazuNagisa/DSH-Mizar-Android/releases'
 
 const WELCOME = 0
 const LOGIN = 1
@@ -569,26 +570,46 @@ function LoginStep({
       )}
 
       <div className="mt-5 mz-border px-4 py-3">
-        <div className="flex items-start justify-between gap-4">
-          <div className="min-w-0">
-            <div className="text-[12px] text-fg">下载手机端 DSH Mizar 配合使用</div>
-            <p className="mt-0.5 text-[12px] leading-5 text-muted">
-              手机与这台电脑登录同一个账户后，就能查看并操控这里的会话；当前通过 TestFlight 分发。
-            </p>
-            <p className="mt-1 selectable break-all font-mono text-[11px] leading-4 text-muted">
-              {MOBILE_APP_TESTFLIGHT}
-            </p>
+        <div className="text-[12px] text-fg">下载手机端 DSH Mizar 配合使用</div>
+        <p className="mt-0.5 text-[12px] leading-5 text-muted">
+          手机与这台电脑登录同一个账户后，就能查看并操控这里的会话。iOS 通过 TestFlight
+          分发，Android 直接安装 APK。
+        </p>
+        <div className="mt-3 flex flex-col gap-3">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <div className="text-[12px] text-fg">iPhone / iPad</div>
+              <p className="mt-0.5 selectable break-all font-mono text-[11px] leading-4 text-muted">
+                {MOBILE_APP_TESTFLIGHT}
+              </p>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              className="shrink-0"
+              onClick={() =>
+                void kernel.send({ op: 'open_external', url: MOBILE_APP_TESTFLIGHT })
+              }
+            >
+              打开 TestFlight 链接 ↗
+            </Button>
           </div>
-          <Button
-            size="sm"
-            variant="outline"
-            className="shrink-0"
-            onClick={() =>
-              void kernel.send({ op: 'open_external', url: MOBILE_APP_TESTFLIGHT })
-            }
-          >
-            打开 TestFlight 链接 ↗
-          </Button>
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <div className="text-[12px] text-fg">Android</div>
+              <p className="mt-0.5 selectable break-all font-mono text-[11px] leading-4 text-muted">
+                {MOBILE_APP_ANDROID}
+              </p>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              className="shrink-0"
+              onClick={() => void kernel.send({ op: 'open_external', url: MOBILE_APP_ANDROID })}
+            >
+              打开下载页 ↗
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -1043,7 +1064,8 @@ function PreferenceStep({
     <section>
       <h2 className="text-[24px] leading-8">这台电脑怎么启动</h2>
       <p className="mt-1.5 text-[12px] leading-5 text-muted">
-        三项现在都是关的，随时可以在「设置 → 启动与窗口」里改。改动立即生效。
+        默认只显示{platform === 'macos' ? '程序坞' : '任务栏'}图标，另外两项是关的；
+        随时可以在「设置 → 启动与窗口」里改，改动立即生效。
       </p>
       <div className="mt-4">
         <ShellSettingsList shell={shell} platform={platform} />

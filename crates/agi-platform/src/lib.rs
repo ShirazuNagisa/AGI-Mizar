@@ -84,7 +84,7 @@ pub fn host_name() -> String {
             return name;
         }
     }
-    let mut command = std::process::Command::new("hostname");
+    let mut command = std_command("hostname");
     if let Ok(output) = command.output() {
         if let Ok(text) = String::from_utf8(output.stdout) {
             let text = text.trim().to_string();
@@ -257,6 +257,34 @@ fn pathext() -> Vec<String> {
     extensions
 }
 
+/// The flag that keeps a console child from opening its own window.
+///
+/// The app is a Windows-subsystem binary: it has no console of its own, so every
+/// console child it starts gets a brand new console window. That is a black
+/// rectangle flashing over whatever the person is doing — once per prompt for
+/// `codex`, once for `claude`, once for the judge's `llama-server`, and once for
+/// the remote-agent installer during onboarding. `CREATE_NO_WINDOW` is the
+/// documented way to say "run it, but do not give it a window"; macOS never
+/// needed it because a child without a tty simply has no window.
+#[cfg(windows)]
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// A `std::process::Command` that cannot open a console window on Windows.
+///
+/// Use this for the short-lived helpers whose output is captured (`hostname`,
+/// `tasklist`, `taskkill`, `agi-remote`): they draw nothing, and a window for
+/// them is pure noise.
+pub fn std_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    #[allow(unused_mut)]
+    let mut command = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 /// Build a command for an executable found by [`which`].
 ///
 /// A `.cmd`/`.bat` is not a Win32 executable: `CreateProcess` refuses it with
@@ -264,6 +292,9 @@ fn pathext() -> Vec<String> {
 /// arguments (all short tokens; prompts travel on stdin) to the returned
 /// command, which is why this returns a preconfigured [`Command`] rather than a
 /// boolean.
+///
+/// The command is also created without a console window on Windows: the engines
+/// are console programs, and their output already travels over pipes.
 pub fn command(binary: &Path) -> tokio::process::Command {
     #[cfg(windows)]
     {
@@ -272,19 +303,23 @@ pub fn command(binary: &Path) -> tokio::process::Command {
             .and_then(|extension| extension.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        if extension == "cmd" || extension == "bat" {
+        let mut command = if extension == "cmd" || extension == "bat" {
             let mut command = tokio::process::Command::new("cmd");
             command.arg("/C").arg(binary);
-            return command;
-        }
-        if extension == "ps1" {
+            command
+        } else if extension == "ps1" {
             let mut command = tokio::process::Command::new("powershell");
             command
                 .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
                 .arg(binary);
-            return command;
-        }
-        tokio::process::Command::new(binary)
+            command
+        } else {
+            tokio::process::Command::new(binary)
+        };
+        // `creation_flags` is inherent on tokio's `Command` on Windows, so no
+        // `std::os::windows::process::CommandExt` import is needed here.
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
     }
     #[cfg(not(windows))]
     {
@@ -469,5 +504,18 @@ mod tests {
         let found = path.join("npx-probe.cmd");
         // Exercise the same resolver the public function uses for one directory.
         assert_eq!(resolve_in(&path, "npx-probe"), Some(found));
+    }
+
+    /// The hidden helper still runs and still reports what it printed: the flag
+    /// removes the console window, not the pipes.
+    #[cfg(windows)]
+    #[test]
+    fn a_std_command_still_reports_the_output_it_captured() {
+        let output = std_command("cmd")
+            .args(["/C", "echo", "hidden"])
+            .output()
+            .expect("cmd runs");
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hidden");
     }
 }

@@ -11,6 +11,7 @@ import { useEffect, useState } from 'react'
 import type { Kernel, RemoteHealthReport, RemotePrefs } from '../api'
 import { Spinner } from '../icons'
 import { cn, failureMessage } from '../lib/utils'
+import { desktopPlatform } from '../platform'
 import { exportText, shellAvailable } from '../shell'
 import { Button } from './ui/button'
 import { PanelGroup } from './ui/panel'
@@ -202,7 +203,9 @@ export function RemoteAgentSettings({ kernel }: { kernel: Kernel }) {
                 value={workspaces}
                 spellCheck={false}
                 onChange={(event) => setWorkspaces(event.target.value)}
-                placeholder="/Users/you/project"
+                placeholder={
+                  desktopPlatform() === 'macos' ? '/Users/you/project' : 'C:\\Users\\you\\project'
+                }
               />
               <span className="text-[11px] text-muted">
                 一行一个绝对路径。远程 peer 只能在这些目录里创建会话。
