@@ -390,6 +390,44 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
         // room is, so it survives a restart the way the room does. Kept before
         // the client takes ownership of the token.
         let net_token = token.clone();
+        // The account instance (:8443) answers a phone's desktop list from its
+        // own presence, and a desktop on the unified 443 origin is invisible
+        // there -- iOS showed this Mac as offline while the tunnel was plainly
+        // up. Keep a second tunnel on that instance for presence (the same
+        // room, the same store), so /desktops and /connect find this computer
+        // on either relay. Created only while signed in: that instance refuses
+        // anonymous tunnels.
+        let legacy_url = (url.trim_end_matches('/') == "https://dshmizar-1.shirazu-nagisa.com")
+            .then_some("https://dshmizar-1.shirazu-nagisa.com:8443");
+        let legacy_token = token.clone();
+        let legacy_roster = Arc::clone(&roster_for_relay);
+        let legacy_core = Arc::clone(&core);
+        let legacy_port = mizar.port();
+        let build_legacy = move || -> Option<Arc<RelayClient>> {
+            let base = legacy_url?;
+            let client = RelayClient::new(base, legacy_token.clone(), legacy_port);
+            client.attach_store(Arc::clone(&legacy_roster));
+            let core_for_account = Arc::clone(&legacy_core);
+            client.set_account_source(Arc::new(move || core_for_account.relay_account()));
+            let core_for_policy = Arc::clone(&legacy_core);
+            client.set_peer_policy(Arc::new(move || {
+                let prefs = core_for_policy.remote_prefs();
+                prefs.enabled && prefs.allow_wan
+            }));
+            Some(client)
+        };
+        let legacy_slot: Arc<std::sync::Mutex<Option<Arc<RelayClient>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        if core.relay_account().is_some() {
+            if let Some(client) = build_legacy() {
+                let running = Arc::clone(&client);
+                *legacy_slot
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(client);
+                tokio::spawn(async move { running.run().await });
+            }
+        }
+        let legacy_for_changes = Arc::clone(&legacy_slot);
         let relay = RelayClient::new(url, token, mizar.port());
         relay.attach_store(Arc::clone(&roster_for_relay));
         let core_for_relay = Arc::clone(&core);
@@ -427,6 +465,28 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
                     }
                 }
                 relay_for_changes.recycle();
+
+                // The :8443 presence tunnel follows the session the same way:
+                // present while signed in, gone on sign-out (that relay would
+                // otherwise refuse every redial).
+                let mut slot = legacy_for_changes
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if event.signed_in {
+                    match slot.as_ref() {
+                        Some(client) => client.recycle(),
+                        None => {
+                            if let Some(client) = build_legacy() {
+                                let running = Arc::clone(&client);
+                                *slot = Some(client);
+                                tokio::spawn(async move { running.run().await });
+                            }
+                        }
+                    }
+                } else if let Some(client) = slot.take() {
+                    client.recycle();
+                    client.stop();
+                }
             }
         });
         tokio::spawn(async move { relay.run().await });
