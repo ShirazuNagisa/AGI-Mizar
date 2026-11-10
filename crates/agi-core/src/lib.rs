@@ -1823,6 +1823,16 @@ impl Core {
             for child in children {
                 facts.subagents.push(format!("本机子代理 {}", child.key.id));
             }
+
+            // A background job is not a session either. DSH announces the
+            // start in the tool result and the settlement as a notice, both in
+            // the same record stream; the pair is enough to know it is still
+            // running.
+            if let Some(bucket) = store.records.get(session) {
+                for job in active_jobs(bucket.iter()) {
+                    facts.jobs.push(format!("后台任务 {job}"));
+                }
+            }
         }
 
         for id in delegated_ids(records) {
@@ -1835,10 +1845,6 @@ impl Core {
                     .push(format!("远程子代理 {}（{id}）", delegation.peer_name));
             }
         }
-
-        // Background jobs are not sessions, and DSH announces only their
-        // settlement, so there is no per-turn "still running" fact to read yet.
-        // The field stays here for the engine that can supply one.
     }
 
     fn store_write(&self) -> std::sync::RwLockWriteGuard<'_, Store> {
@@ -3680,6 +3686,37 @@ mod tests {
         assert_eq!(facts.subagents, vec!["本机子代理 child"]);
         assert_eq!(agi_layout::gate(&facts), Some(agi_layout::State::Waiting));
     }
+
+    #[test]
+    fn a_background_job_keeps_the_turn_open_until_its_notice() {
+        let core = Core::new(Vec::new());
+        let key = SessionKey::new(EngineId::Dsh, "parent");
+        {
+            let mut store = core.store_write();
+            store.records.insert(
+                key.clone(),
+                VecDeque::from(vec![tool_result(1, 1, "started background job bash-300")]),
+            );
+        }
+
+        let facts = core.facts_for(&key, 1, &[]);
+        assert_eq!(facts.jobs, vec!["后台任务 bash-300"]);
+        assert_eq!(agi_layout::gate(&facts), Some(agi_layout::State::Waiting));
+
+        {
+            let mut store = core.store_write();
+            store.records.get_mut(&key).unwrap().push_back(Record {
+                text: Some(
+                    "background job bash-300 (bash: sleep 1) finished [status: completed, exit code: 0]"
+                        .to_string(),
+                ),
+                ..record(2, 1, RecordKind::Notice, None)
+            });
+        }
+
+        let facts = core.facts_for(&key, 1, &[]);
+        assert!(facts.jobs.is_empty(), "{:?}", facts.jobs);
+    }
 }
 
 // ---------------------------------------------------------------- layout glue
@@ -3789,6 +3826,51 @@ fn looks_failed(output: &str) -> bool {
         .iter()
         .any(|p| head.starts_with(p))
         || head.contains("exit code 1")
+}
+
+/// The background jobs a session started and has not seen finish.
+///
+/// DSH writes `started background job <id>` in the tool result and later injects
+/// `background job <id> (…) finished [status: …]` as a notice. Both are ordinary
+/// records, so the open set is "starts minus finishes" over the session's log.
+/// The log is bounded, so a start that fell off the front is a false negative;
+/// it can never invent a job.
+fn active_jobs<'a>(records: impl IntoIterator<Item = &'a Record>) -> Vec<String> {
+    let mut active = std::collections::BTreeSet::new();
+    for record in records {
+        let Some(text) = record
+            .text
+            .as_deref()
+            .or_else(|| record.tool.as_ref().and_then(|tool| tool.output.as_deref()))
+        else {
+            continue;
+        };
+        for line in text.lines() {
+            let line = line.trim_start();
+            if let Some(rest) = line.strip_prefix("started background job ") {
+                if let Some(id) = job_id(rest) {
+                    active.insert(id);
+                }
+            } else if let Some(rest) = line.strip_prefix("background job ") {
+                if let Some(id) = job_id(rest) {
+                    if line.contains(") finished") {
+                        active.remove(&id);
+                    }
+                }
+            }
+        }
+    }
+    active.into_iter().collect()
+}
+
+/// The id at the front of a job line, stopping at the first separator.
+fn job_id(rest: &str) -> Option<String> {
+    let id: String = rest
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
+        .collect();
+    (!id.is_empty()).then_some(id)
 }
 
 /// The delegation id a turn's tool result names.
