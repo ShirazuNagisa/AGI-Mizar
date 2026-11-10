@@ -1807,6 +1807,9 @@ impl Core {
     /// - A remote delegation is a tool call, not a session. The sidecar prints
     ///   `AGI_MIZAR_DELEGATION <id>` in the result, and the record is still
     ///   `Running` until it settles.
+    /// - A background job started in this turn writes its start in the tool
+    ///   result and its settlement as a notice; the pair says whether it is
+    ///   still running.
     fn add_waiting(&self, session: &SessionKey, records: &[Record], facts: &mut agi_layout::Facts) {
         {
             let store = self.store_read();
