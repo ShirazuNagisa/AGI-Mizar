@@ -516,7 +516,10 @@ pub const PAGE_BYTES_MAX: usize = 700 * 1024;
 ///   - max_bytes: the budget for their serialized forms.
 /// - Returns: the kept envelopes and how many were dropped from the front.
 pub fn trim_page_bytes(records: Vec<Value>, max_bytes: usize) -> (Vec<Value>, usize) {
-    let sizes: Vec<usize> = records.iter().map(|value| value.to_string().len()).collect();
+    let sizes: Vec<usize> = records
+        .iter()
+        .map(|value| value.to_string().len())
+        .collect();
     let mut total: usize = sizes.iter().sum();
     let mut dropped = 0;
     while total > max_bytes && dropped + 1 < records.len() {
@@ -664,7 +667,11 @@ mod tests {
         let (kept, dropped) = trim_page_bytes(page.clone(), each * 2);
         assert_eq!(dropped, 2, "two records had to go");
         assert_eq!(kept.len(), 2);
-        assert_eq!(envelope_seq(&kept[0]), Some(2), "the cursor names what shipped");
+        assert_eq!(
+            envelope_seq(&kept[0]),
+            Some(2),
+            "the cursor names what shipped"
+        );
         assert_eq!(envelope_seq(&kept[1]), Some(3));
 
         // One record is always kept: an answer larger than the cap cannot be

@@ -408,10 +408,7 @@ fn profile_dir() -> Result<PathBuf, String> {
         return if dir.is_dir() {
             Ok(dir)
         } else {
-            Err(format!(
-                "DSH_PROFILE 指向的配置档 {} 不存在",
-                dir.display()
-            ))
+            Err(format!("DSH_PROFILE 指向的配置档 {} 不存在", dir.display()))
         };
     }
     let has_patch = |dir: &Path| dir.join("cordis.patch.yml").is_file();

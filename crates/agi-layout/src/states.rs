@@ -427,7 +427,10 @@ mod tests {
         let frames = m.on_text(&long);
         // The first frame opens the interval and carries no text; the rest are
         // the pieces.
-        let pieces: Vec<&StateFrame> = frames.iter().filter(|frame| !frame.text.is_empty()).collect();
+        let pieces: Vec<&StateFrame> = frames
+            .iter()
+            .filter(|frame| !frame.text.is_empty())
+            .collect();
         assert_eq!(pieces.len(), 2, "one frame cannot carry 90 KB");
         let mut offset = 0u32;
         for frame in &pieces {
@@ -441,7 +444,10 @@ mod tests {
         // A split must land on a character boundary: the pieces are valid &str
         // by construction, and joining them is the original text.
         assert_eq!(
-            pieces.iter().map(|frame| frame.text.as_str()).collect::<String>(),
+            pieces
+                .iter()
+                .map(|frame| frame.text.as_str())
+                .collect::<String>(),
             long
         );
     }

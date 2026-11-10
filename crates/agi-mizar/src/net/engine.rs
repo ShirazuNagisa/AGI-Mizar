@@ -707,11 +707,10 @@ mod tests {
         while messages.is_empty() {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             assert!(!remaining.is_zero(), "no computer-to-phone message arrived");
-            let (length, _) =
-                tokio::time::timeout(remaining, dialer.socket.recv_from(&mut buffer))
-                    .await
-                    .expect("a datagram comes back")
-                    .expect("a datagram");
+            let (length, _) = tokio::time::timeout(remaining, dialer.socket.recv_from(&mut buffer))
+                .await
+                .expect("a datagram comes back")
+                .expect("a datagram");
             let packet = Packet::decode(&buffer[..length]).expect("a packet");
             let events = dialer
                 .session

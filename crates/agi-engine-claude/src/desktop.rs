@@ -243,7 +243,9 @@ mod tests {
             "the 3p profile is scanned too: {dirs:?}"
         );
         assert!(
-            !dirs.iter().any(|dir| dir.to_string_lossy().contains("Application Support")),
+            !dirs
+                .iter()
+                .any(|dir| dir.to_string_lossy().contains("Application Support")),
             "a macOS path can never exist on Windows: {dirs:?}"
         );
     }

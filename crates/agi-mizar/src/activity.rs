@@ -367,7 +367,9 @@ mod tests {
         assert_eq!(card.rows[0].title, "Name the island row");
         assert_eq!(card.rows[0].running_since, 1_000);
         // A repeat of the same title is not a push.
-        assert!(tracker.running(&session("a", Some("Name the island row")), 3_000).is_none());
+        assert!(tracker
+            .running(&session("a", Some("Name the island row")), 3_000)
+            .is_none());
     }
 
     #[test]

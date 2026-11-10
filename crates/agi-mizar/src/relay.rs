@@ -351,11 +351,8 @@ impl RelayClient {
                 // A relay that stops reading must not hold every phone request
                 // behind a full TCP window forever. The reader below notices a
                 // closed socket; a timed-out writer has to close it too.
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(15),
-                    sink.send(message),
-                )
-                .await
+                match tokio::time::timeout(std::time::Duration::from_secs(15), sink.send(message))
+                    .await
                 {
                     Ok(Ok(())) => {}
                     _ => break,
@@ -526,10 +523,13 @@ impl RelayClient {
             let out = out.clone();
             tokio::spawn(async move {
                 let _ = out
-                    .send(json!({
-                        "t": "error", "id": id,
-                        "message": "this computer does not accept remote peers"
-                    }).into())
+                    .send(
+                        json!({
+                            "t": "error", "id": id,
+                            "message": "this computer does not accept remote peers"
+                        })
+                        .into(),
+                    )
                     .await;
             });
             return;
@@ -562,7 +562,12 @@ impl RelayClient {
     }
 
     /// Start proxying one phone WebSocket.
-    fn open_stream(&self, frame: Value, out: mpsc::Sender<Outgoing>, binary_frames: Arc<AtomicBool>) {
+    fn open_stream(
+        &self,
+        frame: Value,
+        out: mpsc::Sender<Outgoing>,
+        binary_frames: Arc<AtomicBool>,
+    ) {
         let Some(id) = frame.get("id").and_then(Value::as_str).map(str::to_string) else {
             return;
         };
@@ -579,37 +584,40 @@ impl RelayClient {
 
         tokio::spawn(async move {
             let url = format!("ws://127.0.0.1:{port}{path}");
-            let socket = match tokio_tungstenite::connect_async(url).await {
-                Ok((socket, _)) => socket,
-                Err(error) => {
-                    // The map entry was inserted before this task started; with
-                    // no local socket behind it nothing would ever remove it
-                    // until the whole tunnel reconnected.
-                    streams
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .remove(&id);
-                    // Not `ws-close`: the relay has not heard `ws-open-ok` yet,
-                    // so a close lands on a stream with no phone attached, and
-                    // the relay drops its own deadline instead of failing the
-                    // upgrade — the phone then waits out its own timeout with a
-                    // slot held. `error` is the frame that ends it now.
-                    let _ = out
+            let socket =
+                match tokio_tungstenite::connect_async(url).await {
+                    Ok((socket, _)) => socket,
+                    Err(error) => {
+                        // The map entry was inserted before this task started; with
+                        // no local socket behind it nothing would ever remove it
+                        // until the whole tunnel reconnected.
+                        streams
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .remove(&id);
+                        // Not `ws-close`: the relay has not heard `ws-open-ok` yet,
+                        // so a close lands on a stream with no phone attached, and
+                        // the relay drops its own deadline instead of failing the
+                        // upgrade — the phone then waits out its own timeout with a
+                        // slot held. `error` is the frame that ends it now.
+                        let _ = out
                         .send(json!({
                             "t": "error", "id": id,
                             "message": format!("the local listener refused the stream: {error}")
                         }).into())
                         .await;
-                    return;
-                }
-            };
+                        return;
+                    }
+                };
 
             let (mut sink, mut stream) = socket.split();
 
             // The relay holds the phone until the computer says the stream is
             // up, and gives up on a timer if it never hears: `ws-open-ok` is not
             // optional bookkeeping.
-            let _ = out.send(json!({ "t": "ws-open-ok", "id": id }).into()).await;
+            let _ = out
+                .send(json!({ "t": "ws-open-ok", "id": id }).into())
+                .await;
 
             // Local → relay.
             let relay_out = out.clone();
@@ -633,28 +641,30 @@ impl RelayClient {
                                 // Base64 even for text: the tunnel is JSON, and
                                 // the relay decodes every `ws-msg` the same way.
                                 let _ = relay_out
-                                    .send(json!({
-                                        "t": "ws-msg", "id": local_id,
-                                        "data": base64(text.as_bytes()), "binary": false
-                                    }).into())
+                                    .send(
+                                        json!({
+                                            "t": "ws-msg", "id": local_id,
+                                            "data": base64(text.as_bytes()), "binary": false
+                                        })
+                                        .into(),
+                                    )
                                     .await;
                             }
                         }
                         Message::Binary(bytes) => {
                             if binary_frames.load(Ordering::Relaxed) {
                                 let _ = relay_out
-                                    .send(Outgoing::Bytes(encode_ws_msg(
-                                        &local_id,
-                                        true,
-                                        &bytes,
-                                    )))
+                                    .send(Outgoing::Bytes(encode_ws_msg(&local_id, true, &bytes)))
                                     .await;
                             } else {
                                 let _ = relay_out
-                                    .send(json!({
-                                        "t": "ws-msg", "id": local_id,
-                                        "data": base64(&bytes), "binary": true
-                                    }).into())
+                                    .send(
+                                        json!({
+                                            "t": "ws-msg", "id": local_id,
+                                            "data": base64(&bytes), "binary": true
+                                        })
+                                        .into(),
+                                    )
                                     .await;
                             }
                         }
@@ -725,9 +735,7 @@ impl RelayClient {
         // phone waiting out its full timeout (or an upload discovering a gap
         // chunks later), so end the stream instead of pretending it arrived.
         self.streams().remove(id);
-        let _ = out
-            .send(json!({ "t": "ws-close", "id": id }).into())
-            .await;
+        let _ = out.send(json!({ "t": "ws-close", "id": id }).into()).await;
     }
 
     async fn forward_stream_message(&self, frame: &Value, out: &mpsc::Sender<Outgoing>) {

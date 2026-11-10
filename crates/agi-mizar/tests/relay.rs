@@ -336,7 +336,11 @@ async fn binary_ws_msg_frames_when_the_relay_advertises_them() {
         let _ = done_tx.send(());
     });
 
-    let client = RelayClient::new(format!("ws://127.0.0.1:{port}"), "tunnel-secret", local_port);
+    let client = RelayClient::new(
+        format!("ws://127.0.0.1:{port}"),
+        "tunnel-secret",
+        local_port,
+    );
     tokio::spawn({
         let client = Arc::clone(&client);
         async move { client.run().await }
