@@ -596,3 +596,18 @@ macOS 侧又推进 29 个提交（remote_health 依赖检查+日志导出、remo
 - 运行时矩阵 27 PASS / 0 FAIL；新代码在 Windows 上的直接证据是进程同时保有
   `…:443` 与 `…:8443` 两条已建立连接（`Get-NetTCPConnection -OwningProcess <pid>`）；
 - 安装版以 WMI 方式后台启动（pid 29800），窗口 1034×802、`/healthz` 200。
+### 2026-11-10 22:15 · 远程 Agent 新功能验证（allow-all workspaces / 委派模型 / SKILL 重写）
+
+上游 `7933c687`（`81e61c73` allow-all workspaces + 委派模型/思考强度 + 一轮式 intake；`51be8bc2` UI；
+`f644b86e` 文档；`7933c687` rustfmt）后的 Windows 复验：
+
+- 门禁 `cargo test --workspace --no-fail-fast` **490/0**、clippy **0**；Windows 重建 `ui/dist` 与仓库
+  逐字节一致；NSIS SHA256 `796d151c…`，安装版 exe `440CBD4E…`。
+- 实测（安装版）：`allowAllWorkspaces` 字段/开关/条件渲染/按钮文案/持久化全对；`remote_delegate` 的
+  `provider`/`model`/`reasoning_effort` 能被解析（假 peer → `REMOTE_PEER_UNKNOWN`）；把 SKILL.md 写坏后
+  修复能恢复成与仓库逐字节相同的 7380 B 且 `changed=[]`（幂等）；回归矩阵 27/27。
+- **重要**：第一次覆盖安装时 `bin\agi-remote.exe` 没被更新——DSH 把安装版 sidecar 当 MCP 子进程常驻，
+  文件被占用，NSIS 静默跳过（安装器仍 exit 0），于是「检查依赖完整性」用旧 sidecar 的旧 SKILL 写盘，
+  skill 一直 `outdated`。更新前先 `Stop-Process -Name agi-remote` 再安装（DSH 约 1 s 后重启它，要抢窗口），
+  装完确认 `bin\agi-remote.exe` 哈希 = `target/release/agi-remote.exe`，再点修复。
+  详见工作区词条 `desktop.windows-sidecar-locked-update`。
