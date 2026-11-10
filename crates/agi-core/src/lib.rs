@@ -143,6 +143,9 @@ pub struct RemotePrefs {
     /// Whether a peer through the relay may connect (paid).
     #[serde(default)]
     pub allow_wan: bool,
+    /// Whether every DSH workspace is open to a peer, ignoring `workspaces`.
+    #[serde(default)]
+    pub allow_all_workspaces: bool,
     /// Workspace paths a peer may start a session in.
     #[serde(default)]
     pub workspaces: Vec<String>,
@@ -1190,12 +1193,17 @@ impl Core {
     /// Whether the remote policy would accept this exact workspace path.
     pub fn remote_workspace_allowed(&self, path: &str) -> bool {
         let prefs = self.remote_prefs();
+        if !prefs.enabled {
+            return false;
+        }
+        if prefs.allow_all_workspaces {
+            return true;
+        }
         let requested = normalize_workspace(path);
-        prefs.enabled
-            && prefs
-                .workspaces
-                .iter()
-                .any(|candidate| normalize_workspace(candidate) == requested)
+        prefs
+            .workspaces
+            .iter()
+            .any(|candidate| normalize_workspace(candidate) == requested)
     }
 
     /// Write the preference file the way the endpoint file is written: private,
@@ -2083,12 +2091,16 @@ impl Core {
                     {
                         let workspaces = client.workspaces().await;
                         let permissions = client.permissions().await;
-                        if let (Ok(workspaces), Ok(permissions)) = (workspaces, permissions) {
+                        let models = client.models().await;
+                        if let (Ok(workspaces), Ok(permissions), Ok(models)) =
+                            (workspaces, permissions, models)
+                        {
                             return CommandResponse::ok(json!({
                                 "peer": peer,
                                 "route": "lan",
                                 "workspaces": Self::remote_workspace_rows(&workspaces),
                                 "permissions": permissions,
+                                "models": models,
                             }));
                         }
                     }
@@ -2146,11 +2158,18 @@ impl Core {
                 return CommandResponse::error("REMOTE_OPTIONS_FAILED", error.to_string())
             }
         };
+        let models = match client.models().await {
+            Ok(models) => models,
+            Err(error) => {
+                return CommandResponse::error("REMOTE_OPTIONS_FAILED", error.to_string())
+            }
+        };
         CommandResponse::ok(json!({
             "peer": peer,
             "route": "wan",
             "workspaces": Self::remote_workspace_rows(&workspaces),
             "permissions": permissions,
+            "models": models,
         }))
     }
 
@@ -2263,6 +2282,7 @@ impl Core {
                 enabled,
                 allow_lan,
                 allow_wan,
+                allow_all_workspaces,
                 workspaces,
                 blocked,
             } => {
@@ -2270,6 +2290,7 @@ impl Core {
                     enabled,
                     allow_lan,
                     allow_wan,
+                    allow_all_workspaces,
                     workspaces,
                     blocked,
                 });
@@ -2341,6 +2362,9 @@ impl Core {
                 peer,
                 cwd,
                 permission,
+                provider,
+                model,
+                reasoning_effort,
                 prompt,
             } => {
                 // A beacon seen recently is the free LAN route; use it before
@@ -2370,12 +2394,18 @@ impl Core {
                                     device_id: lan.device_id,
                                     name: lan.name,
                                 };
+                                let launch = remote::RemoteLaunch {
+                                    cwd: cwd.clone(),
+                                    permission: permission.clone(),
+                                    provider: provider.clone(),
+                                    model: model.clone(),
+                                    reasoning_effort: reasoning_effort.clone(),
+                                };
                                 if let Ok(record) = self.remote.start_lan_with_options(
                                     reference,
                                     address,
                                     credentials,
-                                    cwd.clone(),
-                                    permission.clone(),
+                                    launch,
                                     prompt.clone(),
                                 ) {
                                     return CommandResponse::ok(json!({ "delegation": record }));
@@ -2420,13 +2450,17 @@ impl Core {
                     device_id: target.device_id,
                     name: target.name,
                 };
-                match self.remote.start_with_options(
-                    reference,
-                    credentials,
+                let launch = remote::RemoteLaunch {
                     cwd,
                     permission,
-                    prompt,
-                ) {
+                    provider,
+                    model,
+                    reasoning_effort,
+                };
+                match self
+                    .remote
+                    .start_with_options(reference, credentials, launch, prompt)
+                {
                     Ok(record) => CommandResponse::ok(json!({ "delegation": record })),
                     Err(message) => CommandResponse::error("REMOTE_START_FAILED", message),
                 }
@@ -3183,11 +3217,22 @@ mod tests {
             enabled: true,
             allow_lan: true,
             allow_wan: false,
+            allow_all_workspaces: false,
             workspaces: vec!["/tmp/remote".to_string()],
             blocked: Vec::new(),
         });
         assert!(core.remote_workspace_allowed("/tmp/remote/"));
         assert!(!core.remote_workspace_allowed("/tmp/other"));
+        core.set_remote_prefs(RemotePrefs {
+            enabled: true,
+            allow_lan: true,
+            allow_wan: false,
+            allow_all_workspaces: true,
+            workspaces: Vec::new(),
+            blocked: Vec::new(),
+        });
+        assert!(core.remote_workspace_allowed("/tmp/anything"));
+        assert!(core.remote_workspace_allowed("C:\\Users\\anywhere"));
         // The same directory, spelled the way another platform would: Windows
         // separators, a trailing separator, and (on Windows) different case.
         if cfg!(windows) {

@@ -497,6 +497,9 @@ pub enum Command {
         enabled: bool,
         allow_lan: bool,
         allow_wan: bool,
+        /// When true, every DSH workspace is available; the list is ignored.
+        #[serde(default)]
+        allow_all_workspaces: bool,
         #[serde(default)]
         workspaces: Vec<String>,
         #[serde(default)]
@@ -514,6 +517,14 @@ pub enum Command {
         /// Permission preset to apply to the new remote session.
         #[serde(default)]
         permission: Option<String>,
+        /// Model route selected from `remote_options.models`.
+        #[serde(default)]
+        provider: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+        /// Reasoning level selected from that model's `efforts`.
+        #[serde(default)]
+        reasoning_effort: Option<String>,
         prompt: String,
     },
     /// Every delegation this install knows about.
@@ -819,6 +830,9 @@ mod tests {
             peer: "p".into(),
             cwd: None,
             permission: None,
+            provider: None,
+            model: None,
+            reasoning_effort: None,
             prompt: "t".into(),
         }
         .is_remote());

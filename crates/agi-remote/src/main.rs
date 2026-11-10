@@ -49,7 +49,8 @@ fn usage() {
 \n\
   agi-remote agents\n\
   agi-remote options --peer <id>\n\
-  agi-remote delegate --peer <id> [--workspace <path>] [--permission <preset>] --prompt <text>\n\
+  agi-remote delegate --peer <id> [--workspace <path>] [--permission <preset>] \\\n\
+      [--provider <id> --model <id> [--reasoning-effort <id>]] --prompt <text>\n\
   agi-remote result <delegationId>\n\
   agi-remote wait <delegationId> [--timeout-ms <ms>]\n\
   agi-remote cancel <delegationId>\n\
@@ -185,11 +186,17 @@ async fn cli_delegate(args: &[String]) -> Result<()> {
         .ok_or_else(|| anyhow!("--prompt is required"))?;
     let cwd = flag(args, "--workspace").or_else(|| flag(args, "--cwd"));
     let permission = flag(args, "--permission");
+    let provider = flag(args, "--provider");
+    let model = flag(args, "--model");
+    let reasoning_effort = flag(args, "--reasoning-effort").or_else(|| flag(args, "--effort"));
     let value = command(json!({
         "op": "remote_delegate",
         "peer": peer,
         "cwd": cwd,
         "permission": permission,
+        "provider": provider,
+        "model": model,
+        "reasoning_effort": reasoning_effort,
         "prompt": prompt,
     }))
     .await?;
@@ -371,7 +378,7 @@ fn tools() -> Value {
         },
         {
             "name": "remote_options",
-            "description": "Ask one peer which workspaces it permits and which permission presets its engine exposes. Call this after the operator chooses a peer and before remote_delegate, so the operator can choose a workspace and default permission.",
+            "description": "Ask one peer which workspaces it permits, and its permission and model catalogs. Call this for every candidate peer before the single intake question; pass the chosen provider/model/effort to remote_delegate.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -390,6 +397,9 @@ fn tools() -> Value {
                     "peer": { "type": "string", "description": "deviceId from remote_agents" },
                     "workspace": { "type": "string", "description": "one of the peer's allowed workspace paths; omit only if the peer allows its default" },
                     "permission": { "type": "string", "description": "permission preset value returned by remote_options" },
+                    "provider": { "type": "string", "description": "provider id from remote_options.models" },
+                    "model": { "type": "string", "description": "model id from remote_options.models" },
+                    "reasoningEffort": { "type": "string", "description": "one of the selected model's efforts; omit for the model default" },
                     "description": { "type": "string", "description": "a short human-readable label" },
                     "prompt": { "type": "string", "description": "self-contained goal, inputs, constraints, deliverable and acceptance checks" }
                 },
@@ -403,8 +413,7 @@ fn tools() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "delegationId": { "type": "string" },
-                    "include": { "type": "string", "enum": ["final", "messages"] }
+                    "delegationId": { "type": "string" }
                 },
                 "required": ["delegationId"],
                 "additionalProperties": false
@@ -489,11 +498,26 @@ async fn call_tool(name: &str, arguments: &Value) -> Result<String> {
                 .get("permission")
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty());
+            let provider = arguments
+                .get("provider")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty());
+            let model = arguments
+                .get("model")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty());
+            let reasoning_effort = arguments
+                .get("reasoningEffort")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty());
             let value = command(json!({
                 "op": "remote_delegate",
                 "peer": peer,
                 "cwd": cwd,
                 "permission": permission,
+                "provider": provider,
+                "model": model,
+                "reasoning_effort": reasoning_effort,
                 "prompt": prompt,
             }))
             .await?;

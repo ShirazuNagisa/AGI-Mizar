@@ -98,6 +98,20 @@ async fn fake_peer(mut socket: WebSocket) {
                     "options": [{ "value": "default", "name": "Default" }]
                 }
             }),
+            "model.catalog" => json!({
+                "v": 1, "type": "ok", "id": id,
+                "result": {
+                    "default": { "provider": "p", "model": "m", "reasoningEffort": "high" },
+                    "providers": [{ "id": "p", "name": "P", "models": [{
+                        "id": "m", "name": "M", "efforts": [{ "id": "high", "name": "High" }],
+                        "defaultEffort": "high"
+                    }] }]
+                }
+            }),
+            "session.model.set" => json!({
+                "v": 1, "type": "ok", "id": id,
+                "result": { "sessionId": "dsh:test-session" }
+            }),
             "session.permission.set" => json!({
                 "v": 1, "type": "ok", "id": id,
                 "result": { "commandResult": { "kind": "success" } }
@@ -221,11 +235,15 @@ async fn a_remote_delegation_runs_through_the_kernel_commands() {
     assert_eq!(options["workspaces"][0]["path"], "/work");
     assert!(options["workspaces"][0].get("sessionIds").is_none());
     assert_eq!(options["permissions"]["defaultPreset"], "default");
+    assert_eq!(options["models"]["providers"][0]["models"][0]["id"], "m");
 
     let started = ok(core
         .dispatch(Command::RemoteDelegate {
             peer: "peer-1".to_string(),
             permission: Some("default".to_string()),
+            provider: Some("p".to_string()),
+            model: Some("m".to_string()),
+            reasoning_effort: Some("high".to_string()),
             cwd: None,
             prompt: "say P1-OK".to_string(),
         })

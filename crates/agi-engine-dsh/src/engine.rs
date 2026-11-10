@@ -682,36 +682,44 @@ impl DshEngine {
         self.emit(EngineEvent::InteractionRequested(interaction));
     }
 
-/// The session an approval belongs to.
-///
-/// DSH's documented shape is `request.agent.id`, but the bridge has also sent
-/// the agent as a scalar and as `sessionId`/`agentId` during version skew. A
-/// missing session is why a card appeared over every conversation: the phone
-/// draws a sessionless interaction globally. Read every spelling the host has
-/// used, and leave `None` only when the request really carries no identity.
-fn approval_session(request: &Value) -> Option<SessionKey> {
-    let agent = request.get("agent");
-    let id = agent
-        .and_then(Value::as_str)
-        .or_else(|| agent.and_then(|value| value.get("id")).and_then(Value::as_str))
-        .or_else(|| agent.and_then(|value| value.get("sessionId")).and_then(Value::as_str))
-        .or_else(|| request.get("agentId").and_then(Value::as_str))
-        .or_else(|| request.get("sessionId").and_then(Value::as_str))
-        .or_else(|| {
-            request
-                .get("session")
-                .and_then(|session| session.get("id"))
-                .and_then(Value::as_str)
-        })?;
-    Some(SessionKey::new(EngineId::Dsh, id))
-}
+    /// The session an approval belongs to.
+    ///
+    /// DSH's documented shape is `request.agent.id`, but the bridge has also sent
+    /// the agent as a scalar and as `sessionId`/`agentId` during version skew. A
+    /// missing session is why a card appeared over every conversation: the phone
+    /// draws a sessionless interaction globally. Read every spelling the host has
+    /// used, and leave `None` only when the request really carries no identity.
+    fn approval_session(request: &Value) -> Option<SessionKey> {
+        let agent = request.get("agent");
+        let id = agent
+            .and_then(Value::as_str)
+            .or_else(|| {
+                agent
+                    .and_then(|value| value.get("id"))
+                    .and_then(Value::as_str)
+            })
+            .or_else(|| {
+                agent
+                    .and_then(|value| value.get("sessionId"))
+                    .and_then(Value::as_str)
+            })
+            .or_else(|| request.get("agentId").and_then(Value::as_str))
+            .or_else(|| request.get("sessionId").and_then(Value::as_str))
+            .or_else(|| {
+                request
+                    .get("session")
+                    .and_then(|session| session.get("id"))
+                    .and_then(Value::as_str)
+            })?;
+        Some(SessionKey::new(EngineId::Dsh, id))
+    }
 
-/// Read the first text field present under one of the names DSH has used.
-fn approval_text<'a>(request: &'a Value, names: &[&str]) -> Option<&'a str> {
-    names
-        .iter()
-        .find_map(|name| request.get(*name).and_then(Value::as_str))
-}
+    /// Read the first text field present under one of the names DSH has used.
+    fn approval_text<'a>(request: &'a Value, names: &[&str]) -> Option<&'a str> {
+        names
+            .iter()
+            .find_map(|name| request.get(*name).and_then(Value::as_str))
+    }
 
     fn on_question(&self, frame: QuestionFrame) {
         let questions = read_questions(&frame.request);
@@ -1735,9 +1743,6 @@ impl Engine for DshEngine {
         if session.engine != EngineId::Dsh {
             return Err(EngineError::UnknownSession(session.clone()));
         }
-        // DSH selects by provider *and* model, and its catalog is the only place
-        // that pair comes from. The shared model carries one string, so it is
-        // `provider/model`; a bare model cannot be resolved here without guessing.
         let Some((provider, name)) = model.split_once('/') else {
             return Err(EngineError::upstream("a DSH model is named provider/model"));
         };
@@ -1752,6 +1757,31 @@ impl Engine for DshEngine {
             }),
         )
         .await?;
+        Ok(())
+    }
+
+    async fn set_model_with_effort(
+        &self,
+        session: &SessionKey,
+        model: &str,
+        reasoning_effort: Option<&str>,
+    ) -> Result<(), EngineError> {
+        if session.engine != EngineId::Dsh {
+            return Err(EngineError::UnknownSession(session.clone()));
+        }
+        let Some((provider, name)) = model.split_once('/') else {
+            return Err(EngineError::upstream("a DSH model is named provider/model"));
+        };
+        let mut request = json!({
+            "sessionId": session.raw(),
+            "provider": provider,
+            "model": name,
+        });
+        if let Some(effort) = reasoning_effort {
+            request["reasoningEffort"] = json!(effort);
+        }
+        self.call("session/selectModel", json!({ "request": request }))
+            .await?;
         Ok(())
     }
 

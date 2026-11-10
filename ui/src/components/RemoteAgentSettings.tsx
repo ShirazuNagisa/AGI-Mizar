@@ -70,6 +70,7 @@ export function RemoteAgentSettings({ kernel }: { kernel: Kernel }) {
         enabled: next.enabled,
         allow_lan: next.allowLan,
         allow_wan: next.allowWan,
+        allow_all_workspaces: next.allowAllWorkspaces,
         workspaces: next.workspaces,
         blocked: next.blocked,
       })
@@ -196,6 +197,18 @@ export function RemoteAgentSettings({ kernel }: { kernel: Kernel }) {
               checked={prefs.allowWan}
               onChange={(allowWan) => void save({ ...prefs, allowWan })}
             />
+            <Row
+              label="对委派机开放所有工作区"
+              hint="打开后不再限制工作区白名单，委派机可查询本机 DSH 的全部工作区"
+              checked={prefs.allowAllWorkspaces}
+              onChange={(allowAllWorkspaces) => void save({ ...prefs, allowAllWorkspaces })}
+            />
+            {prefs.allowAllWorkspaces ? (
+              <p className="border-l-2 border-accent/50 pl-3 text-[11px] leading-5 text-muted">
+                已开放全部工作区。委派机将直接看到本机 DSH 的现有工作区，不再使用下面的白名单。
+              </p>
+            ) : (
+              <>
             <label className="flex flex-col gap-1.5">
               <span className="text-[12px] text-fg">可远程使用的工作区</span>
               <textarea
@@ -211,6 +224,8 @@ export function RemoteAgentSettings({ kernel }: { kernel: Kernel }) {
                 一行一个绝对路径。远程 peer 只能在这些目录里创建会话。
               </span>
             </label>
+              </>
+            )}
             <label className="flex flex-col gap-1.5">
               <span className="text-[12px] text-fg">拒绝的设备</span>
               <textarea
@@ -231,12 +246,12 @@ export function RemoteAgentSettings({ kernel }: { kernel: Kernel }) {
                 onClick={() =>
                   void save({
                     ...prefs,
-                    workspaces: lines(workspaces),
+                    workspaces: prefs.allowAllWorkspaces ? prefs.workspaces : lines(workspaces),
                     blocked: lines(blocked),
                   })
                 }
               >
-                保存工作区与拒绝列表
+                {prefs.allowAllWorkspaces ? '保存拒绝列表' : '保存工作区与拒绝列表'}
               </Button>
               {saved ? <span className="text-[11px] text-muted">已保存</span> : null}
             </div>

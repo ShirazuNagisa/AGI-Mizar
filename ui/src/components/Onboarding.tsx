@@ -208,6 +208,7 @@ export function Onboarding({
           enabled: remote.enabled,
           allow_lan: remote.allowLan,
           allow_wan: remote.allowWan,
+          allow_all_workspaces: remote.allowAllWorkspaces,
           workspaces: remote.workspaces,
           blocked: remote.blocked,
         })

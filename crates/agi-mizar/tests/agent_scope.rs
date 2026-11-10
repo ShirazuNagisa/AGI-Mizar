@@ -402,7 +402,10 @@ async fn session_sync_answers_a_batch_and_names_what_it_left_out() {
         // `session.sync` deliberately carries no stats: the title and model ride
         // on `session.list`, and a stats call per session is the plugin work this
         // method exists to remove.
-        assert!(item.get("stats").is_none(), "a batch must not pay for stats: {item}");
+        assert!(
+            item.get("stats").is_none(),
+            "a batch must not pay for stats: {item}"
+        );
     }
     assert_eq!(sync["result"]["remaining"], json!([]));
 }
@@ -513,7 +516,10 @@ async fn a_phone_that_registers_live_activity_is_marked_reachable() {
         }),
     )
     .await;
-    assert_eq!(answer["type"], "ok", "registration was not accepted: {answer}");
+    assert_eq!(
+        answer["type"], "ok",
+        "registration was not accepted: {answer}"
+    );
     let views = agi_core::DeviceStatusSource::device_views(&*server);
     assert!(
         views.iter().any(|view| view.live_activity),
@@ -535,14 +541,22 @@ async fn two_phones_with_the_same_name_show_their_models() {
     // rows. The hardware is what tells them apart, and it is only worth
     // showing when the name alone cannot.
     let (server, store, _core, _fakes, _dir) = start().await;
-    let first = store.issue("iPhone", Some("account:acct:phone-1:dsh".to_string())).unwrap();
+    let first = store
+        .issue("iPhone", Some("account:acct:phone-1:dsh".to_string()))
+        .unwrap();
     store.describe(&first.device.id, "iPhone17,1").unwrap();
-    let second = store.issue("iPhone", Some("account:acct:phone-2:dsh".to_string())).unwrap();
+    let second = store
+        .issue("iPhone", Some("account:acct:phone-2:dsh".to_string()))
+        .unwrap();
     store.describe(&second.device.id, "iPhone18,1").unwrap();
 
     let views = agi_core::DeviceStatusSource::device_views(&*server);
     let names: Vec<&str> = views.iter().map(|view| view.name.as_str()).collect();
-    assert_eq!(names, vec!["iPhone (iPhone17,1)", "iPhone (iPhone18,1)"], "{views:?}");
+    assert_eq!(
+        names,
+        vec!["iPhone (iPhone17,1)", "iPhone (iPhone18,1)"],
+        "{views:?}"
+    );
 }
 
 #[tokio::test]
@@ -551,9 +565,13 @@ async fn a_generic_name_is_corrected_by_the_hardware() {
     // is what the person reads, so the model has to be able to overrule the
     // generic name -- but not a name the person chose.
     let (server, store, _core, _fakes, _dir) = start().await;
-    let ipad = store.issue("iPhone", Some("account:acct:phone-1:dsh".to_string())).unwrap();
+    let ipad = store
+        .issue("iPhone", Some("account:acct:phone-1:dsh".to_string()))
+        .unwrap();
     store.describe(&ipad.device.id, "iPad13,18").unwrap();
-    let named = store.issue("Studio iPad", Some("account:acct:phone-2:dsh".to_string())).unwrap();
+    let named = store
+        .issue("Studio iPad", Some("account:acct:phone-2:dsh".to_string()))
+        .unwrap();
     store.describe(&named.device.id, "iPhone17,1").unwrap();
 
     let views = agi_core::DeviceStatusSource::device_views(&*server);
@@ -568,7 +586,9 @@ async fn the_same_phone_paired_twice_merges_before_it_reconnects() {
     // hello; until then the local record's model is the only thing that knows
     // this is one phone, and the list must not show it twice.
     let (server, store, _core, _fakes, _dir) = start().await;
-    store.issue("iPhone", Some("iPhone17,1".to_string())).unwrap();
+    store
+        .issue("iPhone", Some("iPhone17,1".to_string()))
+        .unwrap();
     let account = store
         .issue("iPhone", Some("account:acct:phone-1:dsh".to_string()))
         .unwrap();
@@ -577,7 +597,10 @@ async fn the_same_phone_paired_twice_merges_before_it_reconnects() {
     assert_eq!(views.len(), 1, "{views:?}");
     assert_eq!(views[0].name, "iPhone");
     assert_eq!(views[0].model.as_deref(), Some("iPhone17,1"));
-    assert_eq!(views[0].id, account.device.id, "the account record stays canonical");
+    assert_eq!(
+        views[0].id, account.device.id,
+        "the account record stays canonical"
+    );
 }
 
 #[tokio::test]
@@ -594,7 +617,9 @@ async fn the_device_list_shows_phones_not_this_computer() {
         .issue(&host_name, Some("account:acct:self:dsh".to_string()))
         .unwrap();
     // The same iPhone, first paired locally, then through its account.
-    store.issue("iPhone", Some("iPhone17,1".to_string())).unwrap();
+    store
+        .issue("iPhone", Some("iPhone17,1".to_string()))
+        .unwrap();
     let linked = store
         .issue("iPhone", Some("account:acct:phone-1:dsh".to_string()))
         .unwrap();
@@ -632,7 +657,9 @@ async fn a_renamed_computer_is_still_not_a_phone() {
             Some("account:acct:self:dsh".to_string()),
         )
         .unwrap();
-    store.issue("iPhone", Some("iPhone17,1".to_string())).unwrap();
+    store
+        .issue("iPhone", Some("iPhone17,1".to_string()))
+        .unwrap();
 
     let views = agi_core::DeviceStatusSource::device_views(&*server);
     let names: Vec<&str> = views.iter().map(|view| view.name.as_str()).collect();
@@ -1027,6 +1054,7 @@ async fn a_peer_only_sees_its_own_sessions_and_allowed_workspaces() {
         enabled: true,
         allow_lan: true,
         allow_wan: true,
+        allow_all_workspaces: false,
         workspaces: vec!["/tmp/dsh-project".to_string()],
         blocked: Vec::new(),
     });
@@ -1182,7 +1210,9 @@ async fn a_phone_reaches_the_host_through_the_real_relay() {
 
             let relay_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../dsh-relay");
             assert!(
-                std::path::Path::new(relay_dir).join("lib/index.js").exists(),
+                std::path::Path::new(relay_dir)
+                    .join("lib/index.js")
+                    .exists(),
                 "build the relay first: cd dsh-relay && npm run build"
             );
             relay = Some(
@@ -1221,11 +1251,7 @@ async fn a_phone_reaches_the_host_through_the_real_relay() {
     };
 
     // The desktop dials the relay; the relay tells it the room.
-    let client = agi_mizar::RelayClient::new(
-        base,
-        "e2e-tunnel-token-0123456789",
-        server.port(),
-    );
+    let client = agi_mizar::RelayClient::new(base, "e2e-tunnel-token-0123456789", server.port());
     tokio::spawn({
         let client = Arc::clone(&client);
         async move { client.run().await }
@@ -1273,7 +1299,10 @@ async fn a_phone_reaches_the_host_through_the_real_relay() {
         .await
         .unwrap();
     let answer = read_json(&mut phone).await;
-    assert_eq!(answer["type"], "ok", "session.sync failed through the relay: {answer}");
+    assert_eq!(
+        answer["type"], "ok",
+        "session.sync failed through the relay: {answer}"
+    );
     assert_eq!(
         answer["result"]["items"].as_array().map(Vec::len),
         Some(2),
@@ -1320,12 +1349,12 @@ async fn a_phone_reaches_the_host_through_the_real_relay() {
 async fn connect_to(
     url: &str,
 ) -> (
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     tokio_tungstenite::tungstenite::handshake::client::Response,
 ) {
-    connect_async(url).await.expect("the phone could not reach the relay")
+    connect_async(url)
+        .await
+        .expect("the phone could not reach the relay")
 }
 
 /// Read one JSON frame from a phone socket, with a deadline.

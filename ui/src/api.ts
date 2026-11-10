@@ -295,6 +295,7 @@ export interface RemotePrefs {
   enabled: boolean
   allowLan: boolean
   allowWan: boolean
+  allowAllWorkspaces: boolean
   workspaces: string[]
   blocked: string[]
 }
@@ -439,7 +440,7 @@ export type Command =
   | { op: 'lan_identity' }
   | { op: 'lan_certificate' }
   | { op: 'remote_target_settings' }
-  | { op: 'set_remote_target_settings'; enabled: boolean; allow_lan: boolean; allow_wan: boolean; workspaces: string[]; blocked: string[] }
+  | { op: 'set_remote_target_settings'; enabled: boolean; allow_lan: boolean; allow_wan: boolean; allow_all_workspaces: boolean; workspaces: string[]; blocked: string[] }
   | { op: 'remote_audit' }
   | { op: 'remote_health'; repair?: boolean }
   | { op: 'remote_logs' }

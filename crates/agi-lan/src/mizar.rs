@@ -134,6 +134,30 @@ impl LanMizarClient {
         self.request("workspace.list", json!({})).await
     }
 
+    /// The models and reasoning levels the target engine exposes.
+    pub async fn models(&self) -> Result<Value, LanError> {
+        self.request("model.catalog", json!({})).await
+    }
+
+    /// Select a target session's model and reasoning level.
+    pub async fn set_model(
+        &self,
+        session: &str,
+        provider: &str,
+        model: &str,
+        reasoning_effort: Option<&str>,
+    ) -> Result<Value, LanError> {
+        let mut payload = json!({
+            "sessionId": session,
+            "provider": provider,
+            "model": model,
+        });
+        if let Some(effort) = reasoning_effort {
+            payload["reasoningEffort"] = json!(effort);
+        }
+        self.request("session.model.set", payload).await
+    }
+
     /// The permission presets the target engine exposes.
     pub async fn permissions(&self) -> Result<Value, LanError> {
         self.request("permissions.catalog", json!({})).await

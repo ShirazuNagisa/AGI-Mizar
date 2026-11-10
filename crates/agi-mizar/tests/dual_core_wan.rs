@@ -231,6 +231,7 @@ async fn a_remote_delegate_uses_the_wan_route_end_to_end() {
         enabled: true,
         allow_lan: false,
         allow_wan: true,
+        allow_all_workspaces: false,
         workspaces: vec!["/tmp/dsh-project".to_string()],
         blocked: Vec::new(),
     });
@@ -267,6 +268,7 @@ async fn a_remote_delegate_uses_the_wan_route_end_to_end() {
         enabled: true,
         allow_lan: true,
         allow_wan: true,
+        allow_all_workspaces: false,
         workspaces: vec!["/tmp/dsh-project".to_string()],
         blocked: Vec::new(),
     });
@@ -306,6 +308,9 @@ async fn a_remote_delegate_uses_the_wan_route_end_to_end() {
         .dispatch(Command::RemoteDelegate {
             peer: "b-device".to_string(),
             permission: None,
+            provider: None,
+            model: None,
+            reasoning_effort: None,
             cwd: Some("/tmp/dsh-project".to_string()),
             prompt: "return WAN-DUAL".to_string(),
         })

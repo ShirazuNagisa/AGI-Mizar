@@ -176,6 +176,19 @@ pub trait Engine: Send + Sync {
     /// Choose a model.
     async fn set_model(&self, session: &SessionKey, model: &str) -> Result<(), EngineError>;
 
+    /// Choose a model and a reasoning level in one call.
+    ///
+    /// Engines that do not distinguish reasoning levels keep their old
+    /// behaviour. DSH accepts both in `session/selectModel`.
+    async fn set_model_with_effort(
+        &self,
+        session: &SessionKey,
+        model: &str,
+        _reasoning_effort: Option<&str>,
+    ) -> Result<(), EngineError> {
+        self.set_model(session, model).await
+    }
+
     /// Choose a permission preset.
     async fn set_permission(&self, session: &SessionKey, preset: &str) -> Result<(), EngineError>;
 

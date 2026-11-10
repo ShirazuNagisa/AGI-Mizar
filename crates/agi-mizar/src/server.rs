@@ -30,7 +30,9 @@ use std::time::{Duration, Instant};
 
 use agi_core::Core;
 use agi_engine::MAX_SLICE_BYTES;
-use agi_protocol::domain::{AttachmentKind, Balance, InteractionKind, RecordKind, SessionKey, Wallet};
+use agi_protocol::domain::{
+    AttachmentKind, Balance, InteractionKind, RecordKind, SessionKey, Wallet,
+};
 use agi_protocol::engine::EngineId;
 use agi_protocol::usage::UsageContext;
 use agi_protocol::SessionState;
@@ -1164,7 +1166,12 @@ impl MizarServer {
                         if compacted {
                             if let Ok(usage) = engine.usage(&key).await {
                                 if let Some(fresh) = usage.context {
-                                    if let (Some(window), Some(pressure), Some(projected), Some(percent)) = (
+                                    if let (
+                                        Some(window),
+                                        Some(pressure),
+                                        Some(projected),
+                                        Some(percent),
+                                    ) = (
                                         fresh.window,
                                         fresh.pressure_tokens,
                                         fresh.projected_tokens,
@@ -1214,7 +1221,10 @@ impl MizarServer {
                         // for a page of prompts mid-turn was the single largest
                         // host cost of a history sync -- 342 sessions meant 342
                         // extra engine reads whose answers had nowhere to hang.
-                        if records.iter().any(|record| record.kind == RecordKind::TurnEnd) {
+                        if records
+                            .iter()
+                            .any(|record| record.kind == RecordKind::TurnEnd)
+                        {
                             if let Ok(totals) = engine.turn_usage(&key).await {
                                 attach_turn_usage(&mut records_out, &totals);
                             }
@@ -1224,8 +1234,7 @@ impl MizarServer {
                         // the socket above a mebibyte, so a page that would not
                         // fit is cut at its oldest end here and `hasMore` sends
                         // the phone back for the rest.
-                        let (records_out, trimmed) =
-                            trim_page_bytes(records_out, PAGE_BYTES_MAX);
+                        let (records_out, trimmed) = trim_page_bytes(records_out, PAGE_BYTES_MAX);
                         if trimmed > 0 {
                             // The cursor now names the first record that
                             // actually shipped, not the one that was cut.
@@ -1458,14 +1467,17 @@ impl MizarServer {
                     }
                 }
                 if Self::peer_key(device).is_some() {
-                    let allowed = self.core.remote_prefs().workspaces;
-                    items.retain(|row| {
-                        row.get("path").and_then(Value::as_str).is_some_and(|path| {
-                            allowed.iter().any(|candidate| {
-                                candidate.trim_end_matches('/') == path.trim_end_matches('/')
+                    let prefs = self.core.remote_prefs();
+                    if !prefs.allow_all_workspaces {
+                        let allowed = prefs.workspaces;
+                        items.retain(|row| {
+                            row.get("path").and_then(Value::as_str).is_some_and(|path| {
+                                allowed.iter().any(|candidate| {
+                                    candidate.trim_end_matches('/') == path.trim_end_matches('/')
+                                })
                             })
-                        })
-                    });
+                        });
+                    }
                     // A peer must not learn which sessions its operator has in
                     // these folders; it only needs the paths it may use.
                     for row in &mut items {
@@ -2410,7 +2422,8 @@ impl MizarServer {
                 } else {
                     model.to_string()
                 };
-                match engine.set_model(&key, &name).await {
+                let effort = frame.payload.get("reasoningEffort").and_then(Value::as_str);
+                match engine.set_model_with_effort(&key, &name, effort).await {
                     Ok(()) => ServerFrame::ok(
                         id,
                         json!({
@@ -2627,7 +2640,9 @@ impl MizarServer {
                     };
                     if answered.len() >= max_items {
                         remaining.extend(items[index..].iter().filter_map(|rest| {
-                            rest.get("sessionId").and_then(Value::as_str).map(|id| json!(id))
+                            rest.get("sessionId")
+                                .and_then(Value::as_str)
+                                .map(|id| json!(id))
                         }));
                         break;
                     }
@@ -2636,9 +2651,7 @@ impl MizarServer {
                     // holds, and it is the only thing that makes the row's
                     // timestamp meaningful: with no cursor the phone may have
                     // been reinstalled and hold nothing it can vouch for.
-                    let has_watermark = item
-                        .get("afterSeq")
-                        .is_some_and(|value| value.is_number());
+                    let has_watermark = item.get("afterSeq").is_some_and(|value| value.is_number());
                     let client_updated = item
                         .get("updatedAt")
                         .and_then(Value::as_f64)
@@ -2691,7 +2704,9 @@ impl MizarServer {
                     // be named in `remaining` for ever.
                     if !answered.is_empty() && used + size > max_bytes {
                         remaining.extend(items[index..].iter().filter_map(|rest| {
-                            rest.get("sessionId").and_then(Value::as_str).map(|id| json!(id))
+                            rest.get("sessionId")
+                                .and_then(Value::as_str)
+                                .map(|id| json!(id))
                         }));
                         break;
                     }
@@ -2761,7 +2776,12 @@ impl MizarServer {
         let (kind, title, body) = match interaction.kind {
             InteractionKind::Approval => (
                 "approval",
-                if zh { "需要审批" } else { "Approval needed" }.to_string(),
+                if zh {
+                    "需要审批"
+                } else {
+                    "Approval needed"
+                }
+                .to_string(),
                 interaction.title.clone(),
             ),
             _ => {
@@ -2950,8 +2970,13 @@ impl MizarServer {
         } else {
             self.foreground_devices()
         };
-        let body =
-            crate::activity::turn_end_body(title, session, end, &except, self.store.prefers_chinese());
+        let body = crate::activity::turn_end_body(
+            title,
+            session,
+            end,
+            &except,
+            self.store.prefers_chinese(),
+        );
         if let Err(error) = self.relay_post("/push/v1/notify", body).await {
             tracing::debug!("mizar: no turn-end notification — {error}");
         }
@@ -3251,13 +3276,20 @@ fn wallet_rows(wallets: &[Wallet], required: bool) -> Option<Vec<Value>> {
 /// are the operator's projects, and `hello` is unauthenticated.
 fn remote_view(prefs: &agi_core::RemotePrefs) -> Value {
     if !prefs.enabled {
-        return json!({ "enabled": false, "allowLan": false, "allowWan": false, "workspaces": [] });
+        return json!({
+            "enabled": false,
+            "allowLan": false,
+            "allowWan": false,
+            "allowAllWorkspaces": false,
+            "workspaces": [],
+        });
     }
     json!({
         "enabled": true,
         "allowLan": prefs.allow_lan,
         "allowWan": prefs.allow_wan,
-        "workspaces": prefs.workspaces,
+        "allowAllWorkspaces": prefs.allow_all_workspaces,
+        "workspaces": if prefs.allow_all_workspaces { Vec::<String>::new() } else { prefs.workspaces.clone() },
     })
 }
 

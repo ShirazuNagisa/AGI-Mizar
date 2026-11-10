@@ -46,6 +46,16 @@ impl RemoteState {
     }
 }
 
+/// The choices that shape one new remote session.
+#[derive(Debug, Clone, Default)]
+pub struct RemoteLaunch {
+    pub cwd: Option<String>,
+    pub permission: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+}
+
 /// One delegation the window/tool can read.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,6 +68,13 @@ pub struct Delegation {
     /// Permission preset applied to the remote session, when one was requested.
     #[serde(default)]
     pub permission: Option<String>,
+    /// Model route selected for the remote session, when one was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     /// LAN address used for this delegation, when the route is `lan`.
     #[serde(default)]
     pub address: Option<std::net::SocketAddr>,
@@ -395,19 +412,26 @@ impl RemoteManager {
         cwd: Option<String>,
         prompt: String,
     ) -> Result<Delegation, String> {
-        self.start_wan(peer, credentials, cwd, prompt, None, None)
+        self.start_with_options(
+            peer,
+            credentials,
+            RemoteLaunch {
+                cwd,
+                ..RemoteLaunch::default()
+            },
+            prompt,
+        )
     }
 
-    /// Start a WAN delegation with an explicit remote permission preset.
+    /// Start a WAN delegation with explicit workspace, permission and model.
     pub fn start_with_options(
         self: &Arc<Self>,
         peer: PeerRef,
         credentials: Credentials,
-        cwd: Option<String>,
-        permission: Option<String>,
+        launch: RemoteLaunch,
         prompt: String,
     ) -> Result<Delegation, String> {
-        self.start_wan(peer, credentials, cwd, prompt, None, permission)
+        self.start_wan(peer, credentials, launch, prompt, None)
     }
 
     /// Continue an existing peer session with another prompt.
@@ -419,17 +443,25 @@ impl RemoteManager {
         prompt: String,
         session: String,
     ) -> Result<Delegation, String> {
-        self.start_wan(peer, credentials, cwd, prompt, Some(session), None)
+        self.start_wan(
+            peer,
+            credentials,
+            RemoteLaunch {
+                cwd,
+                ..RemoteLaunch::default()
+            },
+            prompt,
+            Some(session),
+        )
     }
 
     fn start_wan(
         self: &Arc<Self>,
         peer: PeerRef,
         credentials: Credentials,
-        cwd: Option<String>,
+        launch: RemoteLaunch,
         prompt: String,
         session: Option<String>,
-        permission: Option<String>,
     ) -> Result<Delegation, String> {
         let running = self
             .records
@@ -463,11 +495,14 @@ impl RemoteManager {
             peer: peer.device_id.clone(),
             peer_name: peer.name.clone(),
             session_id: session.clone(),
-            permission: permission.clone(),
+            permission: launch.permission.clone(),
+            provider: launch.provider.clone(),
+            model: launch.model.clone(),
+            reasoning_effort: launch.reasoning_effort.clone(),
             address: None,
             state: RemoteState::Running,
             route: "wan".to_string(),
-            cwd: cwd.clone(),
+            cwd: launch.cwd.clone(),
             prompt_preview: preview(&prompt),
             final_text: None,
             error: None,
@@ -505,10 +540,9 @@ impl RemoteManager {
                 &manager,
                 &task_id,
                 credentials,
-                cwd.as_deref(),
+                launch,
                 &task_prompt,
                 session,
-                permission,
                 cancel_rx,
             )
             .await;
@@ -539,20 +573,28 @@ impl RemoteManager {
         cwd: Option<String>,
         prompt: String,
     ) -> Result<Delegation, String> {
-        self.start_lan_inner(peer, address, credentials, cwd, prompt, None, None)
+        self.start_lan_with_options(
+            peer,
+            address,
+            credentials,
+            RemoteLaunch {
+                cwd,
+                ..RemoteLaunch::default()
+            },
+            prompt,
+        )
     }
 
-    /// Start a LAN delegation with an explicit remote permission preset.
+    /// Start a LAN delegation with explicit workspace, permission and model.
     pub fn start_lan_with_options(
         self: &Arc<Self>,
         peer: PeerRef,
         address: std::net::SocketAddr,
         credentials: agi_lan::LanCredentials,
-        cwd: Option<String>,
-        permission: Option<String>,
+        launch: RemoteLaunch,
         prompt: String,
     ) -> Result<Delegation, String> {
-        self.start_lan_inner(peer, address, credentials, cwd, prompt, None, permission)
+        self.start_lan_inner(peer, address, credentials, launch, prompt, None)
     }
 
     /// Continue an existing peer session over LAN.
@@ -565,19 +607,27 @@ impl RemoteManager {
         prompt: String,
         session: String,
     ) -> Result<Delegation, String> {
-        self.start_lan_inner(peer, address, credentials, cwd, prompt, Some(session), None)
+        self.start_lan_inner(
+            peer,
+            address,
+            credentials,
+            RemoteLaunch {
+                cwd,
+                ..RemoteLaunch::default()
+            },
+            prompt,
+            Some(session),
+        )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn start_lan_inner(
         self: &Arc<Self>,
         peer: PeerRef,
         address: std::net::SocketAddr,
         credentials: agi_lan::LanCredentials,
-        cwd: Option<String>,
+        launch: RemoteLaunch,
         prompt: String,
         session: Option<String>,
-        permission: Option<String>,
     ) -> Result<Delegation, String> {
         let running = self
             .records
@@ -610,11 +660,14 @@ impl RemoteManager {
             peer: peer.device_id.clone(),
             peer_name: peer.name,
             session_id: session.clone(),
-            permission: permission.clone(),
+            permission: launch.permission.clone(),
+            provider: launch.provider.clone(),
+            model: launch.model.clone(),
+            reasoning_effort: launch.reasoning_effort.clone(),
             address: Some(address),
             state: RemoteState::Running,
             route: "lan".to_string(),
-            cwd: cwd.clone(),
+            cwd: launch.cwd.clone(),
             prompt_preview: preview(&prompt),
             final_text: None,
             error: None,
@@ -650,10 +703,9 @@ impl RemoteManager {
                 &task_id,
                 address,
                 credentials,
-                cwd.as_deref(),
+                launch,
                 &prompt,
                 session,
-                permission,
                 cancel_rx,
             )
             .await;
@@ -843,10 +895,9 @@ async fn run_one(
     manager: &RemoteManager,
     id: &str,
     credentials: Credentials,
-    cwd: Option<&str>,
+    launch: RemoteLaunch,
     prompt: &str,
     existing_session: Option<String>,
-    permission: Option<String>,
     cancel: watch::Receiver<bool>,
 ) -> Result<TurnOutcome, RunFailure> {
     let client = PeerClient::connect(credentials)
@@ -859,7 +910,7 @@ async fn run_one(
     let session = match existing_session {
         Some(session) => session,
         None => client
-            .create_session(cwd)
+            .create_session(launch.cwd.as_deref())
             .await
             .map_err(|error| RunFailure {
                 state: RemoteState::Failed,
@@ -868,7 +919,22 @@ async fn run_one(
             })?,
     };
     manager.set_session(id, session.clone());
-    if let Some(preset) = permission.as_deref() {
+    if let (Some(provider), Some(model)) = (launch.provider.as_deref(), launch.model.as_deref()) {
+        client
+            .set_model(
+                &session,
+                provider,
+                model,
+                launch.reasoning_effort.as_deref(),
+            )
+            .await
+            .map_err(|error| RunFailure {
+                state: RemoteState::Failed,
+                message: error.to_string(),
+                reason: Some("session.model.set".to_string()),
+            })?;
+    }
+    if let Some(preset) = launch.permission.as_deref() {
         client
             .set_permission(&session, preset)
             .await
@@ -907,10 +973,9 @@ async fn run_lan_one(
     id: &str,
     address: std::net::SocketAddr,
     credentials: agi_lan::LanCredentials,
-    cwd: Option<&str>,
+    launch: RemoteLaunch,
     prompt: &str,
     existing_session: Option<String>,
-    permission: Option<String>,
     cancel: watch::Receiver<bool>,
 ) -> Result<TurnOutcome, RunFailure> {
     let client = agi_lan::LanMizarClient::connect(address, &credentials)
@@ -923,7 +988,7 @@ async fn run_lan_one(
     let session = match existing_session {
         Some(session) => session,
         None => client
-            .create_session(cwd)
+            .create_session(launch.cwd.as_deref())
             .await
             .map_err(|error| RunFailure {
                 state: RemoteState::Failed,
@@ -932,7 +997,22 @@ async fn run_lan_one(
             })?,
     };
     manager.set_session(id, session.clone());
-    if let Some(preset) = permission.as_deref() {
+    if let (Some(provider), Some(model)) = (launch.provider.as_deref(), launch.model.as_deref()) {
+        client
+            .set_model(
+                &session,
+                provider,
+                model,
+                launch.reasoning_effort.as_deref(),
+            )
+            .await
+            .map_err(|error| RunFailure {
+                state: RemoteState::Failed,
+                message: error.to_string(),
+                reason: Some("lan.session.model.set".to_string()),
+            })?;
+    }
+    if let Some(preset) = launch.permission.as_deref() {
         client
             .set_permission(&session, preset)
             .await
@@ -1021,6 +1101,9 @@ mod tests {
             peer_name: "B".into(),
             session_id: Some("dsh:s".into()),
             permission: None,
+            provider: None,
+            model: None,
+            reasoning_effort: None,
             address: None,
             state: RemoteState::Running,
             route: "wan".into(),
@@ -1111,6 +1194,9 @@ mod tests {
                 peer_name: "Peer".to_string(),
                 session_id: None,
                 permission: None,
+                provider: None,
+                model: None,
+                reasoning_effort: None,
                 address: None,
                 state: RemoteState::Done,
                 route: "wan".to_string(),
