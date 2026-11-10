@@ -560,7 +560,7 @@ Windows 不再显示系统标题栏：窗口 `decorations(false) + shadow(true)`
 23,796,282 B / SHA256 `7D0C54D9…DB1C5`。限制：窗口宽度固定 1034（年份格子），最大化按钮没有
 Windows 11 的 Snap Layouts 悬停面板（自绘按钮拿不到系统 caption 的贴靠面板）。
 
-### 2026-11-10 适配性全量复验（origin/main `5e6cb82d`，本轮修复 rebase 后 `b1ba27f3`）
+### 2026-11-10 适配性全量复验（origin/main `5e6cb82d`，本轮修复 rebase 后 `6e8fa2d3`）
 
 macOS 侧又推进 29 个提交（remote_health 依赖检查+日志导出、remote intake/权限预设、relay 半开重连、
 二进制隧道帧、五弧环图标、onboarding 与设置页重做）后，Windows 侧复验并修掉：
@@ -575,8 +575,8 @@ macOS 侧又推进 29 个提交（remote_health 依赖检查+日志导出、remo
   菜单与 F5/Ctrl+R 重载在页面层关掉（输入框保留原生菜单）；引导手机卡片补 Android APK 入口、
   偏好步文案与默认值一致、Codex GUI 面在 Windows 如实写「只读」。
 - 打包/安装：`scripts/package.ps1 -Bundles nsis` → **22.8 MiB**，SHA256
-  `7365e6aee740601a231ed2321afd176bf17f0dea10ea24ab5db79b5c8602fae0`；`/S` 覆盖安装 exit 0，
-  安装版 `agi-mizar.exe` 30,185,472 B / SHA256 `F57768B2…FCE56A`。
+  `4cfe8f5f4b0196ddbdf1cd3ed8e2025dac4dbb6cc3fdb4ea744bc208f5e32c67`；`/S` 覆盖安装 exit 0，
+  安装版 `agi-mizar.exe` 30,185,472 B / SHA256 `0D82DA72…FCE56A`。
 - 运行时：安装版 27 项矩阵 **27 PASS / 0 FAIL**（依赖完整性报告 8 项 ok、导出日志原生「另存为」可取消
   且不报错、F5/右键守卫、shell IPC 往返、更新检查…）；Win32 层：最大化 3862×2110（工作区 3840×2088，
   不盖任务栏）、最小化/恢复、关窗隐藏进程存活、单实例 0.1 s 退出并唤窗、`--background` 全窗口隐藏且
