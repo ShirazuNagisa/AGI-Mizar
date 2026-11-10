@@ -91,6 +91,24 @@ mod dock_icon {
 /// is the narrowest the window can be without hiding a week of the year.
 const WINDOW_WIDTH: f64 = 1034.0;
 
+/// The tallest the window may get.
+///
+/// A maximum exists only because the width is fixed through `max_inner_size`,
+/// which has no width-only variant; the height itself is a preference. It must
+/// be finite: on Windows, tao converts the logical size to physical pixels
+/// with a saturating cast to `u32`, so an infinite height becomes `u32::MAX`
+/// and then `MINMAXINFO::ptMaxTrackSize.y == -1`. Every native resize drag
+/// (the custom 3px edge handles and the DWM shadow's own borders alike) then
+/// clamps the window to zero height: the window vanishes and only a restart
+/// brings it back. Ten thousand logical pixels never binds on a real monitor
+/// and still fits in the `i32` Windows wants.
+const WINDOW_MAX_HEIGHT: f64 = 10_000.0;
+
+/// The shortest the window may get: the dashboard and the guide were drawn for
+/// this floor, and Windows only enforces it once the invisible frame is added
+/// to it (see the Windows-only `compensate_window_frame` below).
+const WINDOW_MIN_HEIGHT: f64 = 480.0;
+
 /// The kernel this process booted, for the run loop's shutdown.
 ///
 /// Set once in `setup`, right after the boot; the window owns none of it, and the
@@ -148,6 +166,41 @@ fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
         file.write_all(text.as_bytes())?;
     }
     std::fs::rename(&temporary, path)
+}
+
+/// Restate the size limits in the terms Windows applies them in.
+///
+/// tao builds `WM_GETMINMAXINFO` from the *inner* size it was given and does not
+/// add the frame back for a borderless window — but Windows applies the result
+/// to the *outer* window. Left alone, an east-edge drag shrinks the page by the
+/// invisible frame (about 15 logical pixels at 150%) and a south-edge drag stops
+/// at 707 instead of the 480 floor. Measure the frame once the window exists and
+/// add it to both limits, so the page keeps its exact width and its floor.
+#[cfg(windows)]
+fn compensate_window_frame(window: &tauri::WebviewWindow) {
+    let (Ok(outer), Ok(inner), Ok(scale)) = (
+        window.outer_size(),
+        window.inner_size(),
+        window.scale_factor(),
+    ) else {
+        return;
+    };
+    if !scale.is_finite() || scale <= 0.0 {
+        return;
+    }
+    let inset_width = outer.width.saturating_sub(inner.width) as f64 / scale;
+    let inset_height = outer.height.saturating_sub(inner.height) as f64 / scale;
+    if inset_width <= 0.0 && inset_height <= 0.0 {
+        return;
+    }
+    let _ = window.set_min_size(Some(tauri::LogicalSize::new(
+        WINDOW_WIDTH + inset_width,
+        WINDOW_MIN_HEIGHT + inset_height,
+    )));
+    let _ = window.set_max_size(Some(tauri::LogicalSize::new(
+        WINDOW_WIDTH + inset_width,
+        WINDOW_MAX_HEIGHT + inset_height,
+    )));
 }
 
 fn main() {
@@ -297,7 +350,7 @@ fn main() {
                 .map(|monitor| {
                     let area = monitor.work_area();
                     let logical = area.size.height as f64 / monitor.scale_factor();
-                    (logical - 80.0).clamp(480.0, 802.0)
+                    (logical - 80.0).clamp(WINDOW_MIN_HEIGHT, 802.0)
                 })
                 .unwrap_or(802.0);
             let builder =
@@ -308,8 +361,8 @@ fn main() {
                     // window ever draws; at any narrower size the last weeks are
                     // cut off. The width is therefore not a preference — the
                     // height still is, and keeps its own floor.
-                    .min_inner_size(WINDOW_WIDTH, 480.0)
-                    .max_inner_size(WINDOW_WIDTH, f64::INFINITY)
+                    .min_inner_size(WINDOW_WIDTH, WINDOW_MIN_HEIGHT)
+                    .max_inner_size(WINDOW_WIDTH, WINDOW_MAX_HEIGHT)
                     .visible(!background);
 
             // The window draws its own chrome: on macOS the page reserves a
@@ -331,6 +384,12 @@ fn main() {
             let builder = builder.decorations(false).shadow(true);
 
             let window = builder.build()?;
+
+            // Windows reads the constraints off the outer window, tao wrote
+            // them from the inner one: add the frame back before the person can
+            // grab an edge.
+            #[cfg(windows)]
+            compensate_window_frame(&window);
 
             // The tray page: a borderless window that lives under the tray icon.
             // A native menu cannot put an icon left of a label, pin a lamp to the
@@ -474,4 +533,27 @@ fn main() {
                 agi_core::endpoint::remove_tool_file(&agi_core::endpoint::default_tool_path());
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WINDOW_MAX_HEIGHT, WINDOW_MIN_HEIGHT, WINDOW_WIDTH};
+
+    /// Windows turns the limits into `MINMAXINFO` track sizes in `i32` pixels,
+    /// after multiplying by the monitor scale. An infinite cap saturates to
+    /// `u32::MAX` on the way in and reads back as `-1`, and every resize drag
+    /// then clamps the window to no height at all — the window vanishes until
+    /// the app is restarted.
+    #[test]
+    fn the_height_limits_survive_the_trip_to_a_windows_track_size() {
+        assert!(WINDOW_WIDTH.is_finite() && WINDOW_WIDTH > 0.0);
+        assert!(WINDOW_MIN_HEIGHT.is_finite() && WINDOW_MIN_HEIGHT > 0.0);
+        assert!(WINDOW_MAX_HEIGHT.is_finite() && WINDOW_MAX_HEIGHT > WINDOW_MIN_HEIGHT);
+        // Windows caps display scaling at 500%; leave room for future ones.
+        let tallest = WINDOW_MAX_HEIGHT * 8.0;
+        assert!(
+            tallest < f64::from(i32::MAX),
+            "{WINDOW_MAX_HEIGHT} logical pixels * 8 = {tallest} does not fit in an i32"
+        );
+    }
 }
