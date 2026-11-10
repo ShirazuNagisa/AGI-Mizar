@@ -60,9 +60,12 @@ Rules:
   recommended. Prefer the least privilege that can finish the task; offer
   `danger-full-access` only if the operator asks for it.
 - **Model**: take `remote_options.models` (the target DSH model catalog). Show
-  each `provider/model` with its `name` and its `efforts`. Mark
-  `models.default.provider` / `models.default.model` and the selected model's
-  `defaultEffort` as recommended.
+  the `models.default` route first and label it **“目标默认，优先推荐”**; then
+  list the other `provider/model` rows with their `name` and `efforts`.
+  The target can list providers it has not authenticated: non-default models
+  may fail with `session/model-unavailable`. Mark them “可能不可用” and do not
+  assume they work. Use the default route's `defaultEffort` as the recommended
+  effort.
 - **Reasoning**: only offer efforts listed by the selected model. If the model
   lists none, do not ask for an effort. Use `defaultEffort` when the operator
   says “default”.
@@ -117,6 +120,11 @@ gone. Never create a fresh session silently.
    as a claim to check.
 5. Failure/timeout: inspect `remote_result`; use `remote_cancel` if it is still
    running and you no longer need it. Do not retry in a loop.
+   - If the failure is `session/model-unavailable`, report that the chosen
+     non-default provider is not authenticated/available on the target, and
+     ask whether to retry with `models.default`. Do not silently try a series of
+     other models. If `models.default` also fails, stop: the target's DSH
+     provider is not authenticated and must be repaired on that machine.
 6. Depth is zero: the remote agent must not delegate again. Ask it to finish the
    task itself or return the limitation.
 
