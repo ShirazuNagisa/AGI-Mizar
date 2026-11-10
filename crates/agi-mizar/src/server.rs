@@ -166,6 +166,12 @@ impl agi_core::DeviceStatusSource for MizarServer {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let host_name = self.store.host_name();
+        // The roster's `hostName` is written once, at first launch; the account
+        // record this computer was provisioned under may carry the machine's
+        // name as it was later (a rename between the two writes is ordinary on
+        // Windows), or as it is now. Both spellings are filtered, because the
+        // one this missed is the computer appearing in the tray as a phone.
+        let platform_name = agi_platform::host_name();
         let mut rows: Vec<(String, Option<String>, bool, agi_protocol::api::DeviceView)> =
             Vec::new();
         for device in self
@@ -178,7 +184,7 @@ impl agi_core::DeviceStatusSource for MizarServer {
             // computer itself -- the same roster file, a name that is the host
             // name. It is the machine the tray belongs to, not a phone, and
             // showing it there is how a Mac ended up beside two iPhones.
-            if device.name == host_name {
+            if device.name == host_name || device.name == platform_name {
                 continue;
             }
             // `model` is the provisioning marker for account devices; the
@@ -3799,12 +3805,12 @@ async fn serve_peer(server: Arc<MizarServer>, peer: String, connection: Peer) {
                                 let key = &session.key;
                                 (MizarServer::in_scope(scope, key)
                                     && forward_server.peer_owns(&forward_device, key))
-                                .then(|| (key, Some(session.running)))
+                                .then_some((key, Some(session.running)))
                             }
                             agi_protocol::api::ApiEvent::SessionRemoved { session } => {
                                 (MizarServer::in_scope(scope, session)
                                     && forward_server.peer_owns(&forward_device, session))
-                                .then(|| (session, None))
+                                .then_some((session, None))
                             }
                             _ => None,
                         };

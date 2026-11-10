@@ -243,6 +243,10 @@ async fn replays_requests_and_answers_pings() {
 /// that it is *negotiated*: a relay that never says `wsMsgBinary` (every relay
 /// before 0.3.7, and the test above) keeps receiving JSON, and a desktop that
 /// never advertises the header is never sent binary.
+// The handshake callback tungstenite hands us must answer with its own
+// `Response`, so the Err variant is a header map and not a string we can shrink;
+// boxing it here would only make the test read worse.
+#[allow(clippy::result_large_err)]
 #[tokio::test]
 async fn binary_ws_msg_frames_when_the_relay_advertises_them() {
     use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};

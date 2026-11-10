@@ -39,20 +39,46 @@ pub struct DesktopSession {
     pub is_archived: bool,
 }
 
-/// Every local Code session the desktop app knows, newest activity first.
+/// The app-data directories a Claude desktop install keeps its profile in.
 ///
-/// The profile directory is deliberately not hard-coded to `Claude-3p`: normal
-/// Claude installs use `Claude`, and a 3p deployment uses `Claude-3p`. Scanning
-/// both is cheap and means the app works after either install path.
-pub fn read_all() -> Vec<DesktopSession> {
+/// The directory is deliberately not hard-coded to `Claude-3p`: normal Claude
+/// installs use `Claude`, and a 3p deployment uses `Claude-3p`. Scanning both is
+/// cheap and means the app works after either install path.
+///
+/// Where that directory lives is the platform's convention, not this app's
+/// choice: Claude Desktop is an Electron app, so its profile sits in
+/// `~/Library/Application Support` on macOS and in `%APPDATA%` on Windows. A
+/// Windows port that kept the macOS spelling could never find a session — the
+/// path does not exist there — and the Code tab's rows would silently lose their
+/// desktop titles and the "Claude 桌面" source badge.
+fn app_support_dirs() -> Vec<PathBuf> {
     let home = agi_platform::home();
-    let candidates = [
-        home.join("Library/Application Support/Claude-3p/claude-code-sessions"),
-        home.join("Library/Application Support/Claude/claude-code-sessions"),
-    ];
+    #[cfg(target_os = "macos")]
+    let bases = [home.join("Library/Application Support")];
+    #[cfg(windows)]
+    let bases = [std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join("AppData").join("Roaming"))];
+    // Linux has no product here, but the same two spellings are what an Electron
+    // build would use, and guessing them costs one `read_dir` that finds nothing.
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let bases = [std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"))];
+
+    let mut dirs = Vec::new();
+    for base in bases {
+        dirs.push(base.join("Claude-3p"));
+        dirs.push(base.join("Claude"));
+    }
+    dirs
+}
+
+/// Every local Code session the desktop app knows, newest activity first.
+pub fn read_all() -> Vec<DesktopSession> {
     let mut sessions = Vec::new();
-    for root in candidates {
-        sessions.extend(read_from(&root));
+    for root in app_support_dirs() {
+        sessions.extend(read_from(&root.join("claude-code-sessions")));
     }
     sessions.sort_by_key(|session| std::cmp::Reverse(session.last_activity_at));
     sessions
@@ -117,8 +143,7 @@ pub fn by_cli_session(sessions: Vec<DesktopSession>) -> HashMap<String, DesktopS
 
 /// The app-data root, for the log line and for damage control.
 pub fn profile_root() -> Option<PathBuf> {
-    let root = agi_platform::home().join("Library/Application Support/Claude-3p");
-    root.is_dir().then_some(root)
+    app_support_dirs().into_iter().find(|dir| dir.is_dir())
 }
 
 #[cfg(test)]
@@ -188,5 +213,38 @@ mod tests {
     fn a_missing_root_is_not_an_error() {
         let dir = tempfile::tempdir().unwrap();
         assert!(read_from(&dir.path().join("does-not-exist")).is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_macos_profile_lives_in_application_support() {
+        let dirs = app_support_dirs();
+        assert!(
+            dirs.iter().any(|dir| dir
+                .to_string_lossy()
+                .ends_with("Library/Application Support/Claude-3p")),
+            "{dirs:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_profile_lives_in_appdata() {
+        // Claude Desktop is Electron: on Windows its profile is `%APPDATA%\Claude`,
+        // not the macOS `Library/Application Support` spelling.
+        let Some(appdata) = std::env::var_os("APPDATA") else {
+            return;
+        };
+        let expected = std::path::Path::new(&appdata).join("Claude");
+        let dirs = app_support_dirs();
+        assert!(dirs.contains(&expected), "{dirs:?}");
+        assert!(
+            dirs.iter().any(|dir| dir.ends_with("Claude-3p")),
+            "the 3p profile is scanned too: {dirs:?}"
+        );
+        assert!(
+            !dirs.iter().any(|dir| dir.to_string_lossy().contains("Application Support")),
+            "a macOS path can never exist on Windows: {dirs:?}"
+        );
     }
 }

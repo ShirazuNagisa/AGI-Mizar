@@ -620,6 +620,26 @@ async fn the_device_list_shows_phones_not_this_computer() {
 }
 
 #[tokio::test]
+async fn a_renamed_computer_is_still_not_a_phone() {
+    // The roster's `hostName` is from first launch; the account provisioned this
+    // computer under the name it had when it signed in. After a rename the two
+    // spellings differ, and the computer itself came back as a phone row. The
+    // machine's current name is filtered too, not just the stored one.
+    let (server, store, _core, _fakes, _dir) = start().await;
+    store
+        .issue(
+            &agi_platform::host_name(),
+            Some("account:acct:self:dsh".to_string()),
+        )
+        .unwrap();
+    store.issue("iPhone", Some("iPhone17,1".to_string())).unwrap();
+
+    let views = agi_core::DeviceStatusSource::device_views(&*server);
+    let names: Vec<&str> = views.iter().map(|view| view.name.as_str()).collect();
+    assert_eq!(names, vec!["iPhone"], "{views:?}");
+}
+
+#[tokio::test]
 async fn an_unscoped_phone_still_sees_every_agent() {
     // The older contract: a token with no marker is "the owner's phone", and it
     // saw all three lists before there was a choice to make.

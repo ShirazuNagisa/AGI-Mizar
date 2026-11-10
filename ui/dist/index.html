@@ -17,9 +17,11 @@
         document.documentElement.classList.toggle('dark', dark)
         document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
 
-        // The platform is in the URL for the same reason: macOS reserves a strip
-        // for its traffic lights and Windows keeps its own title bar, and the
-        // sidebar must not flash the other layout before the kernel answers.
+        // The platform is in the URL for the same reason: the page reserves a
+        // strip at the top on macOS (its traffic lights overlay it) and on
+        // Windows (it draws its own three buttons there), while Linux keeps the
+        // system title bar; the sidebar must not flash the other layout before
+        // the kernel answers.
         var platform = query.get('platform')
         if (platform !== 'macos' && platform !== 'windows' && platform !== 'linux') {
           platform = /Windows/.test(navigator.userAgent)
@@ -31,7 +33,7 @@
         document.documentElement.dataset.platform = platform
       })()
     </script>
-    <script type="module" crossorigin src="/assets/index-BWkiSF-6.js"></script>
+    <script type="module" crossorigin src="/assets/index-1TBe-bHR.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-DUm0F0EJ.css">
   </head>
   <body>

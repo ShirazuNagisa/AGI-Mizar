@@ -248,6 +248,12 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
         agi_mizar::store::default_store_path(),
         agi_mizar::store::host_name(),
     )?;
+    // The roster's name is written once, at first launch. A computer that was
+    // renamed since then should hand the phone the name it has now: the device
+    // list and the pairing reply both read this field.
+    if let Err(error) = roster.set_host_name(&agi_platform::host_name()) {
+        tracing::warn!("roster: could not refresh the host name — {error}");
+    }
     // The tunnel mints phone tokens from the same roster the phone server
     // authenticates against.
     let roster_for_relay = Arc::clone(&roster);

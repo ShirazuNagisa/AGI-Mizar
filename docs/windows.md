@@ -559,3 +559,29 @@ Windows 不再显示系统标题栏：窗口 `decorations(false) + shadow(true)`
 实现与验证记录见工作区 `docs/session-notes/2026-11-07-windows-custom-titlebar.md`；安装包
 23,796,282 B / SHA256 `7D0C54D9…DB1C5`。限制：窗口宽度固定 1034（年份格子），最大化按钮没有
 Windows 11 的 Snap Layouts 悬停面板（自绘按钮拿不到系统 caption 的贴靠面板）。
+
+### 2026-11-10 适配性全量复验（origin/main `5e6cb82d`，本轮修复 rebase 后 `b1ba27f3`）
+
+macOS 侧又推进 29 个提交（remote_health 依赖检查+日志导出、remote intake/权限预设、relay 半开重连、
+二进制隧道帧、五弧环图标、onboarding 与设置页重做）后，Windows 侧复验并修掉：
+
+- 门禁：rustc 1.97 的 clippy 两处红灯（`bool::then` → `then_some`、测试回调 `result_large_err`）；
+  修后 `cargo test --workspace --no-fail-fast` **489/0**、`clippy --all-targets -- -D warnings` **0**。
+- `ui/dist` 在 **Windows 上重建与仓库提交逐字节一致**（Tailwind 显式 `@source` 后不再需要 Linux 构建）。
+- 平台修复：所有控制台子进程带 `CREATE_NO_WINDOW`（依赖修复不再闪黑框）；依赖检查按 `DSH_PROFILE` 解析
+  配置档、sidecar 缺失时 MCP 判定为 `unknown`、路径走 dunce（报告与 `cordis.patch.yml` 无 `\?\`）；
+  Claude 桌面会话来源按平台取 `%APPDATA%\Claude{,-3p}`；设备列表同时按 roster 名与当前机器名过滤本机
+  （boot 顺带刷新 roster 名）；窗口高度按工作区 clamp、顶部 banner 补 144px 让位；WebView2 的浏览器右键
+  菜单与 F5/Ctrl+R 重载在页面层关掉（输入框保留原生菜单）；引导手机卡片补 Android APK 入口、
+  偏好步文案与默认值一致、Codex GUI 面在 Windows 如实写「只读」。
+- 打包/安装：`scripts/package.ps1 -Bundles nsis` → **22.8 MiB**，SHA256
+  `7365e6aee740601a231ed2321afd176bf17f0dea10ea24ab5db79b5c8602fae0`；`/S` 覆盖安装 exit 0，
+  安装版 `agi-mizar.exe` 30,185,472 B / SHA256 `F57768B2…FCE56A`。
+- 运行时：安装版 27 项矩阵 **27 PASS / 0 FAIL**（依赖完整性报告 8 项 ok、导出日志原生「另存为」可取消
+  且不报错、F5/右键守卫、shell IPC 往返、更新检查…）；Win32 层：最大化 3862×2110（工作区 3840×2088，
+  不盖任务栏）、最小化/恢复、关窗隐藏进程存活、单实例 0.1 s 退出并唤窗、`--background` 全窗口隐藏且
+  `/healthz` 200、`HKCU\...\Run` 写入 `"<install>\agi-mizar.exe" --background`。
+- 证据：`docs/evidence/agi-mizar-windows-2026-11-10/`；完整记录
+  `docs/session-notes/2026-11-10-agi-mizar-windows-parity.md`。
+- 仍存缺口：Codex GUI 桌面控制仍仅 macOS/Linux（Windows 无可驱动桌面端）；Snap Layouts 悬停缺失；
+  宽度锁 1034 使 Win+←/→ 分屏失效；Authenticode 未签名；MSI 需提权。
