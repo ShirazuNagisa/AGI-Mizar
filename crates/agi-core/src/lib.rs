@@ -3609,6 +3609,9 @@ mod tests {
             tool_result(2, 1, "AGI_MIZAR_DELEGATION d1\n{\"delegationId\":\"d1\"}"),
             tool_result(3, 1, "AGI_MIZAR_DELEGATIONX not-an-id"),
             tool_result(4, 1, "AGI_MIZAR_DELEGATION d2"),
+            // A marker that is not the first line is a file's content, not a
+            // result this turn produced.
+            tool_result(5, 1, "preamble\nAGI_MIZAR_DELEGATION d3"),
         ];
         assert_eq!(
             delegated_ids(&records),
@@ -3788,13 +3791,14 @@ fn looks_failed(output: &str) -> bool {
         || head.contains("exit code 1")
 }
 
-/// The delegation ids a turn's tool results mention.
+/// The delegation id a turn's tool result names.
 ///
-/// `agi-remote` writes `AGI_MIZAR_DELEGATION <id>` on a line of every
+/// `agi-remote` writes `AGI_MIZAR_DELEGATION <id>` as the first line of every
 /// delegate/send result (both the MCP tool and the CLI), and that line is the
 /// only link between a local turn and a remote task. The marker is looked for
-/// in tool output only: the model's prose quoting a delegation id is not proof
-/// that this turn started one.
+/// in tool output only, and only at the start: the model's prose quoting a
+/// delegation id, or a file that happens to contain one, is not proof that
+/// this turn started a remote task.
 fn delegated_ids(records: &[Record]) -> Vec<String> {
     const MARKER: &str = "AGI_MIZAR_DELEGATION";
     let mut ids = Vec::new();
@@ -3802,20 +3806,23 @@ fn delegated_ids(records: &[Record]) -> Vec<String> {
         let Some(output) = record.tool.as_ref().and_then(|tool| tool.output.as_deref()) else {
             continue;
         };
-        for (at, _) in output.match_indices(MARKER) {
-            let rest = &output[at + MARKER.len()..];
-            // `AGI_MIZAR_DELEGATIONX` is a different word, not a marker.
-            if !rest.chars().next().is_some_and(char::is_whitespace) {
-                continue;
-            }
-            let id: String = rest
-                .trim_start()
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
-                .collect();
-            if !id.is_empty() {
-                ids.push(id);
-            }
+        let Some(first) = output.lines().find(|line| !line.trim().is_empty()) else {
+            continue;
+        };
+        let Some(rest) = first.trim_start().strip_prefix(MARKER) else {
+            continue;
+        };
+        // `AGI_MIZAR_DELEGATIONX` is a different word, not a marker.
+        if !rest.chars().next().is_some_and(char::is_whitespace) {
+            continue;
+        }
+        let id: String = rest
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
+            .collect();
+        if !id.is_empty() {
+            ids.push(id);
         }
     }
     ids.sort();
