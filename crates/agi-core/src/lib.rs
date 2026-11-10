@@ -1730,7 +1730,7 @@ impl Core {
         {
             return;
         }
-        let facts = facts_for(&session, turn, &records);
+        let facts = self.facts_for(&session, turn, &records);
         let store = self.layouts.clone();
         let core = Arc::clone(self);
         tokio::spawn(async move {
@@ -1777,10 +1777,68 @@ impl Core {
             };
             // The dataset capture happens before the judge, and independently of
             // it: a machine with no model still has turns worth sharing.
-            let facts = facts_for(&session, turn, &slice);
+            let facts = core.facts_for(&session, turn, &slice);
             core.capture_dataset_turn(&session, &facts, &slice);
             core.judge_turn(session, Some(turn), slice);
         });
+    }
+
+    /// The judge's view of a turn, including what can still wake the model.
+    ///
+    /// [`facts_from_records`] only reads the log; a subagent or a remote
+    /// delegation is not a record in the parent's log, so it has to be added
+    /// here where the kernel can see the session store and the delegation
+    /// manager.
+    fn facts_for(&self, session: &SessionKey, turn: u32, records: &[Record]) -> agi_layout::Facts {
+        let mut facts = facts_from_records(session, turn, records);
+        self.add_waiting(session, records, &mut facts);
+        facts
+    }
+
+    /// Add the local children and remote delegations a turn is waiting on.
+    ///
+    /// The structural gate exits before the judge model is asked, so an empty
+    /// list here is not a small inaccuracy: the turn looks finished. A turn
+    /// that ended right after `remote_delegate` would then re-announce its last
+    /// narration as `stream_final` while the remote agent is still working.
+    ///
+    /// - A local subagent is a session of its own (`origin: "subagent"`); a
+    ///   running child whose parent is this session is proof the parent waits.
+    /// - A remote delegation is a tool call, not a session. The sidecar prints
+    ///   `AGI_MIZAR_DELEGATION <id>` in the result, and the record is still
+    ///   `Running` until it settles.
+    fn add_waiting(&self, session: &SessionKey, records: &[Record], facts: &mut agi_layout::Facts) {
+        {
+            let store = self.store_read();
+            let mut children: Vec<&Session> = store
+                .sessions
+                .values()
+                .filter(|child| {
+                    child.running
+                        && child.origin.as_deref() == Some("subagent")
+                        && child.parent.as_deref() == Some(session.raw())
+                })
+                .collect();
+            children.sort_by(|a, b| a.key.id.cmp(&b.key.id));
+            for child in children {
+                facts.subagents.push(format!("本机子代理 {}", child.key.id));
+            }
+        }
+
+        for id in delegated_ids(records) {
+            let Some(delegation) = self.remote.get(&id) else {
+                continue;
+            };
+            if delegation.state.is_active() {
+                facts
+                    .subagents
+                    .push(format!("远程子代理 {}（{id}）", delegation.peer_name));
+            }
+        }
+
+        // Background jobs are not sessions, and DSH announces only their
+        // settlement, so there is no per-turn "still running" fact to read yet.
+        // The field stays here for the engine that can supply one.
     }
 
     fn store_write(&self) -> std::sync::RwLockWriteGuard<'_, Store> {
@@ -1859,7 +1917,7 @@ impl Core {
                     // stays stuck in "thinking" when no model is configured. A
                     // model verdict can correct it a moment later; an agreeing
                     // verdict sends nothing.
-                    let facts = facts_for(&session, turn.unwrap_or(0), &slice);
+                    let facts = self.facts_for(&session, turn.unwrap_or(0), &slice);
                     self.capture_dataset_turn(&session, &facts, &slice);
                     self.settle(&session, &facts, None);
                     self.judge_turn(session.clone(), turn, slice);
@@ -3502,6 +3560,123 @@ mod tests {
         assert!(last_finished_turn(&records).is_none());
         assert!(last_finished_turn(&[]).is_none());
     }
+
+    fn tool_result(seq: i64, turn: u32, output: &str) -> Record {
+        Record {
+            tool: Some(agi_protocol::domain::ToolInfo {
+                call_id: "call-1".to_string(),
+                name: String::new(),
+                arguments: None,
+                output: Some(output.to_string()),
+            }),
+            ..record(seq, turn, RecordKind::ToolResult, None)
+        }
+    }
+
+    fn delegation(id: &str, state: remote::RemoteState) -> remote::Delegation {
+        remote::Delegation {
+            id: id.to_string(),
+            peer: "peer-1".to_string(),
+            peer_name: "Windows".to_string(),
+            session_id: None,
+            permission: None,
+            provider: None,
+            model: None,
+            reasoning_effort: None,
+            address: None,
+            state,
+            route: "wan".to_string(),
+            cwd: None,
+            prompt_preview: "brief".to_string(),
+            final_text: None,
+            error: None,
+            reason: None,
+            approval: None,
+            started_at: 1,
+            ended_at: None,
+        }
+    }
+
+    #[test]
+    fn the_delegation_marker_is_read_from_tool_output_only() {
+        let records = vec![
+            record(
+                1,
+                1,
+                RecordKind::AssistantMessage,
+                Some("AGI_MIZAR_DELEGATION prose"),
+            ),
+            tool_result(2, 1, "AGI_MIZAR_DELEGATION d1\n{\"delegationId\":\"d1\"}"),
+            tool_result(3, 1, "AGI_MIZAR_DELEGATIONX not-an-id"),
+            tool_result(4, 1, "AGI_MIZAR_DELEGATION d2"),
+        ];
+        assert_eq!(
+            delegated_ids(&records),
+            vec!["d1".to_string(), "d2".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_running_remote_delegation_keeps_the_turn_open() {
+        let core = Core::new(Vec::new());
+        core.remote
+            .seed(delegation("d1", remote::RemoteState::Running));
+        let key = SessionKey::new(EngineId::Dsh, "parent");
+        let records = vec![tool_result(2, 1, "AGI_MIZAR_DELEGATION d1\n{}")];
+
+        let facts = core.facts_for(&key, 1, &records);
+        assert_eq!(facts.subagents, vec!["远程子代理 Windows（d1）"]);
+        assert_eq!(agi_layout::gate(&facts), Some(agi_layout::State::Waiting));
+    }
+
+    #[test]
+    fn a_settled_remote_delegation_does_not_hold_the_turn() {
+        let core = Core::new(Vec::new());
+        core.remote
+            .seed(delegation("d1", remote::RemoteState::Done));
+        let key = SessionKey::new(EngineId::Dsh, "parent");
+        let records = vec![tool_result(2, 1, "AGI_MIZAR_DELEGATION d1\n{}")];
+
+        let facts = core.facts_for(&key, 1, &records);
+        assert!(facts.subagents.is_empty(), "{:?}", facts.subagents);
+        assert_eq!(agi_layout::gate(&facts), None);
+    }
+
+    #[test]
+    fn a_delegating_turn_settles_as_a_subagent_and_not_a_summary() {
+        let core = Core::new(Vec::new());
+        core.remote
+            .seed(delegation("d1", remote::RemoteState::Running));
+        let key = SessionKey::new(EngineId::Dsh, "parent");
+        let records = vec![tool_result(2, 1, "AGI_MIZAR_DELEGATION d1\n{}")];
+        let facts = core.facts_for(&key, 1, &records);
+
+        let mut frames = core.subscribe_states();
+        core.settle(&key, &facts, None);
+
+        let (_, bytes) = frames.try_recv().expect("the turn settles with a frame");
+        let frame = StateFrame::decode(&bytes).expect("the frame decodes");
+        assert_eq!(frame.state, SessionState::Subagent);
+        assert!(
+            frames.try_recv().is_err(),
+            "no stream_final/completed frame follows a waiting turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_running_local_subagent_keeps_the_turn_open() {
+        let parent = session(EngineId::Dsh, "parent", None);
+        let mut child = session(EngineId::Dsh, "child", Some("subagent"));
+        child.parent = Some("parent".to_string());
+        child.running = true;
+        let fake = Fake::new(EngineId::Dsh, vec![parent.clone(), child], None);
+        let core = Core::new(vec![Arc::clone(&fake) as Arc<dyn Engine>]);
+        core.start().await;
+
+        let facts = core.facts_for(&parent.key, 1, &[]);
+        assert_eq!(facts.subagents, vec!["本机子代理 child"]);
+        assert_eq!(agi_layout::gate(&facts), Some(agi_layout::State::Waiting));
+    }
 }
 
 // ---------------------------------------------------------------- layout glue
@@ -3613,8 +3788,47 @@ fn looks_failed(output: &str) -> bool {
         || head.contains("exit code 1")
 }
 
+/// The delegation ids a turn's tool results mention.
+///
+/// `agi-remote` writes `AGI_MIZAR_DELEGATION <id>` on a line of every
+/// delegate/send result (both the MCP tool and the CLI), and that line is the
+/// only link between a local turn and a remote task. The marker is looked for
+/// in tool output only: the model's prose quoting a delegation id is not proof
+/// that this turn started one.
+fn delegated_ids(records: &[Record]) -> Vec<String> {
+    const MARKER: &str = "AGI_MIZAR_DELEGATION";
+    let mut ids = Vec::new();
+    for record in records {
+        let Some(output) = record.tool.as_ref().and_then(|tool| tool.output.as_deref()) else {
+            continue;
+        };
+        for (at, _) in output.match_indices(MARKER) {
+            let rest = &output[at + MARKER.len()..];
+            // `AGI_MIZAR_DELEGATIONX` is a different word, not a marker.
+            if !rest.chars().next().is_some_and(char::is_whitespace) {
+                continue;
+            }
+            let id: String = rest
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
+                .collect();
+            if !id.is_empty() {
+                ids.push(id);
+            }
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
 /// Map one turn's records onto the judge's view.
-fn facts_for(session: &SessionKey, turn: u32, records: &[Record]) -> agi_layout::Facts {
+///
+/// This is only what the turn's own log says. [`Core::facts_for`] adds the
+/// things that live outside the log (running children, remote delegations) and
+/// is what the kernel should call.
+fn facts_from_records(session: &SessionKey, turn: u32, records: &[Record]) -> agi_layout::Facts {
     let first = records.first().map(|r| r.time).unwrap_or(0);
     let last = records.last().map(|r| r.time).unwrap_or(first);
     let minutes = ((last - first).max(0) as f64) / 60_000.0;

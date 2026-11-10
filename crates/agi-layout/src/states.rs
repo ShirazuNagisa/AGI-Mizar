@@ -501,6 +501,21 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_waiting_on_a_subagent_is_not_announced_as_the_answer() {
+        let mut m = StateMachine::new();
+        m.on_turn_start(1).unwrap();
+        m.on_text("已经交给远程子代理了，等它回来。");
+        let mut f = facts("completed", "已经交给远程子代理了，等它回来。");
+        f.subagents = vec!["远程子代理 Windows（d1）".into()];
+
+        // No `stream_final`: the last narration is not this turn's answer yet.
+        let frames = m.on_turn_end(&f, Some(State::Done));
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert_eq!(frames[0].state, SessionState::Subagent);
+        assert!(m.journal().iter().all(|entry| !entry.final_));
+    }
+
+    #[test]
     fn only_held_states_heartbeat() {
         let mut m = StateMachine::new();
         assert!(m.heartbeat().is_none(), "nothing has happened yet");

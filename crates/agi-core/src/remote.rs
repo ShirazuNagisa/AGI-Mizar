@@ -283,6 +283,19 @@ impl RemoteManager {
             .cloned()
     }
 
+    /// Insert a record without a network round trip.
+    ///
+    /// Tests need "a delegation that is still running"; [`load`] deliberately
+    /// turns a persisted `running` into `interrupted`, because a new process
+    /// has no task for it.
+    #[cfg(test)]
+    pub(crate) fn seed(&self, record: Delegation) {
+        self.records
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(record.id.clone(), record);
+    }
+
     /// Point the audit at a file. Boot calls this once; tests may skip it.
     pub fn set_audit_path(&self, path: PathBuf) {
         *self

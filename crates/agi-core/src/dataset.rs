@@ -555,7 +555,7 @@ async fn backfill_tick(core: &Arc<Core>) {
             if first.time < cutoff {
                 continue;
             }
-            let facts = crate::facts_for(&session.key, turn, &slice);
+            let facts = core.facts_for(&session.key, turn, &slice);
             core.capture_with(&session, &facts, &slice);
         }
         mark_backfilled(core, &session);
