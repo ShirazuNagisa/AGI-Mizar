@@ -174,6 +174,7 @@ pub struct DatasetView {
 
 /// One paired phone, as the menu bar lists it.
 #[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeviceView {
     pub id: String,
     pub name: String,
@@ -182,6 +183,14 @@ pub struct DeviceView {
     pub model: Option<String>,
     /// Whether this phone has a socket open right now.
     pub online: bool,
+    /// Whether the phone registered live-activity push tokens.
+    ///
+    /// A backgrounded phone has no socket, but a running session still reaches
+    /// it through the lock screen; the roster counts that as reachable too.
+    /// The token is only a capability -- the window pairs it with "a session is
+    /// running" before it draws the lamp.
+    #[serde(default)]
+    pub live_activity: bool,
     /// When it last reached this computer, in milliseconds since the epoch.
     #[serde(default)]
     pub last_seen_ms: i64,

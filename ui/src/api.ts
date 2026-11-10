@@ -228,7 +228,13 @@ export interface AccountUser {
 /** A phone paired to this computer, as the kernel sees it. */
 export interface DeviceStatus {
   name: string
+  /** The hardware the phone reported (`iPhone17,1`), when it reported one. */
+  model?: string
+  /** Whether the phone has a socket open right now. */
   online: boolean
+  /** Whether the phone registered live-activity push tokens. */
+  liveActivity?: boolean
+  /** Epoch milliseconds of its last hello. */
   lastSeenMs: number
 }
 

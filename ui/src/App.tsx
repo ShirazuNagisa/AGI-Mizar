@@ -531,6 +531,8 @@ export function App() {
             platform={platform}
             account={account}
             onlineDesktops={onlineDesktops}
+            devices={snapshot?.devices ?? []}
+            running={(snapshot?.sessions ?? []).some((session) => session.running)}
             serverConnected={serverConnected}
             theme={theme}
             onThemeChange={chooseTheme}

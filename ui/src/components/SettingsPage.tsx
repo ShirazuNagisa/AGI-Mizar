@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type {
   AccountUser,
   DatasetState,
+  DeviceStatus,
   Kernel,
   ModelCheck,
   ModelRuntime,
@@ -36,6 +37,10 @@ interface SettingsPageProps {
   platform: DesktopPlatform
   account: AccountUser | null
   onlineDesktops: Set<string>
+  /** This computer's phones and whether each one is reachable right now. */
+  devices: DeviceStatus[]
+  /** Whether any session is running, which is when live activity matters. */
+  running: boolean
   serverConnected: boolean
   theme: ThemePreference
   onThemeChange: (theme: ThemePreference) => void
@@ -64,6 +69,8 @@ export function SettingsPage({
   platform,
   account,
   onlineDesktops,
+  devices,
+  running,
   serverConnected,
   theme,
   onThemeChange,
@@ -115,7 +122,7 @@ export function SettingsPage({
                 <Group title="Mizar 手机端">
                   <DeviceList
                     devices={account?.devices.filter((device) => device.platform === 'ios') ?? []}
-                    online={new Set()}
+                    online={phoneOnlineIds(account, devices, running)}
                     empty={account === null ? '登录后可查看同一账户下的手机' : '这个账户下还没有手机'}
                   />
                 </Group>
@@ -266,6 +273,40 @@ function Empty({ children }: { children: React.ReactNode }) {
 }
 
 /** The devices under the account, split by the group they are drawn in. */
+/**
+ * Which of the account's phones this computer can reach right now.
+ *
+ * The account list knows names and models, not sockets; the kernel knows
+ * sockets and live-activity registrations, not account ids. The model is the
+ * honest join (`iPhone17,1`), with the name as the fallback for a phone that
+ * never reported one. A known model that disagrees blocks the name fallback:
+ * two iPhones are both called "iPhone".
+ */
+function phoneOnlineIds(
+  account: AccountUser | null,
+  devices: DeviceStatus[],
+  running: boolean,
+): Set<string> {
+  const reachable = devices.filter(
+    (device) => device.online || (running && device.liveActivity === true),
+  )
+  const ids = new Set<string>()
+  for (const device of account?.devices ?? []) {
+    if (device.platform !== 'ios') continue
+    const model = device.model?.toLowerCase()
+    const name = device.name?.toLowerCase()
+    const matches = reachable.some((local) => {
+      const localModel = local.model?.toLowerCase()
+      if (model !== undefined && localModel !== undefined) {
+        return model === localModel
+      }
+      return name !== undefined && local.name.toLowerCase() === name
+    })
+    if (matches) ids.add(device.id)
+  }
+  return ids
+}
+
 function DeviceList({
   devices,
   online,

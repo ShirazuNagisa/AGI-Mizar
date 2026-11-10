@@ -492,6 +492,44 @@ async fn a_delta_read_returns_only_what_is_new() {
 }
 
 #[tokio::test]
+async fn a_phone_that_registers_live_activity_is_marked_reachable() {
+    // A backgrounded phone has no socket, but a running session still reaches
+    // it through its lock screen. The roster records the capability when the
+    // phone registers a live-activity token, and the window pairs it with
+    // "something is running" before it draws the lamp.
+    let (server, store, _core, _fakes, _dir) = start().await;
+    let issued = store
+        .issue("iPhone", Some("iPhone17,1".to_string()))
+        .unwrap();
+    let (mut socket, _) = connect(server.port(), &issued.token, None).await;
+
+    let answer = call(
+        &mut socket,
+        "push.register",
+        json!({
+            "token": "push-token",
+            "platform": "ios",
+            "liveActivityToken": "live-token",
+        }),
+    )
+    .await;
+    assert_eq!(answer["type"], "ok", "registration was not accepted: {answer}");
+    let views = agi_core::DeviceStatusSource::device_views(&*server);
+    assert!(
+        views.iter().any(|view| view.live_activity),
+        "the registration must reach the roster: {views:?}"
+    );
+
+    let answer = call(&mut socket, "push.unregister", json!({})).await;
+    assert_eq!(answer["type"], "ok", "{answer}");
+    let views = agi_core::DeviceStatusSource::device_views(&*server);
+    assert!(
+        views.iter().all(|view| !view.live_activity),
+        "unregistering must put the lamp out: {views:?}"
+    );
+}
+
+#[tokio::test]
 async fn two_phones_with_the_same_name_show_their_models() {
     // One iPhone and one iPad both named "iPhone" used to be two identical
     // rows. The hardware is what tells them apart, and it is only worth

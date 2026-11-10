@@ -207,6 +207,7 @@ impl agi_core::DeviceStatusSource for MizarServer {
                 device.name.clone()
             };
             let online = live.get(&device.id).copied().unwrap_or(0) > 0;
+            let register_live_activity = device.live_activity_at.is_some();
             let account_backed = device
                 .model
                 .as_deref()
@@ -228,6 +229,7 @@ impl agi_core::DeviceStatusSource for MizarServer {
                     // one row. Prefer the account record's id: that is the one
                     // that still authenticates after a token rotation.
                     existing.online |= online;
+                    existing.live_activity |= register_live_activity;
                     existing.last_seen_ms = existing.last_seen_ms.max(device.last_seen_at);
                     if known.is_none() {
                         *known = hardware.clone();
@@ -244,6 +246,7 @@ impl agi_core::DeviceStatusSource for MizarServer {
                     account_backed,
                     agi_protocol::api::DeviceView {
                         online,
+                        live_activity: register_live_activity,
                         last_seen_ms: device.last_seen_at,
                         id: device.id,
                         name: label,
@@ -2477,6 +2480,18 @@ impl MizarServer {
                         body[field] = value.clone();
                     }
                 }
+                // The roster's second kind of reachable: a phone with a
+                // live-activity token can be followed on its lock screen while
+                // the app is suspended. Record the capability here; whether it
+                // is drawn lit still depends on a session actually running.
+                let carries_live_activity = ["liveActivityToken", "liveActivityStartToken"]
+                    .iter()
+                    .any(|field| frame.payload.get(*field).is_some());
+                if carries_live_activity {
+                    if let Err(error) = self.store.set_live_activity(&device.id, true) {
+                        tracing::warn!("mizar: could not record live activity: {error}");
+                    }
+                }
                 match self.relay_post("/push/v1/register", body).await {
                     Ok(answer) => {
                         let registered = answer.get("ok").and_then(Value::as_bool).unwrap_or(false);
@@ -2497,6 +2512,9 @@ impl MizarServer {
             }
 
             "push.unregister" => {
+                if let Err(error) = self.store.set_live_activity(&device.id, false) {
+                    tracing::warn!("mizar: could not clear live activity: {error}");
+                }
                 match self
                     .relay_post("/push/v1/unregister", json!({ "deviceId": device.id }))
                     .await

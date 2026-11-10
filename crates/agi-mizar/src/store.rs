@@ -25,6 +25,18 @@ pub struct Device {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// When the phone last registered live-activity push tokens.
+    ///
+    /// A backgrounded phone has no socket, but a running session still reaches
+    /// it through the lock screen. Persisted so a desktop restart does not
+    /// forget a phone that registered before it; the window pairs this with
+    /// "something is running" before it draws the lamp.
+    #[serde(
+        rename = "liveActivityAt",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub live_activity_at: Option<i64>,
     /// What the phone said it is in its `hello` (`iPhone17,1`, `iPad13,18`).
     ///
     /// `model` stays the provisioning marker (`account:…`) because token
@@ -141,6 +153,7 @@ impl DeviceStore {
             id: uuid::Uuid::new_v4().to_string(),
             name: name.to_string(),
             model,
+            live_activity_at: None,
             hardware: None,
             token_hash: hash_token(&token),
             created_at: crate::pairing::now_ms(),
@@ -225,6 +238,23 @@ impl DeviceStore {
         }
         self.save()?;
         Ok(true)
+    }
+
+    /// Remember (or forget) that a phone registered live-activity push tokens.
+    ///
+    /// Rare enough to write through; the roster reads it on every snapshot.
+    pub fn set_live_activity(&self, id: &str, registered: bool) -> io::Result<()> {
+        {
+            let mut state = self.state();
+            let Some(device) = state.devices.iter_mut().find(|device| device.id == id) else {
+                return Ok(());
+            };
+            if registered == device.live_activity_at.is_some() {
+                return Ok(());
+            }
+            device.live_activity_at = registered.then(crate::pairing::now_ms);
+        }
+        self.save()
     }
 
     /// Every device, revoked ones included.

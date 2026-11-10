@@ -54,6 +54,9 @@ export function TrayPanel({ kernel }: { kernel: Kernel }) {
 
   const engines: EngineStatus[] = snapshot?.engines ?? []
   const devices: DeviceStatus[] = snapshot?.devices ?? []
+  // A phone with only a live-activity token is reachable through the lock
+  // screen, but that is only worth a lit lamp while something is running.
+  const running = (snapshot?.sessions ?? []).some((session) => session.running)
 
   return (
     <div ref={root} className="flex w-full flex-col gap-1.5 bg-surface p-1.5 text-fg">
@@ -87,7 +90,11 @@ export function TrayPanel({ kernel }: { kernel: Kernel }) {
           <Row label="没有同账户的设备" />
         ) : (
           devices.map((device) => (
-            <Row key={device.name} label={device.name} connected={device.online}>
+            <Row
+              key={device.name}
+              label={device.name}
+              connected={device.online || (running && device.liveActivity === true)}
+            >
               <PhoneMark size={15} className="shrink-0 text-muted" />
             </Row>
           ))
