@@ -1823,16 +1823,14 @@ impl Core {
             for child in children {
                 facts.subagents.push(format!("本机子代理 {}", child.key.id));
             }
+        }
 
-            // A background job is not a session either. DSH announces the
-            // start in the tool result and the settlement as a notice, both in
-            // the same record stream; the pair is enough to know it is still
-            // running.
-            if let Some(bucket) = store.records.get(session) {
-                for job in active_jobs(bucket.iter()) {
-                    facts.jobs.push(format!("后台任务 {job}"));
-                }
-            }
+        // A background job started in this turn is the same promise: its
+        // settlement notice will wake the model. Only this turn's records are
+        // read, so a dev server left running by an earlier turn does not keep
+        // every later turn open.
+        for job in active_jobs(records.iter()) {
+            facts.jobs.push(format!("后台任务 {job}"));
         }
 
         for id in delegated_ids(records) {
@@ -3691,30 +3689,24 @@ mod tests {
     fn a_background_job_keeps_the_turn_open_until_its_notice() {
         let core = Core::new(Vec::new());
         let key = SessionKey::new(EngineId::Dsh, "parent");
-        {
-            let mut store = core.store_write();
-            store.records.insert(
-                key.clone(),
-                VecDeque::from(vec![tool_result(1, 1, "started background job bash-300")]),
-            );
-        }
+        let started = vec![tool_result(1, 1, "started background job bash-300")];
 
-        let facts = core.facts_for(&key, 1, &[]);
+        let facts = core.facts_for(&key, 1, &started);
         assert_eq!(facts.jobs, vec!["后台任务 bash-300"]);
         assert_eq!(agi_layout::gate(&facts), Some(agi_layout::State::Waiting));
 
-        {
-            let mut store = core.store_write();
-            store.records.get_mut(&key).unwrap().push_back(Record {
+        let finished = vec![
+            tool_result(1, 1, "started background job bash-300"),
+            Record {
                 text: Some(
                     "background job bash-300 (bash: sleep 1) finished [status: completed, exit code: 0]"
                         .to_string(),
                 ),
                 ..record(2, 1, RecordKind::Notice, None)
-            });
-        }
+            },
+        ];
 
-        let facts = core.facts_for(&key, 1, &[]);
+        let facts = core.facts_for(&key, 1, &finished);
         assert!(facts.jobs.is_empty(), "{:?}", facts.jobs);
     }
 }
@@ -3828,13 +3820,13 @@ fn looks_failed(output: &str) -> bool {
         || head.contains("exit code 1")
 }
 
-/// The background jobs a session started and has not seen finish.
+/// The background jobs a turn started and has not seen finish.
 ///
 /// DSH writes `started background job <id>` in the tool result and later injects
 /// `background job <id> (…) finished [status: …]` as a notice. Both are ordinary
-/// records, so the open set is "starts minus finishes" over the session's log.
-/// The log is bounded, so a start that fell off the front is a false negative;
-/// it can never invent a job.
+/// records, so the open set is "starts minus finishes" over the turn. A job that
+/// began in an earlier turn is deliberately not inherited: it is a session fact,
+/// not this turn's unfinished work.
 fn active_jobs<'a>(records: impl IntoIterator<Item = &'a Record>) -> Vec<String> {
     let mut active = std::collections::BTreeSet::new();
     for record in records {
