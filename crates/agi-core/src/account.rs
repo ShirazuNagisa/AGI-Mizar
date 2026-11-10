@@ -21,12 +21,14 @@ use serde_json::{json, Value};
 /// Where the relay's account service lives unless a launch says otherwise.
 /// Where the account service lives.
 ///
-/// The account-gated relay: same host and certificate as the paid relay, but the
-/// process that also owns this desktop's tunnel. Sign-in and `/me` are proxied
-/// to the origin account service from there, so the account is the same one;
-/// only `/desktops` and `/connect` are answered locally, because those are the
-/// two questions that need to see the tunnel.
-pub const OFFICIAL_ACCOUNT_URL: &str = "https://dshmizar-1.shirazu-nagisa.com:8443";
+/// The unified origin: since 0.9.9 a phone uses this relay for every plan, and
+/// the account-gated `:8443` instance is only a fallback for older pairings.
+/// A desktop that keeps starting on `:8443` is invisible to a phone whose
+/// stored pairing has already moved to this one -- after a restart the phone
+/// dials the room here and finds nothing. Sign-in, `/desktops`, `/connect` and
+/// the tunnel all live on this origin, so the account and the room stay on the
+/// same host.
+pub const OFFICIAL_ACCOUNT_URL: &str = "https://dshmizar-1.shirazu-nagisa.com";
 
 /// A failure the window can show: a code to branch on and a sentence to read.
 #[derive(Debug, Clone, PartialEq, Eq)]

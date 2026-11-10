@@ -346,8 +346,8 @@ impl MizarServer {
     const SELECTABLE_RELAYS: [&'static str; 3] = [
         "https://dshmizar.shirazu-nagisa.com",
         "https://dshmizar-1.shirazu-nagisa.com",
-        // The account-gated relay: same host, different port, no anonymous
-        // traffic. Experimental, and only this build knows the address.
+        // The account-gated relay on the old port: no anonymous traffic. Kept
+        // selectable because a pairing made before 0.9.9 may still name it.
         "https://dshmizar-1.shirazu-nagisa.com:8443",
     ];
 

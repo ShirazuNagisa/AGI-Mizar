@@ -643,7 +643,7 @@ fn turns_from_records(records: &[Record]) -> Vec<(u32, Vec<Record>)> {
 
 /// Where the ingest endpoint lives.
 ///
-/// Not the account base: the desktop signs in through the 8443 gateway, which
+/// Not the account base: the desktop signs in through the unified relay, which
 /// deliberately keeps no account store (it verifies and proxies to the origin),
 /// so it has nothing to authenticate an upload against. The production role-1
 /// relay on 443 owns the account store and is therefore the one that can accept
