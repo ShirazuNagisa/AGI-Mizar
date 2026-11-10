@@ -87,6 +87,11 @@ async fn fake_relay() -> (String, Arc<Mutex<Vec<Received>>>) {
 async fn start() -> (Arc<MizarServer>, Arc<DeviceStore>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let store = DeviceStore::open(dir.path().join("devices.json"), "test-host").unwrap();
+    // Pin the notification language so the English assertions below do not
+    // depend on the machine running the test: the store falls back to the
+    // desktop's own language until a phone registers one.
+    let phone = store.issue("phone", None).unwrap();
+    store.set_locale(&phone.device.id, "en-US").unwrap();
     let core = Core::new(Vec::new());
     core.start().await;
     let server = MizarServer::new(core, Arc::clone(&store), "/tmp/dsh-home");

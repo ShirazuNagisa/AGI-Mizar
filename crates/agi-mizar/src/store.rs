@@ -45,6 +45,14 @@ pub struct Device {
     /// reconnect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hardware: Option<String>,
+    /// The language the phone asked its notifications to be written in.
+    ///
+    /// Sent with `push.register` (the app's first preferred language) and kept
+    /// so a notification composed while the phone is suspended can follow it.
+    /// Absent on records written before the field existed; absent means the
+    /// desktop's default, English.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
     /// SHA-256 of the token, hex. Never the token.
     #[serde(rename = "tokenHash")]
     pub token_hash: String,
@@ -155,6 +163,7 @@ impl DeviceStore {
             model,
             live_activity_at: None,
             hardware: None,
+            locale: None,
             token_hash: hash_token(&token),
             created_at: crate::pairing::now_ms(),
             last_seen_at: 0,
@@ -255,6 +264,58 @@ impl DeviceStore {
             device.live_activity_at = registered.then(crate::pairing::now_ms);
         }
         self.save()
+    }
+
+    /// Remember the language a phone asked its notifications to be written in.
+    ///
+    /// `locale` is the app's first preferred language (`zh-Hans-CN`, `en-US`),
+    /// not a display name; a value that is empty or oversized is ignored rather
+    /// than persisted, so a malformed frame cannot grow the roster.
+    pub fn set_locale(&self, id: &str, locale: &str) -> io::Result<()> {
+        let locale = locale.trim().to_ascii_lowercase();
+        if locale.is_empty() || locale.len() > 35 {
+            return Ok(());
+        }
+        {
+            let mut state = self.state();
+            let Some(device) = state.devices.iter_mut().find(|device| device.id == id) else {
+                return Ok(());
+            };
+            if device.locale.as_deref() == Some(locale.as_str()) {
+                return Ok(());
+            }
+            device.locale = Some(locale);
+        }
+        self.save()
+    }
+
+    /// Whether notifications should be written in Chinese.
+    ///
+    /// The notification text is room-wide, so one phone's language is picked
+    /// for everybody. Chinese wins when any live phone speaks it: an English
+    /// phone can read the fallback in the app, a Chinese one reading an English
+    /// banner is the complaint this exists to remove.
+    ///
+    /// Before the first phone has registered (or when a phone predates the
+    /// locale field), the computer's own language is the best guess: the phone
+    /// is usually set up next to it, and an operator who reads Chinese on the
+    /// Mac does not want English on the Lock Screen while they wait for the app
+    /// to reconnect.
+    pub fn prefers_chinese(&self) -> bool {
+        let locales: Vec<String> = self
+            .state()
+            .devices
+            .iter()
+            .filter(|device| device.revoked_at.is_none())
+            .filter_map(|device| device.locale.clone())
+            .collect();
+        if locales.iter().any(|locale| locale.starts_with("zh")) {
+            return true;
+        }
+        if locales.is_empty() {
+            return desktop_prefers_chinese();
+        }
+        false
     }
 
     /// Every device, revoked ones included.
@@ -429,6 +490,31 @@ pub fn best_address() -> Option<std::net::IpAddr> {
     local_addresses().into_iter().next()
 }
 
+/// The language this computer's operator reads, for notifications composed
+/// before any phone has registered one.
+///
+/// macOS keeps the preference in `AppleLanguages`; other platforms expose it
+/// through the usual `LC_ALL`/`LANG` environment. Anything unknown is English,
+/// the language every build carries anyway.
+fn desktop_prefers_chinese() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("/usr/bin/defaults")
+            .args(["read", "-g", "AppleLanguages"])
+            .output()
+        {
+            let text = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+            if text.contains("zh") {
+                return true;
+            }
+        }
+    }
+    std::env::var("LC_ALL")
+        .or_else(|_| std::env::var("LANG"))
+        .map(|value| value.to_ascii_lowercase().starts_with("zh"))
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -488,6 +574,28 @@ mod tests {
 
         store.authenticate(&issued.token).unwrap();
         assert!(store.devices()[0].last_seen_at > 0);
+    }
+
+    #[test]
+    fn the_phone_language_is_remembered_and_chinese_wins() {
+        let (store, _dir) = store();
+        let phone = store.issue("iPhone", None).unwrap();
+        // No phone locale yet: the answer is the desktop's own language, which
+        // depends on the machine running this test -- not asserted here.
+
+        store.set_locale(&phone.device.id, "zh-Hans-CN").unwrap();
+        assert!(store.prefers_chinese(), "a zh locale selects Chinese");
+
+        // An English phone does not override the Chinese one while it is live:
+        // one notification text goes to the room, and Chinese is the one that
+        // cannot be read by its audience otherwise.
+        let tablet = store.issue("iPad", None).unwrap();
+        store.set_locale(&tablet.device.id, "en-US").unwrap();
+        assert!(store.prefers_chinese());
+
+        // Oversized values are ignored rather than persisted.
+        store.set_locale(&phone.device.id, &"z".repeat(50)).unwrap();
+        assert!(store.prefers_chinese(), "the previous valid locale stays");
     }
 
     #[test]

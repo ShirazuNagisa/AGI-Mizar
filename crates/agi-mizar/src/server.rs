@@ -2476,6 +2476,11 @@ impl MizarServer {
                     "token": token,
                     "platform": frame.payload.get("platform").and_then(Value::as_str).unwrap_or("ios"),
                 });
+                if let Some(locale) = frame.payload.get("locale").and_then(Value::as_str) {
+                    if let Err(error) = self.store.set_locale(&device.id, locale) {
+                        tracing::warn!("mizar: could not record the phone's language: {error}");
+                    }
+                }
                 for field in [
                     "environment",
                     "locale",
@@ -2752,10 +2757,11 @@ impl MizarServer {
     /// card. Everything else on this host gets one notification per interaction,
     /// addressed to the session that is blocked.
     async fn notify_interaction(&self, interaction: &agi_protocol::domain::Interaction) {
+        let zh = self.store.prefers_chinese();
         let (kind, title, body) = match interaction.kind {
             InteractionKind::Approval => (
                 "approval",
-                "Approval needed".to_string(),
+                if zh { "需要审批" } else { "Approval needed" }.to_string(),
                 interaction.title.clone(),
             ),
             _ => {
@@ -2772,7 +2778,12 @@ impl MizarServer {
                     .unwrap_or_else(|| interaction.title.clone());
                 (
                     "question",
-                    "The agent asked a question".to_string(),
+                    if zh {
+                        "Agent 向你提问"
+                    } else {
+                        "The agent asked a question"
+                    }
+                    .to_string(),
                     question,
                 )
             }
@@ -2939,7 +2950,8 @@ impl MizarServer {
         } else {
             self.foreground_devices()
         };
-        let body = crate::activity::turn_end_body(title, session, end, &except);
+        let body =
+            crate::activity::turn_end_body(title, session, end, &except, self.store.prefers_chinese());
         if let Err(error) = self.relay_post("/push/v1/notify", body).await {
             tracing::debug!("mizar: no turn-end notification — {error}");
         }

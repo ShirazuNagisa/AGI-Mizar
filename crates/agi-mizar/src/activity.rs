@@ -301,16 +301,22 @@ pub fn turn_end_body(
     session: &SessionKey,
     end_live_activity: bool,
     except: &[String],
+    zh: bool,
 ) -> Value {
     let name = if title.trim().is_empty() {
-        "Session".to_string()
+        if zh { "会话" } else { "Session" }.to_string()
     } else {
         title.trim().to_string()
     };
+    let (headline, body) = if zh {
+        ("会话已完成".to_string(), format!("{name} 已完成"))
+    } else {
+        ("Turn finished".to_string(), format!("{name} is done"))
+    };
     json!({
         "kind": "turn_end",
-        "title": "Turn finished",
-        "body": format!("{name} is done"),
+        "title": headline,
+        "body": body,
         "sessionId": session.to_string(),
         "threadId": session.to_string(),
         "timeSensitive": false,
@@ -551,15 +557,23 @@ mod tests {
 
     #[test]
     fn a_turn_end_notification_says_which_session_and_whether_to_end_the_card() {
-        let body = turn_end_body("Fix the tests", &key("a"), true, &[]);
+        let body = turn_end_body("Fix the tests", &key("a"), true, &[], false);
         assert_eq!(body["kind"], "turn_end");
         assert_eq!(body["sessionId"], "dsh:a");
         assert_eq!(body["endLiveActivity"], true);
         assert_eq!(body["body"], "Fix the tests is done");
 
         // A session with no title still gets a sentence rather than an empty one.
-        let unnamed = turn_end_body("", &key("b"), false, &[]);
+        let unnamed = turn_end_body("", &key("b"), false, &[], false);
         assert_eq!(unnamed["body"], "Session is done");
         assert_eq!(unnamed["endLiveActivity"], false);
+
+        // A phone that registered a Chinese locale gets Chinese text, and the
+        // session name stays the operator's own words.
+        let zh = turn_end_body("Fix the tests", &key("c"), true, &[], true);
+        assert_eq!(zh["title"], "会话已完成");
+        assert_eq!(zh["body"], "Fix the tests 已完成");
+        let zh_unnamed = turn_end_body("", &key("d"), false, &[], true);
+        assert_eq!(zh_unnamed["body"], "会话 已完成");
     }
 }
