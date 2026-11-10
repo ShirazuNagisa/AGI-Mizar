@@ -575,8 +575,8 @@ macOS 侧又推进 29 个提交（remote_health 依赖检查+日志导出、remo
   菜单与 F5/Ctrl+R 重载在页面层关掉（输入框保留原生菜单）；引导手机卡片补 Android APK 入口、
   偏好步文案与默认值一致、Codex GUI 面在 Windows 如实写「只读」。
 - 打包/安装：`scripts/package.ps1 -Bundles nsis` → **22.8 MiB**，SHA256
-  `4cfe8f5f4b0196ddbdf1cd3ed8e2025dac4dbb6cc3fdb4ea744bc208f5e32c67`；`/S` 覆盖安装 exit 0，
-  安装版 `agi-mizar.exe` 30,185,472 B / SHA256 `0D82DA72…FCE56A`。
+  `9ef239c6330e12bdc9ad3458707b2d1cc68846e426d4e0afbcd84de1a6e04b42`；`/S` 覆盖安装 exit 0，
+  安装版 `agi-mizar.exe` 30,215,168 B / SHA256 `042E6821…FCE56A`。
 - 运行时：安装版 27 项矩阵 **27 PASS / 0 FAIL**（依赖完整性报告 8 项 ok、导出日志原生「另存为」可取消
   且不报错、F5/右键守卫、shell IPC 往返、更新检查…）；Win32 层：最大化 3862×2110（工作区 3840×2088，
   不盖任务栏）、最小化/恢复、关窗隐藏进程存活、单实例 0.1 s 退出并唤窗、`--background` 全窗口隐藏且
@@ -585,3 +585,14 @@ macOS 侧又推进 29 个提交（remote_health 依赖检查+日志导出、remo
   `docs/session-notes/2026-11-10-agi-mizar-windows-parity.md`。
 - 仍存缺口：Codex GUI 桌面控制仍仅 macOS/Linux（Windows 无可驱动桌面端）；Snap Layouts 悬停缺失；
   宽度锁 1034 使 Win+←/→ 分屏失效；Authenticode 未签名；MSI 需提权。
+### 2026-11-10 15:45 · 再更新到 `f6a1d928`（presence tunnel 重建安装）
+
+上游 `560e9a5e fix(relay): keep a presence tunnel on the account instance`（`crates/agi-boot/src/lib.rs`
++60 行：签入时在账户实例 `:8443` 再挂一条同房间隧道，供 iOS `/desktops` 与旧配对使用）合入后，
+本机从 `8d3a68a3` fast-forward 到 `f6a1d928`，重新跑门禁/打包/覆盖安装/运行时复验：
+
+- 门禁 `cargo test --workspace --no-fail-fast` **489/0**、clippy **0**；
+- NSIS **22.8 MiB**，SHA256 `9ef239c6…`；安装版 exe 30,215,168 B / SHA256 `042E6821…`；
+- 运行时矩阵 27 PASS / 0 FAIL；新代码在 Windows 上的直接证据是进程同时保有
+  `…:443` 与 `…:8443` 两条已建立连接（`Get-NetTCPConnection -OwningProcess <pid>`）；
+- 安装版以 WMI 方式后台启动（pid 29800），窗口 1034×802、`/healthz` 200。
