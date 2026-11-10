@@ -611,3 +611,25 @@ macOS 侧又推进 29 个提交（remote_health 依赖检查+日志导出、remo
   skill 一直 `outdated`。更新前先 `Stop-Process -Name agi-remote` 再安装（DSH 约 1 s 后重启它，要抢窗口），
   装完确认 `bin\agi-remote.exe` 哈希 = `target/release/agi-remote.exe`，再点修复。
   详见工作区词条 `desktop.windows-sidecar-locked-update`。
+### 2026-11-11 00:20 · 窗口一拉大就消失（ptMaxTrackSize = -1）
+
+用户报「只要尝试拉长窗口，窗口直接消失，只能重启」。实测安装版（`33ec0ac5` 构建）：窗口外框
+1573×1216、客户区 1551×1203（1034×802 逻辑 @150%），从下边缘拖一次就变外框 1573×0、
+客户区 1551×-13；进程/托盘都在、`IsWindowVisible=true`，桌面上却没有窗口。
+
+- 根因：锁宽度用的 `max_inner_size(1034.0, f64::INFINITY)`。tao 0.37.2 在 Windows 上把逻辑尺寸
+  饱和转成 `u32`（`∞ → u32::MAX`），`WM_GETMINMAXINFO` 再 `as i32` 写成 `ptMaxTrackSize.y = -1`，
+  第一次纵向拖拽即把窗口夹成 0 高。同一处还有客户区/外框差：tao 按**客户区**算 track，
+  Windows 按**外框**执行，150% 下右边拖一次客户区被压 22px（1551 → 1529）、下边缩到客户区 707
+  而不是 480 的设计下限。
+- 修复（`96966486`）：`f64::INFINITY` → 有限上限 `WINDOW_MAX_HEIGHT = 10_000.0`（能塞进 `i32`），
+  `480.0` 提成 `WINDOW_MIN_HEIGHT`；建窗后 `compensate_window_frame()` 量 `outer - inner` 的
+  不可见边框，换算回逻辑像素并用 `set_min_size` / `set_max_size` 重述约束；加单元测试钉住常量。
+- 验证：合成真实鼠标拖拽矩阵全部正常（下边 +320 → 客户区 1523；下边 -900 停在 720 = 480×1.5；
+  左右边拖宽度恒 1551；右下/上边跟手；最大化客户区 3840×2088、还原恢复原尺寸）；安装版复测
+  同一矩阵通过。门禁 `cargo test --workspace` **498/0**（含本轮拉取的 7 个新测试）、clippy 0、
+  `ui/dist` 重建一致；NSIS 22.8 MiB / `14b1245a…`，安装版 exe 30,315,520 B / `75DA4AD5…`。
+- 装到一半时上游又推了 `ef447d5f feat(ui): name the remote skill and expose allow-all in onboarding`
+  （00:04:22），于是重新拉取 + 变基、重建 UI（`index-CObeeIqP.css` / `index-DK0ysHUZ.js`，与提交逐字节
+  一致）并重打安装包、重装复验；上面的哈希是最终这一版。
+- 证据：`docs/evidence/agi-mizar-windows-2026-11-11/`；词条 `desktop.windows-window-resize-collapse`。
