@@ -5,7 +5,8 @@
 //! - `/dsh` — the DSH helper plugin dials in here. Unauthenticated at the HTTP
 //!   layer because the token is inside the protocol's `hello` frame, which is
 //!   where the plugin already puts it.
-//! - `/api/v1/*` — the UI. Bearer token, loopback only.
+//! - `/api/v1/*` — the UI. Bearer token or the HttpOnly cookie `/launch` sets,
+//!   loopback by default.
 //! - `/healthz` — a liveness probe that reveals nothing.
 //!
 //! ### Why the UI is not on Tauri's IPC
@@ -17,10 +18,10 @@
 //!
 //! ### Why loopback only
 //!
-//! Binding a wildcard address is rejected by construction: the listener is
-//! created on `127.0.0.1:0`. A desktop app's control API has no business being
-//! reachable from the network it happens to be attached to, and the DSH plugin
-//! already runs on this machine.
+//! The default bind is `127.0.0.1:0`: a desktop app's control API has no business
+//! being reachable from the network it happens to be attached to. A headless
+//! install can deliberately choose another address with `AGI_API_HOST`; it then
+//! gets the same bearer/cookie checks, but the operator owns that exposure.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -31,7 +32,7 @@ use agi_protocol::api::{Command, StateSnapshot};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::header;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -57,6 +58,11 @@ pub struct Config {
     pub hook_token: String,
     /// Presented by the scoped remote-agent MCP/CLI; only `Remote*` commands.
     pub tool_token: String,
+    /// Interface the UI/API listens on. A packaged window leaves this loopback;
+    /// a headless Linux install can name a LAN address deliberately.
+    pub api_host: String,
+    /// Port for the UI/API. `0` asks the operating system for a free one.
+    pub api_port: u16,
 }
 
 #[derive(Clone)]
@@ -84,6 +90,8 @@ pub async fn bind(
     claude: Option<Arc<ClaudeEngine>>,
     config: Config,
 ) -> anyhow::Result<(u16, JoinHandle<()>)> {
+    let api_host = config.api_host.clone();
+    let api_port = config.api_port;
     let state = AppState {
         core,
         dsh,
@@ -100,6 +108,10 @@ pub async fn bind(
         // will, so the seam is exercised from the first build.
         .route("/", get(page))
         .route("/assets/:file", get(asset))
+        // A browser launch boots the UI with an HttpOnly session cookie, so a
+        // bookmark or a copied address bar never carries the API token.
+        .route("/launch", get(launch_handler))
+        .route("/api/v1/logout", post(logout_handler))
         .route("/healthz", get(healthz))
         .route("/api/v1/state", get(state_handler))
         .route("/api/v1/command", post(command_handler))
@@ -109,8 +121,9 @@ pub async fn bind(
         .with_state(state);
 
     // Loopback, ephemeral. `0` asks the OS for a free port, which is what makes
-    // two windows (or a dev run beside a packaged build) coexist.
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+    // two windows (or a dev run beside a packaged build) coexist. A headless
+    // install can pin both through the boot configuration.
+    let listener = tokio::net::TcpListener::bind((api_host.as_str(), api_port)).await?;
     let port = listener.local_addr()?.port();
 
     let handle = tokio::spawn(async move {
@@ -270,7 +283,9 @@ async fn command_handler(
 
 #[derive(Deserialize)]
 struct TokenQuery {
-    token: String,
+    /// The legacy/dev query token. Optional because a browser launched through
+    /// `/launch` carries an HttpOnly cookie instead.
+    token: Option<String>,
     /// Ask for the binary state channel on this socket (`?state=1`).
     ///
     /// Off by default, and the default is what a 0.9.8 client gets: it neither
@@ -281,10 +296,15 @@ struct TokenQuery {
 
 async fn events_handler(
     State(app): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<TokenQuery>,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    if !constant_time_eq(&query.token, &app.api_token) {
+    let query_ok = query
+        .token
+        .as_deref()
+        .is_some_and(|presented| constant_time_eq(presented, &app.api_token));
+    if !query_ok && !authorized(&headers, &app.api_token) {
         return unauthorized();
     }
     let attendance = Attendance::join(&app.claude, &app.watchers);
@@ -505,13 +525,91 @@ async fn pump_dsh(dsh: Arc<DshEngine>, mut socket: WebSocket) {
     }
 }
 
+/// The cookie a browser launch exchanges the URL token for.
+const SESSION_COOKIE: &str = "agi_mizar_session";
+
+#[derive(Deserialize)]
+struct LaunchQuery {
+    token: String,
+    #[serde(default)]
+    next: Option<String>,
+}
+
+/// Turn a one-shot launch token into an HttpOnly cookie, then get out of the
+/// address bar.
+///
+/// The token still exists in the link the launcher opens, so it can be read
+/// from the local process or browser history. What this changes is the steady
+/// state: after the redirect, the page, its assets and its WebSocket carry only
+/// the cookie, and copying the address bar no longer copies the credential.
+async fn launch_handler(State(app): State<AppState>, Query(query): Query<LaunchQuery>) -> Response {
+    if !constant_time_eq(&query.token, &app.api_token) {
+        return unauthorized();
+    }
+    let next = local_next(query.next.as_deref());
+    let cookie = format!(
+        "{SESSION_COOKIE}={}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000",
+        query.token
+    );
+    let (Ok(cookie), Ok(next)) = (HeaderValue::from_str(&cookie), HeaderValue::from_str(&next))
+    else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let mut response = StatusCode::SEE_OTHER.into_response();
+    response.headers_mut().insert(header::SET_COOKIE, cookie);
+    response.headers_mut().insert(header::LOCATION, next);
+    response
+}
+
+/// Drop the browser session. The API token is unchanged; the next launch
+/// exchanges it for a fresh cookie.
+async fn logout_handler() -> Response {
+    let cookie = format!("{SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+    let Ok(cookie) = HeaderValue::from_str(&cookie) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response.headers_mut().insert(header::SET_COOKIE, cookie);
+    response
+}
+
+/// Only a same-origin path may be the post-launch destination.
+fn local_next(next: Option<&str>) -> String {
+    let Some(value) = next else {
+        return "/".to_string();
+    };
+    if !value.starts_with('/') || value.starts_with("//") {
+        return "/".to_string();
+    }
+    if value.chars().any(char::is_control) || value.contains('\\') {
+        return "/".to_string();
+    }
+    value.to_string()
+}
+
 /// Whether the request carries this launch's API token.
 fn authorized(headers: &HeaderMap, token: &str) -> bool {
-    headers
+    let bearer = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|presented| constant_time_eq(presented, token))
+        .is_some_and(|presented| constant_time_eq(presented, token));
+    bearer || cookie_token(headers).is_some_and(|presented| constant_time_eq(presented, token))
+}
+
+/// The `agi_mizar_session` value from a `Cookie` header, if present.
+fn cookie_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|cookies| {
+            cookies.split(';').find_map(|part| {
+                part.trim()
+                    .strip_prefix(SESSION_COOKIE)
+                    .and_then(|rest| rest.strip_prefix('='))
+                    .filter(|value| !value.is_empty())
+            })
+        })
 }
 
 /// Compare without an early exit.
@@ -558,6 +656,55 @@ mod tests {
         assert!(!constant_time_eq("abc", "abd"));
         assert!(!constant_time_eq("abc", "abcd"));
         assert!(!constant_time_eq("", "a"));
+    }
+
+    #[test]
+    fn cookie_token_reads_session_cookie() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("theme=dark; agi_mizar_session=abc123; other=1"),
+        );
+        assert_eq!(cookie_token(&headers), Some("abc123"));
+    }
+
+    #[test]
+    fn cookie_token_ignores_lookalikes_and_empty_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("agi_mizar_session_extra=no; agi_mizar_session=; x=y"),
+        );
+        assert_eq!(cookie_token(&headers), None);
+    }
+
+    #[test]
+    fn authorized_accepts_bearer_and_cookie() {
+        let token = "a".repeat(64);
+        let mut bearer = HeaderMap::new();
+        bearer.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        assert!(authorized(&bearer, &token));
+
+        let mut cookie = HeaderMap::new();
+        cookie.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("agi_mizar_session={token}")).unwrap(),
+        );
+        assert!(authorized(&cookie, &token));
+        assert!(!authorized(&cookie, &"b".repeat(64)));
+    }
+
+    #[test]
+    fn local_next_stays_on_this_origin() {
+        assert_eq!(local_next(None), "/");
+        assert_eq!(local_next(Some("/settings")), "/settings");
+        assert_eq!(local_next(Some("//evil.example")), "/");
+        assert_eq!(local_next(Some("https://evil.example")), "/");
+        assert_eq!(local_next(Some("/bad\npath")), "/");
+        assert_eq!(local_next(Some("/bad\\path")), "/");
     }
 }
 

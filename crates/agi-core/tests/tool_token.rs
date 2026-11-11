@@ -18,6 +18,8 @@ async fn the_tool_token_may_only_call_remote_commands() {
             plugin_token: "plugin-token".to_string(),
             hook_token: "hook-token".to_string(),
             tool_token: "tool-token".to_string(),
+            api_host: "127.0.0.1".to_string(),
+            api_port: 0,
         },
     )
     .await

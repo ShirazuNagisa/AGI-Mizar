@@ -69,6 +69,15 @@ cd ui && npm install && npm run build   # 改前端之后：内核在编译时�
 cd ui && npm run dev                    # 前端热更新，代理到 127.0.0.1:19392
 ```
 
+Linux 浏览器界面（同一份 `ui/dist`，注册成用户级 Web 应用；菜单项 / systemd 自启 / cookie 登录）：
+
+```sh
+scripts/linux/install-webui.sh --build
+agi-mizar-web open                      # 也可 url / status / logs / restart
+```
+
+细节与无头服务器用法见 [`docs/linux.md`](docs/linux.md)。
+
 Windows（PowerShell，依赖与坑见 [docs/windows.md](docs/windows.md)）：
 
 ```powershell

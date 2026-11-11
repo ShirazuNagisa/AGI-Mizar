@@ -495,7 +495,7 @@ export type ApiEvent =
   | { type: 'dsh_plugin_changed'; plugin: DshPluginView }
   | { type: 'notice'; level: string; message: string }
 
-/** The token the shell put in this page's URL. */
+/** The token the shell put in this page's URL, when it used one. */
 function tokenFromLocation(): string {
   return new URLSearchParams(window.location.search).get('token') ?? ''
 }
@@ -533,9 +533,11 @@ export class Kernel {
   /** Subscribe to the event stream. Returns the close function. */
   subscribe(onEvent: (event: ApiEvent) => void, onDown: () => void): () => void {
     const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const socket = new WebSocket(
-      `${scheme}://${window.location.host}/api/v1/events?token=${encodeURIComponent(this.#token)}`,
-    )
+    // A browser launched through /launch has no URL token: the HttpOnly cookie
+    // rides the same-origin WebSocket handshake. A packaged window keeps the
+    // query token it has always used.
+    const query = this.#token === '' ? '' : `?token=${encodeURIComponent(this.#token)}`
+    const socket = new WebSocket(`${scheme}://${window.location.host}/api/v1/events${query}`)
     socket.onmessage = (message) => {
       try {
         onEvent(JSON.parse(message.data as string) as ApiEvent)
@@ -548,6 +550,6 @@ export class Kernel {
   }
 
   #headers(): Record<string, string> {
-    return { authorization: `Bearer ${this.#token}` }
+    return this.#token === '' ? {} : { authorization: `Bearer ${this.#token}` }
   }
 }

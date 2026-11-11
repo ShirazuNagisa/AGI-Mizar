@@ -96,11 +96,32 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
         .clone()
         .unwrap_or_else(endpoint::default_endpoint_path);
 
-    // Three tokens, because three callers with different reach hold them.
+    // Three tokens, because three callers with different reach hold them. The
+    // API token is the one a Linux service pins: a stable value is what lets a
+    // bookmark exchange it for a cookie instead of changing every launch.
     let plugin_token = random_token();
-    let api_token = random_token();
+    let api_token = configured_api_token().unwrap_or_else(random_token);
     let hook_token = random_token();
     let tool_token = random_token();
+
+    // Where the browser-facing API listens. The packaged window keeps the
+    // historical loopback/ephemeral default; a headless install names both so
+    // the launcher and its systemd unit can agree on one address.
+    let api_host = std::env::var("AGI_API_HOST")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let api_port = match std::env::var("AGI_API_PORT") {
+        Ok(value) => match value.trim().parse::<u16>() {
+            Ok(port) => port,
+            Err(_) => {
+                tracing::warn!("AGI_API_PORT is not a port number; asking the OS for one");
+                0
+            }
+        },
+        Err(_) => 0,
+    };
 
     let dsh = DshEngine::new(plugin_token.clone());
     let mut engines: Vec<Arc<dyn Engine>> = vec![dsh.clone()];
@@ -226,6 +247,8 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
             plugin_token: plugin_token.clone(),
             hook_token: hook_token.clone(),
             tool_token: tool_token.clone(),
+            api_host,
+            api_port,
         },
     )
     .await?;
@@ -782,6 +805,34 @@ pub fn random_token() -> String {
         token.push_str(&uuid::Uuid::new_v4().simple().to_string());
     }
     token
+}
+
+/// The API token a service manager pinned for this install.
+///
+/// A launched window can use a per-launch secret because it hands the page a
+/// fresh URL. A browser bookmark cannot; a Linux service therefore writes a
+/// token once and every launch exchanges it for a cookie. Only URL-safe visible
+/// ASCII is accepted, because the value goes into a cookie header and a query
+/// string verbatim.
+fn configured_api_token() -> Option<String> {
+    match std::env::var("AGI_API_TOKEN") {
+        Ok(token)
+            if token.len() >= 32
+                && token.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
+                }) =>
+        {
+            Some(token)
+        }
+        Ok(_) => {
+            tracing::warn!(
+                "AGI_API_TOKEN must be at least 32 URL-safe visible ASCII characters; \
+                 using a per-launch token"
+            );
+            None
+        }
+        Err(_) => None,
+    }
 }
 
 /// Find an executable the way a shell would: an absolute path, or `PATH`.

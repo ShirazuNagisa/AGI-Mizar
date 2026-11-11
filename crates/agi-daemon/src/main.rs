@@ -55,7 +55,17 @@ async fn main() -> anyhow::Result<()> {
     println!("  dsh    ws://127.0.0.1:{}/dsh", booted.api_port);
     println!("  file   {}", booted.endpoint_file.display());
     println!("  token  {}", booted.api_token);
-    println!("  phone  ws://0.0.0.0:{}/mizar/v1/ws", booted.mizar.port());
+    let phone_bind = std::env::var("MIZAR_BIND").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let phone_host = if phone_bind.contains(':') {
+        format!("[{phone_bind}]")
+    } else {
+        phone_bind
+    };
+    println!(
+        "  phone  ws://{}:{}/mizar/v1/ws",
+        phone_host,
+        booted.mizar.port()
+    );
     println!();
     println!("Pair a phone with this code (valid 5 minutes):");
     println!("  {}", booted.pairing_code.display);
