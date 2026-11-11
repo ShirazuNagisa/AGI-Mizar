@@ -503,6 +503,9 @@ impl DshEngine {
                 LinkFrame::StreamEnd(end) => self.on_stream_end(end),
                 LinkFrame::Approval(frame) => self.on_approval(frame),
                 LinkFrame::Question(frame) => self.on_question(frame),
+                LinkFrame::InteractionResolved(frame) => {
+                    self.on_interaction_resolved(&frame.id)
+                }
                 LinkFrame::Notice(frame) => self.on_notice(frame),
                 // A second hello, or a frame from a newer plugin: ignored.
                 _ => {}
@@ -751,6 +754,17 @@ impl DshEngine {
             .interactions
             .insert(interaction.id.clone(), interaction.clone());
         self.emit(EngineEvent::InteractionRequested(interaction));
+    }
+
+    /// A request the desktop is showing was answered somewhere else.
+    ///
+    /// Questions race the DSH GUI as well as the phone. When the GUI wins, the
+    /// plugin withdraws its copy here; without this the adapter keeps the
+    /// interaction and the phone's card stays up until the link drops.
+    fn on_interaction_resolved(&self, id: &str) {
+        if self.inner().interactions.remove(id).is_some() {
+            self.emit(EngineEvent::InteractionResolved { id: id.to_string() });
+        }
     }
 
     fn on_notice(&self, frame: NoticeFrame) {

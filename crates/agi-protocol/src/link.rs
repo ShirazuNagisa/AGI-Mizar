@@ -147,6 +147,17 @@ pub struct QuestionFrame {
     pub request: Value,
 }
 
+/// A request the desktop was shown is no longer pending.
+///
+/// The phone races the DSH GUI for a question batch. When the GUI answers
+/// first, the plugin withdraws its copy with this frame; without it the
+/// desktop keeps the interaction, and the phone's card stays up until the
+/// link drops.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InteractionResolvedFrame {
+    pub id: String,
+}
+
 /// An operator-facing notice from the plugin. Never fatal.
 #[derive(Debug, Clone, Deserialize)]
 pub struct NoticeFrame {
@@ -164,6 +175,7 @@ pub enum LinkFrame {
     StreamEnd(StreamEndFrame),
     Approval(ApprovalFrame),
     Question(QuestionFrame),
+    InteractionResolved(InteractionResolvedFrame),
     Notice(NoticeFrame),
 }
 
@@ -194,6 +206,9 @@ impl LinkFrame {
             "stream.end" => serde_json::from_value(value).ok().map(LinkFrame::StreamEnd),
             "approval" => serde_json::from_value(value).ok().map(LinkFrame::Approval),
             "question" => serde_json::from_value(value).ok().map(LinkFrame::Question),
+            "interaction-resolved" => serde_json::from_value(value)
+                .ok()
+                .map(LinkFrame::InteractionResolved),
             "notice" => serde_json::from_value(value).ok().map(LinkFrame::Notice),
             _ => None,
         }

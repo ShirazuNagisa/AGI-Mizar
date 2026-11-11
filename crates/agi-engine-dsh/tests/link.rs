@@ -551,6 +551,55 @@ async fn a_vanished_plugin_withdraws_what_it_was_waiting_on() {
 }
 
 #[tokio::test]
+async fn a_question_answered_in_the_dsh_gui_is_withdrawn_from_the_desktop() {
+    let mut h = start();
+    h.hello().await;
+    assert_eq!(h.next().await["type"], "welcome");
+    h.answer_session_list(json!([])).await;
+
+    let mut events = h.engine.subscribe();
+    h.send(json!({
+        "v": 1, "type": "question", "id": "q1",
+        "request": {
+            "questions": [{ "id": "q1", "question": "Which one?", "options": [] }],
+            "agent": { "id": "s1" }
+        }
+    }))
+    .await;
+
+    loop {
+        match tokio::time::timeout(Duration::from_secs(1), events.recv()).await {
+            Ok(Ok(EngineEvent::InteractionRequested(interaction))) => {
+                assert_eq!(interaction.id, "q1");
+                break;
+            }
+            Ok(Ok(_)) => continue,
+            _ => panic!("the question was never announced"),
+        }
+    }
+
+    // What the plugin sends when the DSH GUI answers first: the batch is no
+    // longer pending anywhere, and the phone must stop drawing it.
+    h.send(json!({ "v": 1, "type": "interaction-resolved", "id": "q1" }))
+        .await;
+
+    let mut resolved = false;
+    for _ in 0..8 {
+        match tokio::time::timeout(Duration::from_secs(1), events.recv()).await {
+            Ok(Ok(EngineEvent::InteractionResolved { id })) => {
+                assert_eq!(id, "q1");
+                resolved = true;
+                break;
+            }
+            Ok(Ok(_)) => continue,
+            _ => break,
+        }
+    }
+    assert!(resolved, "the GUI answer left the question pending on the desktop");
+    h.handle.abort();
+}
+
+#[tokio::test]
 async fn two_asks_at_once_share_one_fold() {
     let mut h = start();
     let mut events = h.engine.subscribe();
