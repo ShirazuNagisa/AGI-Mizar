@@ -746,7 +746,11 @@ impl MizarServer {
             .route(NET_SIGNAL_PATH, get(signal))
             .with_state(Arc::clone(self));
 
-        let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
+        // A phone can reach the host from the LAN by default; a headless Linux
+        // install sets MIZAR_BIND=127.0.0.1 because its phones arrive through
+        // the relay and nothing needs to listen on a public interface.
+        let bind = std::env::var("MIZAR_BIND").unwrap_or_else(|_| "0.0.0.0".to_string());
+        let listener = tokio::net::TcpListener::bind((bind.as_str(), port)).await?;
         let bound = listener.local_addr()?.port();
         self.port.store(bound, Ordering::Relaxed);
 
@@ -1048,6 +1052,11 @@ impl MizarServer {
             }
 
             "session.list" => {
+                // A client asking for the list is the moment to make it
+                // current: the store only moves on engine events, and an
+                // archive made in DSH's own GUI emits none. One persistence
+                // read per reader is the price of "refresh" being true.
+                self.core.refresh_sessions(EngineId::Dsh).await;
                 let snapshot = self.core.snapshot();
                 let items: Vec<SessionRow> = snapshot
                     .sessions

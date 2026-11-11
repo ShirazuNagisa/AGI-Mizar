@@ -595,7 +595,10 @@ async fn a_question_answered_in_the_dsh_gui_is_withdrawn_from_the_desktop() {
             _ => break,
         }
     }
-    assert!(resolved, "the GUI answer left the question pending on the desktop");
+    assert!(
+        resolved,
+        "the GUI answer left the question pending on the desktop"
+    );
     h.handle.abort();
 }
 

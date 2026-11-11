@@ -503,9 +503,7 @@ impl DshEngine {
                 LinkFrame::StreamEnd(end) => self.on_stream_end(end),
                 LinkFrame::Approval(frame) => self.on_approval(frame),
                 LinkFrame::Question(frame) => self.on_question(frame),
-                LinkFrame::InteractionResolved(frame) => {
-                    self.on_interaction_resolved(&frame.id)
-                }
+                LinkFrame::InteractionResolved(frame) => self.on_interaction_resolved(&frame.id),
                 LinkFrame::Notice(frame) => self.on_notice(frame),
                 // A second hello, or a frame from a newer plugin: ignored.
                 _ => {}

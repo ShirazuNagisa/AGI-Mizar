@@ -34,7 +34,7 @@ pub mod remote;
 pub mod remote_health;
 pub mod server;
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -1284,6 +1284,39 @@ impl Core {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&id)
             .cloned()
+    }
+
+    /// Re-read one engine's session list into the store.
+    ///
+    /// The store a client reads is updated by engine events, and an archive
+    /// made in the engine's own UI emits none this kernel can see. Asking the
+    /// engine again is what makes a client's "refresh" mean what it says; the
+    /// caller throttles it because a large list costs a persistence read.
+    ///
+    /// @param id - which engine to re-read.
+    /// @returns whether the engine answered.
+    pub async fn refresh_sessions(&self, id: EngineId) -> bool {
+        let Some(engine) = self.engine(id) else {
+            return false;
+        };
+        let Ok(sessions) = engine.sessions().await else {
+            return false;
+        };
+        let keep: HashSet<SessionKey> =
+            sessions.iter().map(|session| session.key.clone()).collect();
+        {
+            let mut store = self.store_write();
+            // Replace, not merge: a row the engine no longer lists is gone
+            // (archived, deleted, or its engine stopped), and merging is
+            // exactly how it used to stay on screen forever.
+            store
+                .sessions
+                .retain(|key, _| key.engine != id || keep.contains(key));
+            for session in sessions {
+                store.sessions.insert(session.key.clone(), session);
+            }
+        }
+        true
     }
 
     /// Which agents this machine does not have, and why.
