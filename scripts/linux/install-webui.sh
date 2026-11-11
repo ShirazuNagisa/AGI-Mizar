@@ -34,7 +34,7 @@ DO_LINGER=0
 UNINSTALL=0
 
 usage() {
-  sed -n '3,30p' "$0" | sed 's/^# \{0,1\}//'
+  awk 'NR > 2 && /^#/ { sub(/^# ?/, ""); print; next } NR > 2 { exit }' "$0"
 }
 
 die() {
