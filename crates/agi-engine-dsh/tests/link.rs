@@ -682,3 +682,40 @@ async fn two_asks_at_once_share_one_fold() {
     assert_eq!(extra, 0, "the second ask folded the logs again");
     h.handle.abort();
 }
+
+#[tokio::test]
+async fn an_unchanged_session_list_emits_nothing() {
+    let mut h = start();
+    let mut events = h.engine.subscribe();
+    h.hello().await;
+    assert_eq!(h.next().await["type"], "welcome");
+
+    let list = json!([
+        { "sessionId": "s1", "updatedAt": 1_700_000_000_000i64, "running": false, "title": "First" }
+    ]);
+    h.answer_session_list(list.clone()).await;
+    while let Ok(received) = tokio::time::timeout(Duration::from_secs(2), events.recv()).await {
+        if matches!(received, Ok(EngineEvent::SessionUpdated(_))) {
+            break;
+        }
+    }
+    // Let the attach-time enrichment settle before the second read.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    while events.try_recv().is_ok() {}
+
+    let engine = Arc::clone(&h.engine);
+    let refresh = tokio::spawn(async move { engine.sessions().await });
+    h.answer_next_list(list).await;
+    refresh.await.unwrap().unwrap();
+
+    // The same rows again: the wire must stay quiet. One event here is what
+    // turned a phone's single refresh into a loop.
+    match tokio::time::timeout(Duration::from_millis(400), events.recv()).await {
+        Err(_) => {}
+        Ok(Ok(EngineEvent::SessionUpdated(session))) => {
+            panic!("an unchanged list re-emitted {}", session.key)
+        }
+        Ok(Ok(_)) | Ok(Err(_)) => {}
+    }
+    h.handle.abort();
+}

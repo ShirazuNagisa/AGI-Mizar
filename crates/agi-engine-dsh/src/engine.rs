@@ -814,12 +814,21 @@ impl DshEngine {
             tracing::warn!("dsh: first row looked like {}", items[0]);
         }
         let mut removed: Vec<SessionKey> = Vec::new();
+        // Only the rows that changed are announced. A repeated list used to
+        // re-emit every session, and a client that refreshes on `session.changed`
+        // then asked for the list again: one refresh became a storm that never
+        // settled. The store still gets every row; the wire only gets news.
+        let mut updated: Vec<Session> = Vec::new();
         {
             let mut inner = self.inner();
             for session in &parsed {
+                let changed = inner.sessions.get(&session.key.id) != Some(session);
                 inner
                     .sessions
                     .insert(session.key.id.clone(), session.clone());
+                if changed {
+                    updated.push(session.clone());
+                }
             }
             let known: Vec<String> = inner.sessions.keys().cloned().collect();
             for id in known {
@@ -831,7 +840,7 @@ impl DshEngine {
             }
         }
 
-        for session in &parsed {
+        for session in &updated {
             self.emit(EngineEvent::SessionUpdated(session.clone()));
         }
         for key in removed {
