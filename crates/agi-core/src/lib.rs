@@ -128,10 +128,14 @@ const LAN_PEER_TTL_MS: i64 = 20_000;
 
 /// What this computer allows a same-account peer to do.
 ///
-/// Off by default for every install that never opted in: a machine that
-/// upgrades into this build must not start accepting remote work because a
-/// field defaulted the wrong way.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// The master switch is still off for an install that never opted in, so a
+/// machine upgrading into this build does not start accepting remote work on
+/// its own. Once the operator turns it on, every DSH workspace is open by
+/// default: a rebuild replaces the app bundle (and on Windows can reset the
+/// preference file), and a peer that was mid-session must not lose the ability
+/// to reach the workspace it was already using. Operators who want a narrow
+/// list turn this off and fill in `workspaces`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemotePrefs {
     /// The master switch for accepting peer work.
@@ -144,7 +148,10 @@ pub struct RemotePrefs {
     #[serde(default)]
     pub allow_wan: bool,
     /// Whether every DSH workspace is open to a peer, ignoring `workspaces`.
-    #[serde(default)]
+    ///
+    /// Missing from an old file means the same as a fresh install: open once
+    /// remote work is enabled. A file that explicitly says `false` is honored.
+    #[serde(default = "default_true")]
     pub allow_all_workspaces: bool,
     /// Workspace paths a peer may start a session in.
     #[serde(default)]
@@ -152,6 +159,19 @@ pub struct RemotePrefs {
     /// Devices explicitly refused, even when their token is valid.
     #[serde(default)]
     pub blocked: Vec<String>,
+}
+
+impl Default for RemotePrefs {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allow_lan: false,
+            allow_wan: false,
+            allow_all_workspaces: true,
+            workspaces: Vec::new(),
+            blocked: Vec::new(),
+        }
+    }
 }
 
 /// What the operator chose about anonymous session sharing.
@@ -219,6 +239,11 @@ impl EnginePrefs {
             EngineId::Codex => self.codex = enabled,
         }
     }
+}
+
+/// A setting whose absence should open the feature rather than close it.
+fn default_true() -> bool {
+    true
 }
 
 fn default_theme() -> String {
@@ -3310,6 +3335,23 @@ mod tests {
         let again = Core::new(Vec::new());
         again.load_preferences(path);
         assert_eq!(again.remote_prefs(), core.remote_prefs());
+    }
+
+    #[test]
+    fn open_all_workspaces_is_the_default_but_an_explicit_no_wins() {
+        let defaults = RemotePrefs::default();
+        assert!(!defaults.enabled, "remote work is still opt-in");
+        assert!(defaults.allow_all_workspaces);
+
+        // A preference file from before the field existed gets the new
+        // default, so a rebuild cannot silently narrow a running peer.
+        let missing: RemotePrefs = serde_json::from_str("{}").unwrap();
+        assert!(missing.allow_all_workspaces);
+
+        // An operator who explicitly chose a whitelist keeps it.
+        let explicit: RemotePrefs =
+            serde_json::from_str(r#"{"allowAllWorkspaces":false}"#).unwrap();
+        assert!(!explicit.allow_all_workspaces);
     }
 
     #[test]
