@@ -719,3 +719,60 @@ async fn an_unchanged_session_list_emits_nothing() {
     }
     h.handle.abort();
 }
+
+#[tokio::test]
+async fn an_unchanged_enrichment_emits_nothing() {
+    let mut h = start();
+    let mut events = h.engine.subscribe();
+    h.hello().await;
+    assert_eq!(h.next().await["type"], "welcome");
+    h.answer_session_list(json!([
+        { "sessionId": "s1", "updatedAt": 1_700_000_000_000i64, "running": false }
+    ]))
+    .await;
+    while let Ok(received) = tokio::time::timeout(Duration::from_secs(2), events.recv()).await {
+        if matches!(received, Ok(EngineEvent::SessionUpdated(_))) {
+            break;
+        }
+    }
+
+    // First enrichment: it learns a title.
+    let first = h.next_invoke("session/projections").await;
+    let id = first["id"].as_str().unwrap().to_string();
+    h.send(json!({
+        "v": 1, "type": "result", "id": id, "ok": true,
+        "value": { "values": { "title": "T" } }
+    }))
+    .await;
+    while let Ok(received) = tokio::time::timeout(Duration::from_secs(2), events.recv()).await {
+        if matches!(received, Ok(EngineEvent::SessionUpdated(_))) {
+            break;
+        }
+    }
+
+    // A second list that already agrees with the enriched row.
+    let engine = Arc::clone(&h.engine);
+    let refresh = tokio::spawn(async move { engine.sessions().await });
+    h.answer_next_list(json!([
+        { "sessionId": "s1", "updatedAt": 1_700_000_000_000i64, "running": false, "title": "T" }
+    ]))
+    .await;
+    refresh.await.unwrap().unwrap();
+
+    // The same projections again: nothing changed, so the wire stays quiet.
+    let second = h.next_invoke("session/projections").await;
+    let id = second["id"].as_str().unwrap().to_string();
+    h.send(json!({
+        "v": 1, "type": "result", "id": id, "ok": true,
+        "value": { "values": { "title": "T" } }
+    }))
+    .await;
+    match tokio::time::timeout(Duration::from_millis(400), events.recv()).await {
+        Err(_) => {}
+        Ok(Ok(EngineEvent::SessionUpdated(session))) => {
+            panic!("an unchanged enrichment re-emitted {}", session.key)
+        }
+        Ok(Ok(_)) | Ok(Err(_)) => {}
+    }
+    h.handle.abort();
+}

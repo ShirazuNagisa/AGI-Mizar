@@ -1006,11 +1006,15 @@ impl DshEngine {
         if title.is_none() && model.is_none() && context.is_none() {
             return;
         }
+        // Only a real change is announced. Enrichment runs after every list,
+        // and emitting an unchanged row made the phone refresh on every
+        // `session.changed`: one list became a stream of lists.
         let updated = {
             let mut inner = self.inner();
             let Some(session) = inner.sessions.get_mut(session_id) else {
                 return;
             };
+            let before = session.clone();
             if title.is_some() {
                 session.title = title;
             }
@@ -1023,9 +1027,11 @@ impl DshEngine {
             if let Some(turns) = turns {
                 session.turns = turns;
             }
-            session.clone()
+            (*session != before).then(|| session.clone())
         };
-        self.emit(EngineEvent::SessionUpdated(updated));
+        if let Some(updated) = updated {
+            self.emit(EngineEvent::SessionUpdated(updated));
+        }
     }
 
     /// Read one projection snapshot for a session.
