@@ -20,7 +20,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 # 1.90: tauri-plugin-single-instance 2.5 declares that as its MSRV, and the
 # single-instance behaviour is what keeps a second launch from booting a second
