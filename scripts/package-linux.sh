@@ -42,6 +42,7 @@ done
 
 RELEASE_VERSION="${VERSION}-beta.${BETA}"
 DEB_VERSION="${VERSION}~beta.${BETA}"
+COMMIT="${AGI_MIZAR_COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)}"
 case "$(uname -m)" in
   x86_64|amd64) ARCH=x86_64; DEB_ARCH=amd64 ;;
   aarch64|arm64) ARCH=aarch64; DEB_ARCH=arm64 ;;
@@ -226,7 +227,7 @@ cat > "$OUT_DIR/RELEASE-NOTES.md" <<EOF
 
 - Artifact: \`agi-mizar-$RELEASE_VERSION-linux-$ARCH.tar.gz\`
 - Debian: \`agi-mizar_${DEB_VERSION}_${DEB_ARCH}.deb\`
-- Commit: \`$(git rev-parse --short HEAD 2>/dev/null || echo unknown)\`
+- Commit: \`$COMMIT\`
 - Built: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 - License: GPL-3.0-only
 
