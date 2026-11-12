@@ -12,11 +12,29 @@ Linux 版不单独维护一套前端。`agi-daemon` 内嵌的 React 应用就是
 
 它不安装 relay，不改 nginx，也不碰系统级服务；API 默认只监听 `127.0.0.1`。
 
+## 公测包（beta）
+
+`scripts/package-linux.sh` 会产出两个文件（同目录附 `SHA256SUMS` 和 `RELEASE-NOTES.md`）：
+
+- `agi-mizar-<version>-beta.<n>-linux-x86_64.tar.gz`：解压后运行
+  `./scripts/linux/install-webui.sh`，安装到当前用户；
+- `agi-mizar_<version>~beta.<n>_amd64.deb`：`sudo apt install ./agi-mizar_*.deb`，
+  装到 `/usr/lib/agi-mizar`，并注册 `/usr/bin/agi-mizar-web`、桌面菜单和
+  `/usr/lib/systemd/user/agi-mizar-web.service`。
+
+`.deb` 的 systemd 用户服务不会在系统级 `postinst` 里启动；**第一次点桌面菜单或运行
+`agi-mizar-web open`** 时，helper 会创建 `~/.config/agi-mizar/web.env`（0600，生成稳定
+token）、执行 `systemctl --user daemon-reload`、启用并启动服务，然后打开浏览器。便携包
+的 `install-webui.sh` 则会直接完成同样的注册。
+
+公测包未签名；运行前先 `sha256sum -c SHA256SUMS`。DSH 与 `dsh-mizar` 插件不打进包里，
+按下方依赖单独安装。
+
 ## 依赖
 
 - Linux + systemd（用户实例；`systemctl --user` 可用）
 - `curl`、`xdg-open`（或 `gio open`）
-- 可选：DSH CLI 和 `dsh-mizar` 插件（否则 Web UI 能打开，但 DSH 引擎显示未连接）
+- DSH CLI 和 `dsh-mizar` 插件（DSH 引擎需要；没有时 Web UI 能打开，但 DSH 显示未连接）
 - 构建时需要 Rust 与 Node/npm
 
 ## 构建并安装
@@ -50,7 +68,7 @@ scripts/linux/install-webui.sh --build
 ## 日常使用
 
 ```sh
-agi-mizar-web open      # 打开浏览器（必要时先启动服务）
+agi-mizar-web open      # 打开浏览器；首次运行会创建配置并启动服务
 agi-mizar-web url       # 打印带一次性 token 的 launch URL
 agi-mizar-web status    # 服务 + /healthz
 agi-mizar-web logs      # journalctl --user

@@ -21,7 +21,12 @@
 #
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+HELPER_SRC="$SCRIPT_DIR/agi-mizar-web.sh"
+[ -f "$HELPER_SRC" ] || HELPER_SRC="$REPO_ROOT/scripts/linux/agi-mizar-web.sh"
+ICON_SRC="$REPO_ROOT/share/icons/agi-mizar.png"
+[ -f "$ICON_SRC" ] || ICON_SRC="$REPO_ROOT/crates/agi-app/icons/128x128.png"
 
 INSTALL_DIR="${AGI_MIZAR_INSTALL_DIR:-$HOME/.local/lib/agi-mizar}"
 HOST="${AGI_MIZAR_WEB_HOST:-127.0.0.1}"
@@ -116,6 +121,7 @@ fi
 if [ -z "$BINARY" ]; then
   for candidate in \
     "$INSTALL_DIR/bin/agi-daemon" \
+    "$REPO_ROOT/bin/agi-daemon" \
     "$REPO_ROOT/target/release/agi-daemon" \
     "$REPO_ROOT/target/debug/agi-daemon"
   do
@@ -127,6 +133,10 @@ if [ -z "$BINARY" ]; then
 fi
 [ -n "$BINARY" ] || die "no agi-daemon binary; run with --build or pass --binary PATH"
 [ -x "$BINARY" ] || die "$BINARY is not executable"
+if ! command -v dsh >/dev/null 2>&1; then
+  say "note: dsh was not found; the UI will open but the DSH engine stays disconnected"
+  say "      install DSH 0.2.1-rc.2 and dsh-mizar 0.9.0 in the web profile (docs/linux.md)"
+fi
 
 # A second install on the same port would fight the first one. If our own unit
 # is already running it is a reinstall; otherwise the port is somebody else's.
@@ -140,9 +150,9 @@ say "installing to $INSTALL_DIR"
 install -d -m 0755 "$INSTALL_DIR/bin" "$INSTALL_DIR/share/icons" \
   "$CONFIG_DIR" "$UNIT_DIR" "$BIN_DIR"
 install -m 0755 "$BINARY" "$INSTALL_DIR/bin/agi-daemon"
-install -m 0755 "$REPO_ROOT/scripts/linux/agi-mizar-web.sh" "$HELPER"
+install -m 0755 "$HELPER_SRC" "$HELPER"
 ln -sfn "$HELPER" "$BIN_DIR/agi-mizar-web"
-install -m 0644 "$REPO_ROOT/crates/agi-app/icons/128x128.png" \
+install -m 0644 "$ICON_SRC" \
   "$INSTALL_DIR/share/icons/agi-mizar.png"
 
 # Keep a token across reinstalls: the browser cookie and the service's env must

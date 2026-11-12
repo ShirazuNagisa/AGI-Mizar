@@ -18,8 +18,26 @@ die() {
   exit 1
 }
 
+ensure_env() {
+  [ -r "$ENV_FILE" ] && return 0
+  [ -n "${HOME:-}" ] || die "HOME is not set"
+  mkdir -p "$CONFIG_DIR"
+  chmod 700 "$CONFIG_DIR" 2>/dev/null || true
+  local token
+  token="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  umask 077
+  cat > "$ENV_FILE" <<EOF
+AGI_API_HOST=127.0.0.1
+AGI_API_PORT=${AGI_MIZAR_WEB_PORT:-64222}
+AGI_API_TOKEN=$token
+MIZAR_BIND=127.0.0.1
+RUST_LOG=agi_core=info,agi_engine_dsh=info,agi_mizar=info
+EOF
+  chmod 600 "$ENV_FILE"
+}
+
 read_env() {
-  [ -r "$ENV_FILE" ] || die "no $ENV_FILE; run scripts/linux/install-webui.sh first"
+  ensure_env
   # shellcheck disable=SC1090
   . "$ENV_FILE"
   PORT="${AGI_API_PORT:-64222}"
@@ -67,7 +85,8 @@ case "${1:-open}" in
   open)
     read_env
     if ! curl -fsS -m 2 "$(health_url)" >/dev/null 2>&1; then
-      systemctl --user start "$UNIT" >/dev/null 2>&1 || true
+      systemctl --user daemon-reload >/dev/null 2>&1 || true
+      systemctl --user enable --now "$UNIT" >/dev/null 2>&1 || true
       wait_for_kernel || die "the kernel did not answer on port $PORT; see: journalctl --user -u $UNIT"
     fi
     open_browser "$(launch_url)"
@@ -78,7 +97,9 @@ case "${1:-open}" in
     printf '\n'
     ;;
   start)
-    systemctl --user start "$UNIT"
+    ensure_env
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    systemctl --user enable --now "$UNIT"
     ;;
   stop)
     systemctl --user stop "$UNIT"
