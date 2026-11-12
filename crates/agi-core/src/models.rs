@@ -26,24 +26,124 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 
-/// The repository the model comes from.
-const DEFAULT_REPO: &str = "https://github.com/ShirazuNagisa/Mizarllm";
-
-/// Where the newest release describes itself.
+/// The release host the model has always come from.
 ///
-/// GitHub's `releases/latest/download/<asset>` alias is a CDN redirect: no API
-/// call, no token, no hourly quota. One file, and the version is in it.
-fn latest_manifest_url(base: &str) -> String {
-    format!("{base}/releases/latest/download/manifest.json")
+/// `releases/latest/download/<asset>` is a CDN redirect: no API call, no token,
+/// no hourly quota. One file, and the version is in it.
+const DEFAULT_RELEASE: &str = "https://github.com/ShirazuNagisa/Mizarllm";
+
+/// The hub that carries the same bytes, because the release CDN is ~10 KB/s
+/// from mainland China and this one measured ~13 MiB/s from the same machine.
+/// See `docs/desktop/agi-mizar-model-download-acceleration-2026-11-12.md`.
+const DEFAULT_HUB: &str = "https://modelscope.cn/models/Sh1razu/Mizarllm";
+
+/// Point the release download at another host with the same layout
+/// (`<base>/releases/download/<tag>/<file>`), e.g. a self-hosted mirror.
+const REPO_ENV: &str = "MIZAR_MODEL_REPO";
+
+/// Keep only one named source (`modelscope`, `github`), for support and for a
+/// machine whose network reaches exactly one of them.
+const SOURCE_ENV: &str = "MIZAR_MODEL_SOURCE";
+
+/// How long one source gets to start sending the file before the next one is
+/// tried.
+///
+/// A stalled connection from mainland China to the release CDN costs the
+/// client's 60 s read timeout before anything happens; five seconds is long
+/// enough for a healthy host and short enough that the fallback is worth
+/// having.
+const SOURCE_START_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a source gets to answer with its manifest.
+///
+/// Longer than the file start, because the manifest is a kilobyte and the
+/// sources are asked in parallel: the check can afford to wait for the slow one
+/// (the release CDN measured 5.5 s to first byte from Shanghai) where a
+/// download cannot.
+const MANIFEST_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// One place the same model can be fetched from.
+///
+/// Two URL shapes cover every source we ship, and they differ only in where the
+/// version appears:
+///
+/// - **release**: `<base>/releases/download/<tag>/<file>` — one directory per
+///   version, which is what GitHub gives us;
+/// - **hub**: `.../resolve/<branch>/<file>` — one branch overwritten per
+///   version, which is what ModelScope and Hugging Face give us.
+#[derive(Debug, Clone)]
+pub struct Source {
+    /// Shown in the UI and in errors: "ModelScope", "GitHub".
+    pub name: String,
+    /// Where this source describes its newest release.
+    pub manifest: String,
+    /// Where this source keeps the files. `{version}` and `{file}` are
+    /// substituted; a hub ignores the version because its branch moves.
+    pub asset: String,
 }
 
-/// Where the assets of one release live.
+impl Source {
+    /// A host with one directory per release (GitHub, or a mirror of it).
+    pub fn release(name: &str, base: &str) -> Self {
+        let base = base.trim_end_matches('/');
+        Self {
+            name: name.to_string(),
+            manifest: format!("{base}/releases/latest/download/manifest.json"),
+            asset: format!("{base}/releases/download/{{version}}/{{file}}"),
+        }
+    }
+
+    /// A hub with one branch that is overwritten (ModelScope, Hugging Face).
+    pub fn hub(name: &str, base: &str, branch: &str) -> Self {
+        let base = base.trim_end_matches('/');
+        Self {
+            name: name.to_string(),
+            manifest: format!("{base}/resolve/{branch}/manifest.json"),
+            asset: format!("{base}/resolve/{branch}/{{file}}"),
+        }
+    }
+
+    /// The URL of one release's file on this source.
+    pub fn url_for(&self, version: &str, file: &str) -> String {
+        self.asset
+            .replace("{version}", version)
+            .replace("{file}", file)
+    }
+}
+
+/// The sources this install tries, in order.
 ///
-/// The version *is* the tag: model releases are numbered `v1`, `v2`, and the
-/// manifest travels with them. Prefixing another `v` here produced
-/// `/download/vv1/`, which is a 404 nobody would look for.
-fn tag_asset_url(base: &str) -> String {
-    format!("{base}/releases/download/{{version}}/{{file}}")
+/// ModelScope first: it is the one that is fast from China, and a mirror that
+/// answers in a minute is worth more than a release host that answers in a day.
+/// GitHub second, because it is the canonical copy and it is fast elsewhere.
+/// `MIZAR_MODEL_SOURCE` pins one; `MIZAR_MODEL_REPO` moves the release host.
+fn configured_sources() -> Vec<Source> {
+    let release_base = std::env::var(REPO_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_RELEASE.to_string());
+
+    let sources = vec![
+        Source::hub("ModelScope", DEFAULT_HUB, "master"),
+        Source::release("GitHub", &release_base),
+    ];
+
+    let Ok(only) = std::env::var(SOURCE_ENV) else {
+        return sources;
+    };
+    let only = only.trim().to_ascii_lowercase();
+    let filtered: Vec<Source> = sources
+        .iter()
+        .filter(|source| source.name.to_ascii_lowercase() == only)
+        .cloned()
+        .collect();
+    if filtered.is_empty() {
+        // A typo must not leave the machine with no way to get a model.
+        tracing::warn!("model: {SOURCE_ENV}={only} names no source; trying all of them");
+        return sources;
+    }
+    filtered
 }
 
 /// How often download progress is published.
@@ -144,6 +244,77 @@ impl Download {
         view.state = "failed".to_string();
         view.error = Some(error.to_string());
     }
+
+    /// Name the source this attempt reads from, so a slow download can say
+    /// *which* host is slow.
+    fn use_source(&self, name: &str) {
+        let mut view = self
+            .view
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        view.source = Some(name.to_string());
+    }
+}
+
+/// One source's answer to "what is the newest release", or why there is none.
+struct Answer {
+    source: Source,
+    manifest: Result<RemoteManifest, String>,
+}
+
+/// A manifest that won, and the source that offered it.
+struct Found {
+    source: Source,
+    remote: RemoteManifest,
+}
+
+/// Whether two sources describe the same bytes for the same version.
+///
+/// A mirror that disagrees about the checksum is stale or wrong either way; the
+/// first one is tried and verified, and the other stays a fallback.
+fn same_release(left: &RemoteManifest, right: &RemoteManifest) -> bool {
+    left.file == right.file
+        && match (&left.sha256, &right.sha256) {
+            (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
+            _ => true,
+        }
+}
+
+/// Why a downloaded file did not become the model.
+///
+/// The distinction matters across sources: bytes that fail the manifest's
+/// checksum are the wrong model and the partial file must go, while a rename
+/// that failed leaves a perfectly good gigabyte worth resuming.
+enum InstallError {
+    Checksum(String),
+    Other(String),
+}
+
+impl InstallError {
+    fn message(&self) -> &str {
+        match self {
+            Self::Checksum(message) => message,
+            Self::Other(message) => message,
+        }
+    }
+}
+
+/// Read one source's manifest, giving up fast enough that a dead host does not
+/// hold the whole check hostage.
+async fn fetch_manifest(http: &reqwest::Client, url: &str) -> Result<RemoteManifest, String> {
+    let response = tokio::time::timeout(MANIFEST_TIMEOUT, http.get(url).send())
+        .await
+        .map_err(|_| format!("no answer in {} s", MANIFEST_TIMEOUT.as_secs()))?
+        .map_err(|error| format!("could not reach it: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!("it answered {}", response.status().as_u16()));
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| format!("could not read the manifest: {error}"))?;
+    serde_json::from_slice::<RemoteManifest>(&bytes)
+        .map_err(|error| format!("its manifest is not one this build understands: {error}"))
 }
 
 /// The model directory, the downloader, and the sidecar.
@@ -154,10 +325,11 @@ pub struct ModelService {
     runtime: Arc<Runtime>,
     events: broadcast::Sender<ModelEvent>,
     http: reqwest::Client,
-    /// Where releases come from. Tests point this at a local server; nothing in
-    /// a release sets it. A field rather than an environment variable because
-    /// two tests in one process would otherwise overwrite each other's answer.
-    repo: RwLock<Option<String>>,
+    /// Where releases come from, in the order they are tried. Tests set this to
+    /// their own servers; a release gets it from `configured_sources`. A field
+    /// rather than asking the environment per call, for the same reason the
+    /// tests needed one: two tests in one process would overwrite each other.
+    sources: RwLock<Vec<Source>>,
 }
 
 impl ModelService {
@@ -188,11 +360,16 @@ impl ModelService {
             // it fires at 60 s and the stream dies a third of the way through.
             // `read_timeout` is the silence between bytes, which is the thing
             // worth failing on.
+            //
+            // The user agent is not decoration: ModelScope's edge answers 403 to
+            // a request without one, which reads exactly like "the mirror does
+            // not have the weights" until a live test says otherwise.
             http: reqwest::Client::builder()
+                .user_agent(concat!("AGI-Mizar/", env!("CARGO_PKG_VERSION")))
                 .read_timeout(Duration::from_secs(60))
                 .build()
                 .unwrap_or_default(),
-            repo: RwLock::new(None),
+            sources: RwLock::new(configured_sources()),
         });
         // Before anything can start a new one: stop the one a dead launch left.
         service.sweep_stale_runtime();
@@ -289,22 +466,28 @@ impl ModelService {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Where releases come from this run.
-    fn repo_base(&self) -> String {
-        self.repo
+    /// The sources this install tries, in order.
+    fn sources(&self) -> Vec<Source> {
+        self.sources
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
-            .unwrap_or_else(|| DEFAULT_REPO.to_string())
     }
 
-    /// Point releases at another server. For tests: nothing in the app calls
-    /// this, and a release keeps the default.
+    /// Point releases at one local server. For tests: leaving the shipped
+    /// sources in place would make a test reach the real ModelScope and GitHub.
     pub fn point_at(&self, base: impl Into<String>) {
+        let base = base.into();
+        self.route_sources(vec![Source::release("test", &base)]);
+    }
+
+    /// Use exactly these sources, in this order. For tests, and for an install
+    /// that must not touch a host it did not ask for.
+    pub fn route_sources(&self, sources: Vec<Source>) {
         *self
-            .repo
+            .sources
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(base.into());
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = sources;
     }
 
     pub fn state(&self) -> ModelView {
@@ -341,59 +524,85 @@ impl ModelService {
         serde_json::from_str(&text).ok()
     }
 
-    /// Ask the repository what the newest release is.
+    /// Ask every source what the newest release is.
+    ///
+    /// The version is the maximum across sources, not the first answer: a mirror
+    /// that was forgotten after an upload must not pin every client to the old
+    /// model. A source that is down costs one line in the error message, which
+    /// is the normal case this exists for.
     pub async fn check(&self) -> ModelCheckView {
         let installed = self.manifest().map(|m| m.version);
-        let remote = match self.fetch_remote().await {
-            Ok(remote) => remote,
-            Err(error) => {
-                return ModelCheckView {
+        match self.newest().await {
+            Ok(found) => {
+                let newer = installed
+                    .as_deref()
+                    .map(|current| is_newer(&found.remote.manifest.version, current))
+                    .unwrap_or(true);
+                ModelCheckView {
                     installed,
-                    latest: None,
-                    error: Some(error),
+                    latest: Some(RemoteModel {
+                        id: found.remote.manifest.id.clone(),
+                        version: found.remote.manifest.version.clone(),
+                        url: found
+                            .source
+                            .url_for(&found.remote.manifest.version, &found.remote.file),
+                        sha256: found.remote.sha256.clone(),
+                        size_bytes: found.remote.size_bytes,
+                        newer,
+                    }),
+                    error: None,
                 }
             }
-        };
-        let newer = installed
-            .as_deref()
-            .map(|current| is_newer(&remote.manifest.version, current))
-            .unwrap_or(true);
-        ModelCheckView {
-            installed,
-            latest: Some(RemoteModel {
-                id: remote.manifest.id.clone(),
-                version: remote.manifest.version.clone(),
-                url: tag_asset_url(&self.repo_base())
-                    .replace("{version}", &remote.manifest.version)
-                    .replace("{file}", &remote.file),
-                sha256: remote.sha256.clone(),
-                size_bytes: remote.size_bytes,
-                newer,
-            }),
-            error: None,
+            Err(error) => ModelCheckView {
+                installed,
+                latest: None,
+                error: Some(error),
+            },
         }
     }
 
-    async fn fetch_remote(&self) -> Result<RemoteManifest, String> {
-        let response = self
-            .http
-            .get(latest_manifest_url(&self.repo_base()))
-            .send()
-            .await
-            .map_err(|error| format!("could not reach the model repository: {error}"))?;
-        if !response.status().is_success() {
-            return Err(format!(
-                "the model repository answered {}",
-                response.status().as_u16()
-            ));
+    /// The newest manifest any source offers, with the source that offered it.
+    async fn newest(&self) -> Result<Found, String> {
+        let answers = self.ask_sources().await;
+        let mut best: Option<Found> = None;
+        let mut failures = Vec::new();
+        for answer in answers {
+            match answer.manifest {
+                Ok(remote) => {
+                    let newer = best.as_ref().is_none_or(|found| {
+                        is_newer(&remote.manifest.version, &found.remote.manifest.version)
+                    });
+                    if newer {
+                        best = Some(Found {
+                            source: answer.source,
+                            remote,
+                        });
+                    }
+                }
+                Err(error) => failures.push(format!("{}: {error}", answer.source.name)),
+            }
         }
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|error| format!("could not read the manifest: {error}"))?;
-        serde_json::from_slice::<RemoteManifest>(&bytes).map_err(|error| {
-            format!("the repository's manifest is not one this build understands: {error}")
-        })
+        best.ok_or_else(|| format!("no source answered ({})", failures.join("; ")))
+    }
+
+    /// Ask every source at once. Parallel because each answer is a kilobyte and
+    /// a serial check would cost the sum of every fallback.
+    async fn ask_sources(&self) -> Vec<Answer> {
+        let requests = self.sources().into_iter().map(|source| {
+            let http = self.http.clone();
+            async move {
+                let manifest = fetch_manifest(&http, &source.manifest).await;
+                Answer { source, manifest }
+            }
+        });
+        futures_util::future::join_all(requests).await
+    }
+
+    /// Record a failure the window can read, and hand the message back.
+    fn give_up(&self, download: &Arc<Download>, error: String) -> String {
+        download.fail(&error);
+        self.publish(ModelEvent::Progress(download.snapshot()));
+        error
     }
 
     /// Start downloading the newest release (or a named one).
@@ -409,6 +618,7 @@ impl ModelService {
                 total: 0,
                 state: "starting".to_string(),
                 error: None,
+                source: None,
             }),
             cancelled: Arc::new(AtomicBool::new(false)),
         });
@@ -445,43 +655,75 @@ impl ModelService {
         want: &Option<String>,
         download: Arc<Download>,
     ) -> Result<(), String> {
-        let remote = match self.fetch_remote().await {
-            Ok(remote) => remote,
-            Err(error) => {
-                // The frame already exists, so the window sees the reason
-                // instead of a button that appears to do nothing.
-                download.fail(&error);
-                self.publish(ModelEvent::Progress(download.snapshot()));
-                return Err(error);
-            }
-        };
-        if let Some(want) = want.as_deref() {
-            if want != remote.manifest.version {
-                let error = format!(
-                    "the repository offers {} and this build asked for {want}",
-                    remote.manifest.version
-                );
-                download.fail(&error);
-                self.publish(ModelEvent::Progress(download.snapshot()));
-                return Err(error);
+        let mut offered: Vec<(Source, RemoteManifest)> = Vec::new();
+        let mut failures = Vec::new();
+        for answer in self.ask_sources().await {
+            match answer.manifest {
+                Ok(remote) => offered.push((answer.source, remote)),
+                Err(error) => failures.push(format!("{}: {error}", answer.source.name)),
             }
         }
+        if offered.is_empty() {
+            // The frame already exists, so the window sees the reason instead of
+            // a button that appears to do nothing.
+            return Err(self.give_up(
+                &download,
+                format!("no source answered ({})", failures.join("; ")),
+            ));
+        }
 
-        let version = remote.manifest.version.clone();
-        let url = tag_asset_url(&self.repo_base())
-            .replace("{version}", &version)
-            .replace("{file}", &remote.file);
+        let chosen = match want.as_deref() {
+            Some(want) => match offered
+                .iter()
+                .find(|(_, remote)| remote.manifest.version == want)
+            {
+                Some((_, remote)) => remote.clone(),
+                None => {
+                    let mut newest = &offered[0].1;
+                    for (_, remote) in &offered {
+                        if is_newer(&remote.manifest.version, &newest.manifest.version) {
+                            newest = remote;
+                        }
+                    }
+                    return Err(self.give_up(
+                        &download,
+                        format!(
+                            "no source offers {want} (the newest is {})",
+                            newest.manifest.version
+                        ),
+                    ));
+                }
+            },
+            None => {
+                let mut newest = offered[0].1.clone();
+                for (_, remote) in &offered {
+                    if is_newer(&remote.manifest.version, &newest.manifest.version) {
+                        newest = remote.clone();
+                    }
+                }
+                newest
+            }
+        };
+
+        // Every source that advertises that version with the same bytes, in the
+        // order they are configured: the first one is the one we want, the rest
+        // are what a failure falls back to.
+        let version = chosen.manifest.version.clone();
+        let candidates: Vec<(Source, RemoteManifest)> = offered
+            .into_iter()
+            .filter(|(_, remote)| {
+                remote.manifest.version == version && same_release(remote, &chosen)
+            })
+            .collect();
 
         let temp_dir = self.dir.join(".download");
         std::fs::create_dir_all(&temp_dir).map_err(|error| {
             let message = format!("could not create {}: {error}", temp_dir.display());
-            download.fail(&message);
-            self.publish(ModelEvent::Progress(download.snapshot()));
-            message
+            self.give_up(&download, message)
         })?;
-        let part_path = temp_dir.join(format!("{}.part", remote.file));
+        let part_path = temp_dir.join(format!("{}.part", chosen.file));
 
-        let total = remote.size_bytes.unwrap_or(0);
+        let total = chosen.size_bytes.unwrap_or(0);
         {
             let mut view = download
                 .view
@@ -493,31 +735,50 @@ impl ModelService {
         }
         self.publish(ModelEvent::Progress(download.snapshot()));
 
-        let fetched = self
-            .fetch_to(Arc::clone(&download), &url, &part_path, total)
-            .await;
-        if let Err(error) = fetched {
-            download.fail(&error);
+        let mut last_error = String::new();
+        for (source, remote) in candidates {
+            if download.cancelled.load(Ordering::Relaxed) {
+                return Err("cancelled".to_string());
+            }
+            let url = source.url_for(&remote.manifest.version, &remote.file);
+            download.phase("running");
+            download.use_source(&source.name);
             self.publish(ModelEvent::Progress(download.snapshot()));
-            // The frame stays so the window can draw the reason; the next
-            // attempt replaces it.
-            return Err(error);
+
+            match self
+                .fetch_to(Arc::clone(&download), &url, &part_path, total)
+                .await
+            {
+                Ok(()) => {
+                    download.phase("verifying");
+                    self.publish(ModelEvent::Progress(download.snapshot()));
+                    match self.install(&remote, &download, &part_path).await {
+                        Ok(()) => {
+                            self.clear_download();
+                            self.publish(ModelEvent::Changed(Box::new(self.state())));
+                            return Ok(());
+                        }
+                        Err(error) => {
+                            // Bytes that fail the manifest's checksum are not a
+                            // head start, they are the wrong model: the next
+                            // source has to start clean. Anything else keeps the
+                            // file, because the download itself was fine.
+                            if matches!(error, InstallError::Checksum(_)) {
+                                let _ = std::fs::remove_file(&part_path);
+                            }
+                            last_error = format!("{}: {}", source.name, error.message());
+                        }
+                    }
+                }
+                Err(error) if error == "cancelled" => return Err(error),
+                Err(error) => last_error = format!("{}: {error}", source.name),
+            }
+            tracing::warn!("model: {last_error}; trying the next source");
         }
 
-        download.phase("verifying");
-        self.publish(ModelEvent::Progress(download.snapshot()));
-        match self.install(&remote, &download, &part_path).await {
-            Ok(()) => {
-                self.clear_download();
-                self.publish(ModelEvent::Changed(Box::new(self.state())));
-                Ok(())
-            }
-            Err(error) => {
-                download.fail(&error);
-                self.publish(ModelEvent::Progress(download.snapshot()));
-                Err(error)
-            }
-        }
+        // The frame stays so the window can draw the reason; the next attempt
+        // replaces it.
+        Err(self.give_up(&download, format!("every source failed ({last_error})")))
     }
 
     fn clear_download(&self) {
@@ -546,9 +807,9 @@ impl ModelService {
         if done > 0 {
             request = request.header(reqwest::header::RANGE, format!("bytes={done}-"));
         }
-        let response = request
-            .send()
+        let response = tokio::time::timeout(SOURCE_START_TIMEOUT, request.send())
             .await
+            .map_err(|_| format!("no answer in {} s", SOURCE_START_TIMEOUT.as_secs()))?
             .map_err(|error| format!("could not reach the download: {error}"))?;
         let status = response.status();
         if !status.is_success() {
@@ -604,14 +865,14 @@ impl ModelService {
         remote: &RemoteManifest,
         download: &Arc<Download>,
         part_path: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<(), InstallError> {
         if let Some(expected) = remote.sha256.as_deref() {
-            let actual = sha256_of(part_path).await?;
+            let actual = sha256_of(part_path).await.map_err(InstallError::Other)?;
             if !actual.eq_ignore_ascii_case(expected) {
                 let _ = std::fs::remove_file(part_path);
-                return Err(format!(
+                return Err(InstallError::Checksum(format!(
                     "checksum mismatch: expected {expected}, got {actual}"
-                ));
+                )));
             }
         }
 
@@ -620,8 +881,12 @@ impl ModelService {
         let current_manifest = self.dir.join(format!("{id}.json"));
         if current.exists() {
             let previous_dir = self.dir.join(".previous");
-            std::fs::create_dir_all(&previous_dir)
-                .map_err(|error| format!("could not create {}: {error}", previous_dir.display()))?;
+            std::fs::create_dir_all(&previous_dir).map_err(|error| {
+                InstallError::Other(format!(
+                    "could not create {}: {error}",
+                    previous_dir.display()
+                ))
+            })?;
             // Name the outgoing weights after the version they *are*, not the
             // one they are about to be replaced by.
             match std::fs::read(&current_manifest)
@@ -642,17 +907,18 @@ impl ModelService {
         }
 
         std::fs::rename(part_path, &current).map_err(|error| {
-            format!(
+            InstallError::Other(format!(
                 "could not move the download into {}: {error}",
                 current.display()
-            )
+            ))
         })?;
 
         // The manifest goes in last: a half-written model must never look
         // installed just because its manifest is there.
-        let text = serde_json::to_vec_pretty(&remote.manifest)
-            .map_err(|error| format!("could not serialise the manifest: {error}"))?;
-        write_atomic(&current_manifest, &text)?;
+        let text = serde_json::to_vec_pretty(&remote.manifest).map_err(|error| {
+            InstallError::Other(format!("could not serialise the manifest: {error}"))
+        })?;
+        write_atomic(&current_manifest, &text).map_err(InstallError::Other)?;
 
         {
             let mut active = self
@@ -1183,5 +1449,30 @@ mod tests {
         assert_eq!(judge_timeout_from(Some("abc")), DEFAULT_JUDGE_TIMEOUT);
         assert_eq!(judge_timeout_from(Some("0")), DEFAULT_JUDGE_TIMEOUT);
         assert_eq!(judge_timeout_from(Some("-5")), DEFAULT_JUDGE_TIMEOUT);
+    }
+    /// The two URL shapes are the difference between a release host and a hub;
+    /// a stray `{version}` in a hub path or a trailing slash in a base is a 404
+    /// that only ever shows up in production.
+    #[test]
+    fn a_hub_ignores_the_version_and_a_release_uses_it() {
+        let hub = Source::hub("ModelScope", "https://modelscope.cn/models/a/b/", "master");
+        assert_eq!(
+            hub.manifest,
+            "https://modelscope.cn/models/a/b/resolve/master/manifest.json"
+        );
+        assert_eq!(
+            hub.url_for("v1", "m.gguf"),
+            "https://modelscope.cn/models/a/b/resolve/master/m.gguf"
+        );
+
+        let release = Source::release("GitHub", "https://github.com/a/b/");
+        assert_eq!(
+            release.manifest,
+            "https://github.com/a/b/releases/latest/download/manifest.json"
+        );
+        assert_eq!(
+            release.url_for("v2", "m.gguf"),
+            "https://github.com/a/b/releases/download/v2/m.gguf"
+        );
     }
 }

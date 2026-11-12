@@ -285,6 +285,9 @@ pub struct DownloadView {
     /// `running`, `verifying` or `failed`.
     pub state: String,
     pub error: Option<String>,
+    /// The mirror this attempt reads from ("ModelScope", "GitHub"), when one is
+    /// known. A download that is slow is only actionable if it says where from.
+    pub source: Option<String>,
 }
 
 /// What the model repository says about the newest release.

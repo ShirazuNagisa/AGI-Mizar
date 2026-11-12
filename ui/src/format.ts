@@ -43,6 +43,34 @@ export function formatGigabytes(bytes: number): string {
 }
 
 /**
+ * A download speed as the progress line reads it: MB/s, one decimal under 10.
+ *
+ * Decimal megabytes on purpose: a person comparing 0.4 and 12 is looking at the
+ * order of magnitude, not at the binary difference between MB and MiB.
+ */
+export function formatSpeed(bytesPerSecond: number): string {
+  if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) return '—'
+  const megabytes = bytesPerSecond / 1_000_000
+  return megabytes >= 10
+    ? `${megabytes.toFixed(0)} MB/s`
+    : `${megabytes.toFixed(1)} MB/s`
+}
+
+/**
+ * The time a download has left, in the shortest form that is still useful.
+ *
+ * A gigabyte over a fast link is seconds and over a slow one is hours (the
+ * release CDN from China measured 29 hours), so both ends exist and neither
+ * should read as `0:00:07`.
+ */
+export function formatEta(seconds: number | null): string | null {
+  if (seconds === null || !Number.isFinite(seconds) || seconds <= 0) return null
+  if (seconds < 60) return `剩余 ${Math.ceil(seconds)} 秒`
+  if (seconds < 3600) return `剩余 ${Math.ceil(seconds / 60)} 分钟`
+  return `剩余 ${(seconds / 3600).toFixed(1)} 小时`
+}
+
+/**
  * A wallet amount as the agent page shows it: two decimals, rounded.
  *
  * DSH reports the provider's decimal string verbatim, often with eight digits

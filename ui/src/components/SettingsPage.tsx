@@ -9,7 +9,8 @@ import type {
   ModelState,
 } from '../api'
 import { THEMES, type ThemePreference } from '../theme'
-import { formatGigabytes, formatModelVersion } from '../format'
+import { formatEta, formatGigabytes, formatModelVersion, formatSpeed } from '../format'
+import { useDownloadSpeed } from '../lib/use-download-speed'
 import { Spinner } from '../icons'
 import { Button } from './ui/button'
 import { Progress } from './ui/progress'
@@ -424,6 +425,15 @@ function ModelSection({ kernel, model }: { kernel: Kernel; model: ModelState | n
     download === null || download.total === 0
       ? 0
       : Math.round((download.done / download.total) * 100)
+  const { speed, eta } = useDownloadSpeed(download)
+  // The source is the difference between "slow" and "slow because this machine
+  // is on the release CDN"; speed and the time left say the same thing for a
+  // download that is moving at all.
+  const moving = [
+    download?.source ?? null,
+    download !== null && download.state === 'running' && speed > 0 ? formatSpeed(speed) : null,
+    formatEta(eta),
+  ].filter((part): part is string => part !== null)
 
   async function checkLatest() {
     setChecking(true)
@@ -571,6 +581,15 @@ function ModelSection({ kernel, model }: { kernel: Kernel; model: ModelState | n
                 </Button>
               )}
             </div>
+            {moving.length === 0 || download.state === 'failed' ? null : (
+              <div className="mt-1 flex flex-wrap items-center gap-x-2 text-[12px] text-muted">
+                {moving.map((part) => (
+                  <span key={part} className="tabular">
+                    {part}
+                  </span>
+                ))}
+              </div>
+            )}
             {download.error === null ? null : (
               <p className="mt-1.5 bg-ink px-2 py-1 text-[12px] leading-5 text-bg">{download.error}</p>
             )}

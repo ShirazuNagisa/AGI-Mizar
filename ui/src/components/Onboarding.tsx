@@ -11,7 +11,8 @@ import type {
 } from '../api'
 import { AGENTS } from '../navigation'
 import { ENGINE_INSTALL_HINTS } from '../engines'
-import { formatGigabytes, formatModelVersion } from '../format'
+import { formatEta, formatGigabytes, formatModelVersion, formatSpeed } from '../format'
+import { useDownloadSpeed } from '../lib/use-download-speed'
 import { useShellSettings, type ShellSettingsState } from '../lib/use-shell-settings'
 import { type DesktopPlatform } from '../platform'
 import { quitApp, shellAvailable, shellFailure } from '../shell'
@@ -771,6 +772,14 @@ function ModelStep({ kernel, model, onLater }: ModelStepProps) {
     download === null || download.total === 0
       ? 0
       : Math.round((download.done / download.total) * 100)
+  const { speed, eta } = useDownloadSpeed(download)
+  // Where it is coming from, how fast, and how long: a bare percentage cannot
+  // tell "stuck" from "crawling", which is the whole complaint about this step.
+  const moving = [
+    download?.source ?? null,
+    download !== null && download.state === 'running' && speed > 0 ? formatSpeed(speed) : null,
+    formatEta(eta),
+  ].filter((part): part is string => part !== null)
   // The download finishes while this step is mounted, so "ready" has to be
   // judged against the model that is now on disk, not the check made on mount.
   const ready =
@@ -929,6 +938,15 @@ function ModelStep({ kernel, model, onLater }: ModelStepProps) {
                 </Button>
               )}
             </div>
+            {moving.length === 0 || download.state === 'failed' ? null : (
+              <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[12px] text-muted">
+                {moving.map((part) => (
+                  <span key={part} className="tabular">
+                    {part}
+                  </span>
+                ))}
+              </div>
+            )}
             {download.error === null ? null : (
               <p className="mt-1.5 text-[12px] leading-5 bg-ink px-1.5 text-bg">{download.error}</p>
             )}

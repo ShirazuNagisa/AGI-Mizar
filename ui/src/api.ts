@@ -71,6 +71,8 @@ export interface ModelDownload {
   total: number
   state: 'running' | 'verifying' | 'failed'
   error: string | null
+  /** The mirror this attempt reads from ("ModelScope", "GitHub"), when known. */
+  source: string | null
 }
 
 /** What model this install has, and whether the thing that runs it is up. */

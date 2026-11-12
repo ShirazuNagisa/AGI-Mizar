@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use agi_core::models::ModelService;
+use agi_core::models::{ModelService, Source};
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -26,6 +26,8 @@ struct Fixture {
     range: bool,
     /// Delay before the first byte, so "while one is running" is testable.
     delay_ms: u64,
+    /// The release this server pretends to be.
+    version: &'static str,
 }
 
 fn digest(bytes: &[u8]) -> String {
@@ -37,7 +39,7 @@ fn digest(bytes: &[u8]) -> String {
 async fn manifest(State(fixture): State<Fixture>) -> Response {
     let body = serde_json::json!({
         "id": "mizarllm-v1",
-        "version": "v1",
+        "version": fixture.version,
         "backend": { "kind": "http", "endpoint": "http://127.0.0.1:0", "timeout_ms": 1500 },
         "labels": { "done": 11, "needs_user": 4, "stalled": 9, "waiting": 8 },
         "note": "test",
@@ -86,10 +88,28 @@ async fn asset(State(fixture): State<Fixture>, headers: HeaderMap) -> Response {
 
 /// Serve the fixture and return the base URL the service should use.
 async fn serve(fixture: Fixture) -> String {
+    let asset_path = format!(
+        "/releases/download/{}/mizarllm-1.0.0-q4km.gguf",
+        fixture.version
+    );
     let app = Router::new()
         .route("/releases/latest/download/manifest.json", get(manifest))
-        .route("/releases/download/v1/mizarllm-1.0.0-q4km.gguf", get(asset))
+        .route(&asset_path, get(asset))
         .with_state(fixture);
+    listen(app).await
+}
+
+/// A repository that has the manifest and no files: the mirror that was half
+/// uploaded, or the one whose storage went away.
+async fn serve_manifest_only(fixture: Fixture) -> String {
+    let app = Router::new()
+        .route("/releases/latest/download/manifest.json", get(manifest))
+        .with_state(fixture);
+    listen(app).await
+}
+
+/// Serve one router on a port the kernel picks, and return its base URL.
+async fn listen(app: Router) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -130,6 +150,7 @@ async fn a_download_lands_whole_and_becomes_the_active_model() {
         bytes: Arc::new(bytes.clone()),
         range: true,
         delay_ms: 0,
+        version: "v1",
     })
     .await;
     let dir = tempfile::tempdir().unwrap();
@@ -169,6 +190,7 @@ async fn a_wrong_checksum_leaves_nothing_behind() {
         bytes: Arc::new(bytes),
         range: true,
         delay_ms: 0,
+        version: "v1",
     })
     .await;
     let dir = tempfile::tempdir().unwrap();
@@ -201,6 +223,7 @@ async fn a_partial_file_resumes_instead_of_starting_over() {
         bytes: Arc::new(bytes.clone()),
         range: true,
         delay_ms: 0,
+        version: "v1",
     })
     .await;
     let service = ModelService::open(dir.path().to_path_buf());
@@ -225,6 +248,7 @@ async fn a_second_download_is_refused_while_one_runs() {
         bytes: Arc::new(bytes),
         range: true,
         delay_ms: 400,
+        version: "v1",
     })
     .await;
     let dir = tempfile::tempdir().unwrap();
@@ -296,6 +320,167 @@ async fn a_rollback_restores_the_previous_bytes() {
         "and the model just replaced must be the one kept aside"
     );
     assert_eq!(service.state().active.unwrap().version, "1.0.0");
+}
+
+/// A source that cannot be reached is a fallback, not a failure.
+///
+/// The reason this exists: the release CDN answers in tens of kilobytes per
+/// second from mainland China while a mirror answers in megabytes, so the
+/// client tries the mirror first and must survive it being down.
+#[tokio::test]
+async fn a_dead_source_falls_back_to_the_next() {
+    let bytes = payload(16 * 1024);
+    let live = serve(Fixture {
+        sha256: digest(&bytes),
+        bytes: Arc::new(bytes.clone()),
+        range: true,
+        delay_ms: 0,
+        version: "v1",
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let service = ModelService::open(dir.path().to_path_buf());
+    service.route_sources(vec![
+        // Nothing listens on port 1: connection refused, immediately.
+        Source::release("dead", "http://127.0.0.1:1"),
+        Source::release("live", &live),
+    ]);
+
+    let check = service.check().await;
+    let latest = check.latest.expect("the live source should answer");
+    assert_eq!(latest.version, "v1");
+    assert!(
+        latest.url.contains(&live),
+        "the URL must come from the live source"
+    );
+
+    service.start_download(None).expect("accepted");
+    assert_eq!(settle(&service).await, "");
+    assert_eq!(
+        std::fs::read(dir.path().join("mizarllm-v1.gguf")).unwrap(),
+        bytes
+    );
+}
+
+/// A mirror with the manifest but not the file falls through to the next source.
+#[tokio::test]
+async fn a_source_without_the_file_falls_back_to_the_next() {
+    let bytes = payload(16 * 1024);
+    let empty = serve_manifest_only(Fixture {
+        sha256: digest(&bytes),
+        bytes: Arc::new(bytes.clone()),
+        range: true,
+        delay_ms: 0,
+        version: "v1",
+    })
+    .await;
+    let full = serve(Fixture {
+        sha256: digest(&bytes),
+        bytes: Arc::new(bytes.clone()),
+        range: true,
+        delay_ms: 0,
+        version: "v1",
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let service = ModelService::open(dir.path().to_path_buf());
+    service.route_sources(vec![
+        Source::release("empty", &empty),
+        Source::release("full", &full),
+    ]);
+
+    service.start_download(None).expect("accepted");
+    assert_eq!(settle(&service).await, "");
+    assert_eq!(
+        std::fs::read(dir.path().join("mizarllm-v1.gguf")).unwrap(),
+        bytes
+    );
+}
+
+/// Bytes that fail the manifest's checksum are the wrong model, not a head
+/// start: the partial is dropped and the next source starts from zero.
+#[tokio::test]
+async fn a_source_with_the_wrong_bytes_falls_through() {
+    let bytes = payload(16 * 1024);
+    let wrong: Vec<u8> = bytes.iter().map(|byte| byte.wrapping_add(7)).collect();
+    let bad = serve(Fixture {
+        // The manifest promises the right bytes; the server sends others.
+        sha256: digest(&bytes),
+        bytes: Arc::new(wrong),
+        range: true,
+        delay_ms: 0,
+        version: "v1",
+    })
+    .await;
+    let good = serve(Fixture {
+        sha256: digest(&bytes),
+        bytes: Arc::new(bytes.clone()),
+        range: true,
+        delay_ms: 0,
+        version: "v1",
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let service = ModelService::open(dir.path().to_path_buf());
+    service.route_sources(vec![
+        Source::release("bad", &bad),
+        Source::release("good", &good),
+    ]);
+
+    service.start_download(None).expect("accepted");
+    assert_eq!(settle(&service).await, "");
+    assert_eq!(
+        std::fs::read(dir.path().join("mizarllm-v1.gguf")).unwrap(),
+        bytes,
+        "the good source must be fetched from scratch, not resumed onto bad bytes"
+    );
+}
+
+/// The newest manifest wins, wherever it came from: a mirror left behind on the
+/// previous version must not pin the client to it.
+#[tokio::test]
+async fn the_newest_manifest_wins_across_sources() {
+    let old = payload(8 * 1024);
+    let new: Vec<u8> = payload(12 * 1024)
+        .iter()
+        .map(|byte| byte.wrapping_add(3))
+        .collect();
+    let mirror = serve(Fixture {
+        sha256: digest(&old),
+        bytes: Arc::new(old),
+        range: true,
+        delay_ms: 0,
+        version: "v1",
+    })
+    .await;
+    let release = serve(Fixture {
+        sha256: digest(&new),
+        bytes: Arc::new(new.clone()),
+        range: true,
+        delay_ms: 0,
+        version: "v2",
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let service = ModelService::open(dir.path().to_path_buf());
+    service.route_sources(vec![
+        Source::release("mirror", &mirror),
+        Source::release("release", &release),
+    ]);
+
+    let check = service.check().await;
+    let latest = check.latest.expect("one of the two should answer");
+    assert_eq!(latest.version, "v2", "the newer manifest must win");
+    assert!(latest.newer);
+
+    service.start_download(None).expect("accepted");
+    assert_eq!(settle(&service).await, "");
+    let state = service.state();
+    assert_eq!(state.active.expect("a model is active").version, "v2");
+    assert_eq!(
+        std::fs::read(dir.path().join("mizarllm-v1.gguf")).unwrap(),
+        new
+    );
 }
 
 /// The real thing: start `llama-server` with the real weights and ask it.
