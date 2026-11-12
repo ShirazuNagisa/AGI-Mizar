@@ -819,16 +819,24 @@ impl DshEngine {
         // then asked for the list again: one refresh became a storm that never
         // settled. The store still gets every row; the wire only gets news.
         let mut updated: Vec<Session> = Vec::new();
+        let mut resolved: Vec<Session> = Vec::with_capacity(parsed.len());
         {
             let mut inner = self.inner();
             for session in &parsed {
-                let changed = inner.sessions.get(&session.key.id) != Some(session);
+                // `session/list` carries the identity and activity, not the
+                // projections. A row that came back without its title would
+                // wipe the enriched one and make the phone treat a real
+                // conversation as blank; merge instead of replacing.
+                let existing = inner.sessions.get(&session.key.id).cloned();
+                let merged = merge_enriched(session, existing.as_ref());
+                let changed = existing.as_ref() != Some(&merged);
                 inner
                     .sessions
-                    .insert(session.key.id.clone(), session.clone());
+                    .insert(session.key.id.clone(), merged.clone());
                 if changed {
-                    updated.push(session.clone());
+                    updated.push(merged.clone());
                 }
+                resolved.push(merged);
             }
             let known: Vec<String> = inner.sessions.keys().cloned().collect();
             for id in known {
@@ -866,7 +874,9 @@ impl DshEngine {
                 }
             });
         }
-        Ok(parsed)
+        // The merged rows, not the raw list: the caller stores what this
+        // returns, and the raw rows would blank every enriched field again.
+        Ok(resolved)
     }
 
     /// Read one raw page from DSH: the log cut from `follow`, then `page` below
@@ -1404,6 +1414,35 @@ fn is_not_composed(error: &EngineError) -> bool {
 }
 
 /// Read one row of `session/list` into the shared model.
+/// Keep what only enrichment knows when a list row comes back without it.
+///
+/// `session/list` is the source of identity, activity and ownership; the
+/// enrichment reads are the source of title, model, pressure and turns. A
+/// re-read that replaced the whole row turned every real conversation into a
+/// blank one for a moment, which the phone correctly refuses to draw.
+fn merge_enriched(incoming: &Session, existing: Option<&Session>) -> Session {
+    let mut merged = incoming.clone();
+    let Some(old) = existing else {
+        return merged;
+    };
+    if merged.title.as_deref().is_none_or(str::is_empty) {
+        merged.title = old.title.clone();
+    }
+    if merged.model.as_deref().is_none_or(str::is_empty) {
+        merged.model = old.model.clone();
+    }
+    if merged.context.is_none() {
+        merged.context = old.context;
+    }
+    if merged.turns == 0 {
+        merged.turns = old.turns;
+    }
+    if merged.source.is_none() {
+        merged.source = old.source.clone();
+    }
+    merged
+}
+
 fn parse_session(value: &Value) -> Option<Session> {
     let id = value
         .get("sessionId")

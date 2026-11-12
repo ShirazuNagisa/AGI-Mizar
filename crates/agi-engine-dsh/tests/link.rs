@@ -776,3 +776,52 @@ async fn an_unchanged_enrichment_emits_nothing() {
     }
     h.handle.abort();
 }
+
+#[tokio::test]
+async fn a_list_does_not_blank_the_title_enrichment_learned() {
+    let mut h = start();
+    let mut events = h.engine.subscribe();
+    h.hello().await;
+    assert_eq!(h.next().await["type"], "welcome");
+    let raw = json!([
+        { "sessionId": "s1", "updatedAt": 1_700_000_000_000i64, "running": false }
+    ]);
+    h.answer_session_list(raw.clone()).await;
+
+    // First enrichment: the projections know the title and the turn count.
+    let first = h.next_invoke("session/projections").await;
+    let id = first["id"].as_str().unwrap().to_string();
+    h.send(json!({
+        "v": 1, "type": "result", "id": id, "ok": true,
+        "value": { "values": { "title": "T", "sessionStats": { "turns": 4 } } }
+    }))
+    .await;
+    let mut enriched = None;
+    while let Ok(received) = tokio::time::timeout(Duration::from_secs(2), events.recv()).await {
+        if let Ok(EngineEvent::SessionUpdated(session)) = received {
+            if session.title.as_deref() == Some("T") {
+                enriched = Some(session);
+                break;
+            }
+        }
+    }
+    assert_eq!(enriched.expect("the title was never folded in").turns, 4);
+
+    // A repeated list carries neither title nor turns: it must not blank them.
+    let engine = Arc::clone(&h.engine);
+    let refresh = tokio::spawn(async move { engine.sessions().await });
+    h.answer_next_list(raw).await;
+    let sessions = refresh.await.unwrap().unwrap();
+    assert_eq!(sessions[0].title.as_deref(), Some("T"));
+    assert_eq!(sessions[0].turns, 4);
+
+    // And the merged row is not news: no re-emit.
+    match tokio::time::timeout(Duration::from_millis(400), events.recv()).await {
+        Err(_) => {}
+        Ok(Ok(EngineEvent::SessionUpdated(session))) => {
+            panic!("the repeated list re-emitted {}", session.key)
+        }
+        Ok(Ok(_)) | Ok(Err(_)) => {}
+    }
+    h.handle.abort();
+}
