@@ -80,6 +80,7 @@ if command -v strip >/dev/null 2>&1; then
 fi
 install -m 0755 scripts/linux/agi-mizar-web.sh "$STAGE/scripts/linux/agi-mizar-web.sh"
 install -m 0755 scripts/linux/install-webui.sh "$STAGE/scripts/linux/install-webui.sh"
+install -m 0755 scripts/linux/smoke-test.sh "$STAGE/scripts/linux/smoke-test.sh"
 install -m 0644 crates/agi-app/icons/128x128.png "$STAGE/share/icons/agi-mizar.png"
 install -m 0644 docs/linux.md "$STAGE/share/doc/linux.md"
 install -m 0644 LICENSE "$STAGE/LICENSE"
