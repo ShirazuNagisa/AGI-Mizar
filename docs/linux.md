@@ -51,6 +51,16 @@ scripts/linux/install-webui.sh --build
 `--build` 会依次构建 `ui/dist`（必须在前，daemon 用 `rust-embed` 把它编译进二进制）和
 `agi-daemon`；也可以先手动构建，再传 `--binary target/release/agi-daemon`。
 
+公测包构建与冒烟测试：
+
+```sh
+scripts/package-linux.sh --version 0.1.2 --beta 1 --out ../../release/linux-beta-0.1.2
+scripts/linux/smoke-test.sh --binary target/release/agi-daemon
+```
+
+冒烟测试不需要 systemd 或 root：临时 HOME/端口启动 kernel，检查 UI 页面、无认证 401、
+`/launch` 的 HttpOnly/SameSite cookie、cookie 访问 200、开放重定向被挡、logout 204。
+
 默认安装位置：
 
 | 内容 | 路径 |

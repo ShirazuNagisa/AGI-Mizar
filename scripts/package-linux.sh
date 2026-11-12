@@ -62,6 +62,7 @@ fi
 if [ "$SKIP_BUILD" = 0 ]; then
   cargo build --release -p agi-daemon
 fi
+[ -f ui/dist/index.html ] || { echo "package-linux: ui/dist is missing; run npm --prefix ui run build" >&2; exit 1; }
 [ -x "$BIN" ] || { echo "package-linux: no release daemon at $BIN" >&2; exit 1; }
 
 rm -rf "$OUT_DIR"
