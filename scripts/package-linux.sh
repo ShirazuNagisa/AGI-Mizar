@@ -215,7 +215,7 @@ EOF
   | sort -z | xargs -0 md5sum) > "$DEB_ROOT/DEBIAN/md5sums"
 
 (cd "$DEB_ROOT/DEBIAN" && tar --owner=0 --group=0 -czf "$OUT_DIR/control.tar.gz" .)
-(cd "$DEB_ROOT" && tar --owner=0 --group=0 -czf "$OUT_DIR/data.tar.gz" .)
+(cd "$DEB_ROOT" && tar --exclude='./DEBIAN' --owner=0 --group=0 -czf "$OUT_DIR/data.tar.gz" .)
 printf '2.0\n' > "$OUT_DIR/debian-binary"
 DEB_FILE="$OUT_DIR/agi-mizar_${DEB_VERSION}_${DEB_ARCH}.deb"
 (cd "$OUT_DIR" && ar rc "$DEB_FILE" debian-binary control.tar.gz data.tar.gz)
