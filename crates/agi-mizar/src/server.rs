@@ -660,6 +660,34 @@ impl MizarServer {
             .map(|path| path.endpoint_id.clone())
     }
 
+    /// What the direct path currently knows, for `host.info`.
+    ///
+    /// `netEndpointId` is the only field a phone needed; this object is the
+    /// diagnosis: whether an outside address was learned, whether a gateway
+    /// forwarded a port, and the exact candidates a punch would try. It is
+    /// additive, so a phone that does not know it ignores it.
+    fn p2p_facts(&self) -> Value {
+        let guard = self
+            .direct
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(path) = guard.as_ref() else {
+            return Value::Null;
+        };
+        let candidates: Vec<Value> = path
+            .reach
+            .candidates()
+            .iter()
+            .map(|candidate| candidate.to_json())
+            .collect();
+        json!({
+            "endpointId": path.endpoint_id,
+            "candidates": candidates,
+            "stun": path.reach.reflexive().is_some(),
+            "mapped": path.reach.mapped().is_some(),
+        })
+    }
+
     /// The candidate list, for the tests that pin its shape.
     ///
     /// Public and `doc(hidden)` because an integration test is another crate:
@@ -1137,6 +1165,9 @@ impl MizarServer {
                         // none. A phone that sees it grows a `.p2p` route; one
                         // that sees `null` keeps the two it had.
                         "netEndpointId": self.net_endpoint_id(),
+                        // Additive diagnosis: candidates, STUN and a gateway
+                        // mapping, all in one place a log or a test can read.
+                        "p2p": self.p2p_facts(),
                     }),
                 )
             }
