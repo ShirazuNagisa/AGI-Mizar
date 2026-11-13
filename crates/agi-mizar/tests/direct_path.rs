@@ -123,19 +123,21 @@ impl Dialer {
 
     async fn receive(&mut self) -> Vec<u8> {
         let mut buffer = vec![0u8; 65_536];
-        let (length, _) =
-            tokio::time::timeout(Duration::from_secs(2), self.socket.recv_from(&mut buffer))
-                .await
-                .expect("a message arrives")
-                .expect("a datagram");
-        let packet = Packet::decode(&buffer[..length]).expect("a packet");
-        let events = self.session.on_packet(&packet, Instant::now());
-        for event in events {
-            if let Event::Message(message) = event {
-                return message;
+        // Acks and keepalives can arrive between the data packet and its
+        // answer; only a message is what this helper is waiting for.
+        loop {
+            let (length, _) =
+                tokio::time::timeout(Duration::from_secs(2), self.socket.recv_from(&mut buffer))
+                    .await
+                    .expect("a message arrives")
+                    .expect("a datagram");
+            let packet = Packet::decode(&buffer[..length]).expect("a packet");
+            for event in self.session.on_packet(&packet, Instant::now()) {
+                if let Event::Message(message) = event {
+                    return message;
+                }
             }
         }
-        panic!("a data packet carried no message");
     }
 }
 
@@ -152,7 +154,8 @@ async fn a_punched_connection_speaks_the_same_protocol_as_a_socket() {
     let (mut engine, address) = Engine::bind(identity, 0, reach.clone(), Vec::new())
         .await
         .expect("a socket");
-    server.attach_direct_path(endpoint_id.clone(), reach);
+    let (punches, _punches) = tokio::sync::mpsc::channel(1);
+    server.attach_direct_path(endpoint_id.clone(), reach, punches);
 
     // The accept loop, in miniature: one connection at a time is enough, and it
     // is the same call the boot sequence makes.
@@ -198,7 +201,8 @@ async fn host_info_offers_the_direct_path_only_when_one_is_bound() {
     reach.set_port(51_234);
     let reflexive: std::net::SocketAddr = "124.228.221.210:61921".parse().unwrap();
     reach.set_reflexive(reflexive);
-    server.attach_direct_path("an-endpoint-id", reach);
+    let (punches, _punches) = tokio::sync::mpsc::channel(1);
+    server.attach_direct_path("an-endpoint-id", reach, punches);
     assert_eq!(server.net_endpoint_id().as_deref(), Some("an-endpoint-id"));
 
     // The candidates the signalling channel hands out are the host addresses on

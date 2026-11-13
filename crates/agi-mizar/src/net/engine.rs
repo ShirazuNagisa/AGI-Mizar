@@ -1,7 +1,7 @@
 //! The acceptor: a UDP socket that turns a punch into a stream.
 //!
-//! This computer is always the side being dialled, so the engine is an acceptor
-//! and only an acceptor. What it does, in order:
+//! This computer is the side being dialled, and it is also the side that has to
+//! send first when the phone is behind a restricted NAT. What it does, in order:
 //!
 //! 1. **Binds one socket** whose address is published to a phone as a candidate.
 //! 2. **Verifies every ClientHello** against the endpoint id it carries. That
@@ -14,6 +14,9 @@
 //!    the reply leaves from the port the phone just opened a mapping for.
 //! 4. **Runs a [`Session`]** per accepted connection and hands it to the server
 //!    as a [`Stream`].
+//! 5. **Punches back** when signaling names a phone: a ClientHello from this
+//!    socket opens the local NAT for the phone's own hello, which a
+//!    port-restricted NAT would otherwise drop.
 //!
 //! ### Why a repeated hello is answered again
 //!
@@ -24,11 +27,11 @@
 //! *same* ephemeral key, because the dialler derives its session keys from what
 //! that hello carries.
 //!
-//! ### What is not here yet
+//! ### The duplicate-session rule
 //!
-//! STUN. Until a reflexive candidate is learned, only a caller on the same network
-//! can reach this socket — which is exactly the "LAN already works" case, so the
-//! engine is still useful, still testable, and not yet advertised to phones.
+//! A simultaneous open leaves two sessions, one from each side's hello. Both
+//! sides wait the same grace and keep the session with the smaller connection
+//! id, so the two ends finish on the same one without another handshake.
 
 use std::collections::HashMap;
 use std::io;
@@ -59,6 +62,32 @@ const COMMAND_DEPTH: usize = 64;
 /// who opened them — a stranger can cost one slot until the token check fails,
 /// and cannot cost the machine its memory.
 pub const MAX_SESSIONS: usize = 64;
+
+/// How often a punch round repeats while the acceptor is opening its own NAT.
+const PUNCH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
+
+/// How long an acceptor punches back before giving the path up.
+///
+/// The same three seconds the phone spends: a punch either lands in the first
+/// few rounds or the two networks are not going to agree.
+const PUNCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How long two sessions to the same phone are allowed to coexist before one is
+/// chosen.
+///
+/// A simultaneous open leaves one session for the phone's hello and one for
+/// ours. The phone applies the same grace and the same rule (the smaller
+/// connection id wins), so both sides finish with the same session.
+const YIELD_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// A phone the server has asked the engine to punch back to.
+#[derive(Debug, Clone)]
+pub struct PunchTarget {
+    /// The phone's base64url endpoint id, as its signaling hello named it.
+    pub endpoint_id: String,
+    /// Where the phone says it can be reached, best first.
+    pub candidates: Vec<SocketAddr>,
+}
 
 /// Where a direct path can be reached, kept current by the socket that owns it.
 ///
@@ -278,19 +307,44 @@ pub struct Engine {
     identity: Arc<Identity>,
     address: SocketAddr,
     incoming: mpsc::Receiver<Stream>,
+    /// Where the server asks for an acceptor-side punch.
+    punches: mpsc::Sender<PunchTarget>,
 }
 
 /// One live connection inside the socket loop.
 struct Live {
     session: Session,
     remote: SocketAddr,
+    /// The phone's endpoint id, kept for the duplicate-session rule.
+    endpoint_id: String,
     incoming: mpsc::Sender<Vec<u8>>,
+    /// Held here until the grace decides which session the server gets.
+    receiver: Option<mpsc::Receiver<Vec<u8>>>,
     /// The ServerHello this connection was answered with, encoded.
     ///
     /// Kept so a repeated hello is answered with the *same* ephemeral key: the
     /// dialler derives its session keys from that hello, and a fresh key would
-    /// give it a session the acceptor does not have.
-    server_hello: Vec<u8>,
+    /// give it a session the acceptor does not have. A session we dialled
+    /// (the acceptor-side punch) has no ServerHello of its own.
+    server_hello: Option<Vec<u8>>,
+    /// Whether the server has received this session as a [`Stream`].
+    yielded: bool,
+}
+
+/// One acceptor-side punch in flight.
+struct Dial {
+    /// The phone the server asked us to reach.
+    endpoint_id: String,
+    /// The X25519 secret whose public half the hello carries.
+    local_secret: [u8; 32],
+    /// The encoded, signed ClientHello, resent until answered.
+    hello: Vec<u8>,
+    /// Where to send it.
+    candidates: Vec<SocketAddr>,
+    /// When to stop.
+    deadline: Instant,
+    /// When the next round goes out.
+    next_send: Instant,
 }
 
 impl Engine {
@@ -325,6 +379,7 @@ impl Engine {
         let identity = Arc::new(identity);
         let (incoming_tx, incoming_rx) = mpsc::channel(STREAM_DEPTH);
         let (commands_tx, commands_rx) = mpsc::channel(COMMAND_DEPTH);
+        let (punch_tx, punch_rx) = mpsc::channel(16);
         reach.set_port(address.port());
         let engine_identity = Arc::clone(&identity);
         let engine_reach = reach.clone();
@@ -337,6 +392,7 @@ impl Engine {
                 commands_rx,
                 commands_tx,
                 incoming_tx,
+                punch_rx,
             )
             .await
             {
@@ -348,9 +404,15 @@ impl Engine {
                 identity,
                 address,
                 incoming: incoming_rx,
+                punches: punch_tx,
             },
             address,
         ))
+    }
+
+    /// Where the server asks for an acceptor-side punch.
+    pub fn punch_sender(&self) -> mpsc::Sender<PunchTarget> {
+        self.punches.clone()
     }
 
     /// This endpoint's id, which a phone's ticket names.
@@ -377,8 +439,14 @@ async fn run(
     mut commands: mpsc::Receiver<Command>,
     command_sender: mpsc::Sender<Command>,
     incoming: mpsc::Sender<Stream>,
+    mut punches: mpsc::Receiver<PunchTarget>,
 ) -> io::Result<()> {
     let mut live: HashMap<u64, Live> = HashMap::new();
+    let mut dialing: HashMap<u64, Dial> = HashMap::new();
+    // Endpoint -> when the grace for choosing among its sessions ends.
+    let mut pending: HashMap<String, Instant> = HashMap::new();
+    // Endpoint -> the connection id the server was finally given.
+    let mut active: HashMap<String, u64> = HashMap::new();
     let mut buffer = vec![0u8; 65_536];
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -386,6 +454,10 @@ async fn run(
     // launch rather than fifteen seconds into the first call.
     let mut stun_ticker = tokio::time::interval(stun::PROBE_INTERVAL);
     stun_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The server that answered last. A deployment can list more than one (the
+    // unified relay's own host does not answer; the main host does), and a
+    // machine should not pay a timeout for the dead one on every refresh.
+    let mut preferred_stun: Option<String> = None;
 
     loop {
         tokio::select! {
@@ -394,11 +466,34 @@ async fn run(
                 let Ok(packet) = Packet::decode(&buffer[..length]) else { continue };
                 match packet.kind {
                     PacketType::ClientHello => {
-                        accept(&socket, &identity, &incoming, &command_sender, &mut live, &packet, from).await;
+                        accept(
+                            &socket,
+                            &identity,
+                            &mut live,
+                            &mut pending,
+                            &active,
+                            &packet,
+                            from,
+                        )
+                        .await;
                     }
-                    // The acceptor never dials, so an answer to a hello is a
-                    // conversation it is not part of.
-                    PacketType::ServerHello => {}
+                    // An answer to a hello this engine sent. That is the
+                    // acceptor-side punch working, not a conversation for
+                    // somebody else.
+                    PacketType::ServerHello => {
+                        answer_server_hello(
+                            &socket,
+                            &identity,
+                            &command_sender,
+                            &mut live,
+                            &mut dialing,
+                            &mut pending,
+                            &active,
+                            &packet,
+                            from,
+                        )
+                        .await;
+                    }
                     _ => {
                         let Some(entry) = live.get_mut(&packet.connection_id) else { continue };
                         for event in entry.session.on_packet(&packet, Instant::now()) {
@@ -417,6 +512,10 @@ async fn run(
                     }
                 }
             }
+            target = punches.recv() => {
+                let Some(target) = target else { return Ok(()) };
+                start_punch(&socket, &identity, &mut dialing, &live, &active, target).await;
+            }
             command = commands.recv() => {
                 match command {
                     Some(Command::Send(connection_id, message)) => {
@@ -427,10 +526,12 @@ async fn run(
                     }
                     Some(Command::Close(connection_id)) => {
                         let Some(mut entry) = live.remove(&connection_id) else { continue };
+                        if active.get(&entry.endpoint_id) == Some(&connection_id) {
+                            active.remove(&entry.endpoint_id);
+                        }
+                        pending.remove(&entry.endpoint_id);
                         let packet = entry.session.close("closed by the server");
                         let _ = socket.send_to(&packet.encode(), entry.remote).await;
-                        // Dropping the sender finishes the server's reads.
-                        drop(entry.incoming);
                     }
                     None => return Ok(()),
                 }
@@ -438,19 +539,82 @@ async fn run(
             _ = stun_ticker.tick() => {
                 // Asking from this socket is the point: the mapping this opens
                 // is the one a phone can punch into, and re-asking every fifteen
-                // seconds is what keeps it open.
-                if let Some(server) = stun_servers.first() {
-                    match stun::probe(&socket, server).await {
+                // seconds is what keeps it open. More than one server is normal
+                // (the unified relay's host answers no STUN), so the one that
+                // answered last is asked first.
+                let mut order: Vec<String> = Vec::with_capacity(stun_servers.len());
+                if let Some(preferred) = preferred_stun
+                    .as_ref()
+                    .filter(|preferred| stun_servers.contains(preferred))
+                {
+                    order.push(preferred.clone());
+                }
+                order.extend(
+                    stun_servers
+                        .iter()
+                        .filter(|server| Some(*server) != preferred_stun.as_ref())
+                        .cloned(),
+                );
+                let mut answered = false;
+                for server in order {
+                    match stun::probe(&socket, &server).await {
                         Ok(seen) => {
-                            tracing::debug!("p2p: STUN sees us at {seen}");
+                            if preferred_stun.as_ref() != Some(&server) {
+                                tracing::info!("p2p: STUN learned {seen} from {server}");
+                                preferred_stun = Some(server);
+                            } else {
+                                tracing::debug!("p2p: STUN refreshed {seen} from {server}");
+                            }
                             reach.set_reflexive(seen);
+                            answered = true;
+                            break;
                         }
-                        Err(error) => tracing::debug!("p2p: STUN did not answer — {error}"),
+                        Err(error) => {
+                            tracing::debug!("p2p: STUN {server} did not answer — {error}");
+                        }
                     }
+                }
+                if !answered {
+                    tracing::debug!("p2p: no STUN server answered");
                 }
             }
             _ = ticker.tick() => {
                 let now = Instant::now();
+                // The acceptor's own punch: the outbound datagrams are what
+                // open a restricted NAT for the phone's answer.
+                let mut expired = Vec::new();
+                for (connection_id, dial) in dialing.iter_mut() {
+                    if now >= dial.deadline {
+                        expired.push(*connection_id);
+                        continue;
+                    }
+                    if now >= dial.next_send {
+                        for address in &dial.candidates {
+                            let _ = socket.send_to(&dial.hello, address).await;
+                        }
+                        dial.next_send = now + PUNCH_INTERVAL;
+                    }
+                }
+                for connection_id in expired {
+                    if let Some(dial) = dialing.remove(&connection_id) {
+                        tracing::info!(
+                            "p2p: punching back to {}… timed out",
+                            &dial.endpoint_id[..dial.endpoint_id.len().min(8)]
+                        );
+                    }
+                }
+
+                resolve_pending(
+                    &socket,
+                    &incoming,
+                    &command_sender,
+                    &mut live,
+                    &mut pending,
+                    &mut active,
+                    now,
+                )
+                .await;
+
                 let mut stalled = Vec::new();
                 for (connection_id, entry) in live.iter_mut() {
                     for packet in entry.session.tick(now) {
@@ -463,7 +627,10 @@ async fn run(
                 for connection_id in stalled {
                     if let Some(entry) = live.remove(&connection_id) {
                         tracing::debug!("p2p: a direct connection stalled and was dropped");
-                        drop(entry.incoming);
+                        if active.get(&entry.endpoint_id) == Some(&connection_id) {
+                            active.remove(&entry.endpoint_id);
+                        }
+                        pending.remove(&entry.endpoint_id);
                     }
                 }
             }
@@ -471,14 +638,20 @@ async fn run(
     }
 }
 
-/// Admit one hello, or answer one that has been seen before.
+/// Admit one ClientHello, answer the dialler, and queue the session for the
+/// duplicate-session grace.
+///
+/// The server is deliberately not handed a stream here. A simultaneous open
+/// (the phone dialled us while we were dialling it) leaves two sessions, and
+/// which one is usable is not known until both have had a chance to arrive.
+/// ``resolve_pending`` makes that choice once, on the ticker.
 #[allow(clippy::too_many_arguments)]
 async fn accept(
     socket: &UdpSocket,
     identity: &Identity,
-    incoming: &mpsc::Sender<Stream>,
-    commands: &mpsc::Sender<Command>,
     live: &mut HashMap<u64, Live>,
+    pending: &mut HashMap<String, Instant>,
+    active: &HashMap<String, u64>,
     packet: &Packet,
     from: SocketAddr,
 ) {
@@ -497,7 +670,16 @@ async fn accept(
 
     if let Some(entry) = live.get(&packet.connection_id) {
         // The dialler is still punching: answer with what it is waiting for.
-        let _ = socket.send_to(&entry.server_hello, from).await;
+        if let Some(server_hello) = entry.server_hello.as_ref() {
+            let _ = socket.send_to(server_hello, from).await;
+        }
+        return;
+    }
+    if active.contains_key(remote_endpoint_id) {
+        // A path to this phone is already up. This hello is the losing half of
+        // an old race; close it rather than handing the server a second socket.
+        let close = Packet::close(packet.connection_id, "another direct path is already up");
+        let _ = socket.send_to(&close.encode(), from).await;
         return;
     }
     if live.len() >= MAX_SESSIONS {
@@ -536,13 +718,6 @@ async fn accept(
     );
 
     let (incoming_tx, incoming_rx) = mpsc::channel(64);
-    let stream = Stream {
-        remote: from,
-        remote_endpoint_id: remote_endpoint_id.clone(),
-        connection_id: packet.connection_id,
-        outgoing: commands.clone(),
-        incoming: incoming_rx,
-    };
     let _ = socket.send_to(&server_hello, from).await;
     tracing::debug!(
         "p2p: accepted {} from {from}",
@@ -554,14 +729,250 @@ async fn accept(
         Live {
             session,
             remote: from,
+            endpoint_id: remote_endpoint_id.clone(),
             incoming: incoming_tx,
-            server_hello,
+            receiver: Some(incoming_rx),
+            server_hello: Some(server_hello),
+            yielded: false,
         },
     );
-    // A server that is not reading at the moment drops the connection rather
-    // than holding a session nobody will ever take.
-    if incoming.send(stream).await.is_err() {
-        live.remove(&packet.connection_id);
+    pending
+        .entry(remote_endpoint_id.clone())
+        .or_insert_with(|| Instant::now() + YIELD_GRACE);
+}
+
+/// The phone answered a ClientHello this engine sent.
+///
+/// This is the half the acceptor-only design was missing: a phone behind a
+/// restricted NAT can only be reached after this side has sent to the address
+/// the phone's signaling hello named. The phone's answer proves the mapping is
+/// open, and the session it starts is offered to the server like any other.
+#[allow(clippy::too_many_arguments)]
+async fn answer_server_hello(
+    socket: &UdpSocket,
+    identity: &Identity,
+    _commands: &mpsc::Sender<Command>,
+    live: &mut HashMap<u64, Live>,
+    dialing: &mut HashMap<u64, Dial>,
+    pending: &mut HashMap<String, Instant>,
+    active: &HashMap<String, u64>,
+    packet: &Packet,
+    from: SocketAddr,
+) {
+    let Some(dial) = dialing.get(&packet.connection_id) else {
+        return;
+    };
+    let expected_endpoint = dial.endpoint_id.clone();
+    let local_secret = dial.local_secret;
+    let PacketBody::Hello {
+        ephemeral: remote_ephemeral,
+        endpoint_id: remote_endpoint_id,
+        signature,
+    } = &packet.body
+    else {
+        return;
+    };
+    if *remote_endpoint_id != expected_endpoint {
+        tracing::debug!("p2p: a ServerHello from {from} named a different phone");
+        return;
+    }
+    if !verify_signature(signature, &packet.handshake_message(), remote_endpoint_id) {
+        tracing::debug!("p2p: a ServerHello from {from} did not verify");
+        return;
+    }
+    if active.contains_key(remote_endpoint_id) {
+        let close = Packet::close(packet.connection_id, "another direct path is already up");
+        let _ = socket.send_to(&close.encode(), from).await;
+        dialing.remove(&packet.connection_id);
+        return;
+    }
+
+    let shared = crypto::agree(&local_secret, remote_ephemeral);
+    let session = Session::new(
+        Role::Dialer,
+        packet.connection_id,
+        identity.endpoint_id(),
+        remote_endpoint_id,
+        &shared,
+        Instant::now(),
+    );
+    let (incoming_tx, incoming_rx) = mpsc::channel(64);
+    dialing.remove(&packet.connection_id);
+    live.insert(
+        packet.connection_id,
+        Live {
+            session,
+            remote: from,
+            endpoint_id: remote_endpoint_id.clone(),
+            incoming: incoming_tx,
+            receiver: Some(incoming_rx),
+            server_hello: None,
+            yielded: false,
+        },
+    );
+    pending
+        .entry(remote_endpoint_id.clone())
+        .or_insert_with(|| Instant::now() + YIELD_GRACE);
+    tracing::info!(
+        "p2p: the phone answered our punch from {from} ({})",
+        &remote_endpoint_id[..remote_endpoint_id.len().min(8)]
+    );
+}
+
+/// Start punching back to a phone the server has just signalled.
+///
+/// One punch per phone: a repeated signal hello refreshes nothing while the
+/// socket already exists, and a second punch to the same peer would race the
+/// first one's session.
+async fn start_punch(
+    socket: &UdpSocket,
+    identity: &Identity,
+    dialing: &mut HashMap<u64, Dial>,
+    live: &HashMap<u64, Live>,
+    active: &HashMap<String, u64>,
+    target: PunchTarget,
+) {
+    let endpoint = target.endpoint_id.trim();
+    if endpoint.is_empty()
+        || active.contains_key(endpoint)
+        || live.values().any(|entry| entry.endpoint_id == endpoint)
+        || dialing.values().any(|dial| dial.endpoint_id == endpoint)
+    {
+        return;
+    }
+    let mut candidates = Vec::new();
+    for candidate in target.candidates {
+        // Loopback is allowed here because the signaling handler is the only
+        // caller in production and it filters it; a unit test punches to a
+        // loopback phone, and refusing that would test nothing. Link-local is
+        // not: it is the phone's own interface (AWDL or a stale 169.254), and
+        // a punch to it would look like success on the bench and fail on a
+        // real network.
+        let link_local = match candidate.ip() {
+            std::net::IpAddr::V4(v4) => v4.is_link_local(),
+            std::net::IpAddr::V6(v6) => v6.is_unicast_link_local(),
+        };
+        if candidate.ip().is_unspecified() || link_local {
+            continue;
+        }
+        if candidates.contains(&candidate) {
+            continue;
+        }
+        candidates.push(candidate);
+        if candidates.len() >= 8 {
+            break;
+        }
+    }
+    if candidates.is_empty() {
+        tracing::debug!("p2p: the phone's signaling hello named no usable candidate");
+        return;
+    }
+
+    let connection_id = loop {
+        let id = crypto::connection_id();
+        if id != 0 && !live.contains_key(&id) && !dialing.contains_key(&id) {
+            break id;
+        }
+    };
+    let (local_secret, local_public) = crypto::ephemeral_keypair();
+    let mut hello = Packet::hello(
+        PacketType::ClientHello,
+        connection_id,
+        local_public,
+        identity.endpoint_id(),
+        [0u8; 64],
+    );
+    let signed = identity.sign(&hello.handshake_message());
+    hello = Packet::hello(
+        PacketType::ClientHello,
+        connection_id,
+        local_public,
+        identity.endpoint_id(),
+        signed,
+    );
+    let now = Instant::now();
+    let dial = Dial {
+        endpoint_id: endpoint.to_string(),
+        local_secret,
+        hello: hello.encode(),
+        candidates,
+        deadline: now + PUNCH_BUDGET,
+        next_send: now,
+    };
+    for address in &dial.candidates {
+        let _ = socket.send_to(&dial.hello, address).await;
+    }
+    tracing::info!(
+        "p2p: punching back to {}… at {} address(es): {:?}",
+        &endpoint[..endpoint.len().min(8)],
+        dial.candidates.len(),
+        dial.candidates
+    );
+    dialing.insert(connection_id, dial);
+}
+
+/// Choose one session per phone after the grace and hand it to the server.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_pending(
+    socket: &UdpSocket,
+    incoming: &mpsc::Sender<Stream>,
+    commands: &mpsc::Sender<Command>,
+    live: &mut HashMap<u64, Live>,
+    pending: &mut HashMap<String, Instant>,
+    active: &mut HashMap<String, u64>,
+    now: Instant,
+) {
+    let ready: Vec<String> = pending
+        .iter()
+        .filter(|(_, deadline)| **deadline <= now)
+        .map(|(endpoint, _)| endpoint.clone())
+        .collect();
+    for endpoint in ready {
+        let ids: Vec<u64> = live
+            .iter()
+            .filter(|(_, entry)| entry.endpoint_id == endpoint && !entry.yielded)
+            .map(|(id, _)| *id)
+            .collect();
+        if ids.is_empty() {
+            pending.remove(&endpoint);
+            continue;
+        }
+        // Both sides apply this rule to the same two connection ids, so the
+        // loser is the same session on both ends.
+        let keeper = *ids.iter().min().expect("non-empty");
+        for id in ids.iter().filter(|id| **id != keeper) {
+            if let Some(mut entry) = live.remove(id) {
+                let packet = entry.session.close("a second direct path won");
+                let _ = socket.send_to(&packet.encode(), entry.remote).await;
+                tracing::debug!("p2p: dropped connection {id} in favour of {keeper}");
+            }
+        }
+        if let Some(entry) = live.get_mut(&keeper) {
+            if !entry.yielded {
+                entry.yielded = true;
+                active.insert(endpoint.clone(), keeper);
+                if let Some(receiver) = entry.receiver.take() {
+                    let stream = Stream {
+                        remote: entry.remote,
+                        remote_endpoint_id: endpoint.clone(),
+                        connection_id: keeper,
+                        outgoing: commands.clone(),
+                        incoming: receiver,
+                    };
+                    if incoming.send(stream).await.is_err() {
+                        live.remove(&keeper);
+                        active.remove(&endpoint);
+                        pending.remove(&endpoint);
+                        continue;
+                    }
+                }
+            }
+        }
+        pending.remove(&endpoint);
+        tracing::debug!(
+            "p2p: yielded connection {keeper} for {}…",
+            &endpoint[..endpoint.len().min(8)]
+        );
     }
 }
 
@@ -891,5 +1302,98 @@ mod tests {
             .send_to(&packet.encode(), address)
             .await
             .expect("sent");
+    }
+
+    /// The acceptor's own punch: a phone behind a restricted NAT is reached by
+    /// this machine sending first, not by the phone's Hello arriving.
+    #[tokio::test]
+    async fn an_acceptor_punch_reaches_a_phone_behind_a_restricted_nat() {
+        let identity = Identity::derive(b"the host secret", Purpose::Host);
+        let (mut engine, _address) = Engine::bind(identity, 0, Reach::default(), Vec::new())
+            .await
+            .expect("an engine");
+        let host_endpoint_id = engine.endpoint_id().to_string();
+
+        let phone_socket = UdpSocket::bind(("127.0.0.1", 0))
+            .await
+            .expect("a phone socket");
+        let phone_address = phone_socket.local_addr().expect("an address");
+        let phone_identity = Identity::derive(b"the device token", Purpose::Device);
+        let (phone_secret, phone_public) = crypto::ephemeral_keypair();
+
+        engine
+            .punch_sender()
+            .send(PunchTarget {
+                endpoint_id: phone_identity.endpoint_id().to_string(),
+                candidates: vec![phone_address],
+            })
+            .await
+            .expect("the punch is queued");
+
+        // The engine's ClientHello is the packet that opens this machine's NAT.
+        let mut buffer = vec![0u8; 2048];
+        let (length, from) =
+            tokio::time::timeout(Duration::from_secs(2), phone_socket.recv_from(&mut buffer))
+                .await
+                .expect("the acceptor punches back")
+                .expect("a datagram");
+        let packet = Packet::decode(&buffer[..length]).expect("a packet");
+        let connection_id = packet.connection_id;
+        let PacketBody::Hello {
+            ephemeral: host_public,
+            endpoint_id: host_id,
+            ..
+        } = packet.body
+        else {
+            panic!("the punch is a hello");
+        };
+        assert_eq!(packet.kind, PacketType::ClientHello);
+        assert_eq!(host_id, host_endpoint_id);
+
+        let mut hello = Packet::hello(
+            PacketType::ServerHello,
+            connection_id,
+            phone_public,
+            phone_identity.endpoint_id(),
+            [0u8; 64],
+        );
+        let signature = phone_identity.sign(&hello.handshake_message());
+        hello = Packet::hello(
+            PacketType::ServerHello,
+            connection_id,
+            phone_public,
+            phone_identity.endpoint_id(),
+            signature,
+        );
+        phone_socket
+            .send_to(&hello.encode(), from)
+            .await
+            .expect("the answer goes out");
+
+        let mut stream = tokio::time::timeout(Duration::from_secs(2), engine.accept())
+            .await
+            .expect("the punched session reaches the server")
+            .expect("a stream");
+
+        let shared = crypto::agree(&phone_secret, &host_public);
+        let mut session = Session::new(
+            Role::Acceptor,
+            connection_id,
+            phone_identity.endpoint_id(),
+            &host_id,
+            &shared,
+            Instant::now(),
+        );
+        for packet in session.send(b"back through the punch", Instant::now()) {
+            phone_socket
+                .send_to(&packet.encode(), from)
+                .await
+                .expect("sent");
+        }
+        let message = tokio::time::timeout(Duration::from_secs(2), stream.receive())
+            .await
+            .expect("the engine reads it")
+            .expect("a message");
+        assert_eq!(message, b"back through the punch");
     }
 }

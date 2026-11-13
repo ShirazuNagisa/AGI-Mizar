@@ -222,7 +222,8 @@ async fn a_card_for_a_punched_connection_advertises_what_the_phone_needs() {
     let (server, _store, _dir) = start().await;
     let reach = agi_mizar::net::engine::Reach::default();
     reach.set_port(51_234);
-    server.attach_direct_path("an-endpoint-id", reach);
+    let (punches, _punches) = tokio::sync::mpsc::channel(1);
+    server.attach_direct_path("an-endpoint-id", reach, punches);
     assert_eq!(server.net_endpoint_id().as_deref(), Some("an-endpoint-id"));
 
     // The identity the engine derives is base64url of an Ed25519 key: 43
@@ -246,7 +247,8 @@ async fn the_signal_channel_answers_in_the_shape_the_phone_decodes() {
     let issued = store.issue("phone", None).expect("a token");
     let reach = agi_mizar::net::engine::Reach::default();
     reach.set_port(51_234);
-    server.attach_direct_path("an-endpoint-id", reach);
+    let (punches, _punches) = tokio::sync::mpsc::channel(1);
+    server.attach_direct_path("an-endpoint-id", reach, punches);
 
     let url = format!("ws://127.0.0.1:{}/mizar-net/signal", server.port());
     let (mut socket, _) = connect_async(url).await.expect("a socket");
@@ -285,7 +287,8 @@ async fn the_signal_channel_refuses_a_phone_this_host_never_paired() {
     let (server, _store, _dir) = start().await;
     let reach = agi_mizar::net::engine::Reach::default();
     reach.set_port(51_234);
-    server.attach_direct_path("an-endpoint-id", reach);
+    let (punches, _punches) = tokio::sync::mpsc::channel(1);
+    server.attach_direct_path("an-endpoint-id", reach, punches);
 
     let url = format!("ws://127.0.0.1:{}/mizar-net/signal", server.port());
     let (mut socket, _) = connect_async(url).await.expect("a socket");

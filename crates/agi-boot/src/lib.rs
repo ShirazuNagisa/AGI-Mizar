@@ -536,7 +536,7 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
             Ok((mut engine, address)) => {
                 let endpoint_id = engine.endpoint_id().to_string();
                 tracing::info!("p2p: direct path on {address} ({endpoint_id})");
-                mizar.attach_direct_path(endpoint_id, reach);
+                mizar.attach_direct_path(endpoint_id, reach, engine.punch_sender());
                 let server = Arc::clone(&mizar);
                 tokio::spawn(async move {
                     while let Some(stream) = engine.accept().await {
@@ -776,9 +776,23 @@ fn shim_path() -> Option<PathBuf> {
 /// on its own host; an unreachable one costs the direct path its outside
 /// candidate and nothing else.
 ///
+/// `AGI_STUN_SERVERS` (comma separated) overrides the list, which is what a
+/// machine behind a network that blocks the relay's UDP responder uses to point
+/// at another STUN server.
+///
 /// - Parameter relay: the tunnel's base URL.
 /// - Returns: the servers to ask, best first; empty when the URL is unusable.
 fn stun_servers_for(relay: &str) -> Vec<String> {
+    if let Ok(explicit) = std::env::var("AGI_STUN_SERVERS") {
+        let servers: Vec<String> = explicit
+            .split(',')
+            .map(|server| server.trim().to_string())
+            .filter(|server| !server.is_empty())
+            .collect();
+        if !servers.is_empty() {
+            return servers;
+        }
+    }
     // Hand-parsed rather than through a URL crate: the only part wanted is the
     // host, and this file has no business depending on an HTTP client for it.
     let rest = relay
@@ -795,7 +809,17 @@ fn stun_servers_for(relay: &str) -> Vec<String> {
     if host.is_empty() {
         return Vec::new();
     }
-    vec![format!("{host}:3478")]
+    let mut servers = vec![format!("{host}:3478")];
+    // The unified 443 relay lives on a host whose deployment does not run a
+    // STUN responder. The main host is the one this project operates, and the
+    // pairing already trusts it, so it is the fallback rather than no outside
+    // candidate at all. A self-hosted relay has no such fallback: adding this
+    // host would send its address to a party its operator never chose.
+    const CANONICAL: &str = "dshmizar.shirazu-nagisa.com:3478";
+    if host.ends_with("shirazu-nagisa.com") && !servers.iter().any(|server| server == CANONICAL) {
+        servers.push(CANONICAL.to_string());
+    }
+    servers
 }
 
 /// 32 bytes of randomness, hex encoded.

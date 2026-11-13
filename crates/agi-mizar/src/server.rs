@@ -52,7 +52,7 @@ use crate::frames::{
 };
 use crate::pairing::{self, PairingCode};
 use crate::relay::RelayClient;
-use crate::store::DeviceStore;
+use crate::store::{Device, DeviceStore};
 
 /// How many pairing attempts a minute are allowed.
 const PAIR_ATTEMPTS_PER_MINUTE: usize = 5;
@@ -120,6 +120,11 @@ struct DirectPath {
     endpoint_id: String,
     /// Where the engine can be reached, kept current by the engine itself.
     reach: crate::net::engine::Reach,
+    /// Where to ask for an acceptor-side punch.
+    ///
+    /// The engine owns the UDP socket; this channel is the only way the
+    /// signaling handler can make it send from that socket.
+    punches: mpsc::Sender<crate::net::engine::PunchTarget>,
 }
 
 /// Keeps the live count honest however the socket ends.
@@ -605,6 +610,7 @@ impl MizarServer {
         &self,
         endpoint_id: impl Into<String>,
         reach: crate::net::engine::Reach,
+        punches: mpsc::Sender<crate::net::engine::PunchTarget>,
     ) {
         *self
             .direct
@@ -612,7 +618,33 @@ impl MizarServer {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(DirectPath {
             endpoint_id: endpoint_id.into(),
             reach,
+            punches,
         });
+    }
+
+    /// Ask the engine to open a way back to the phone that just signalled.
+    ///
+    /// A phone behind a restricted NAT cannot start the conversation: its
+    /// hello reaches this machine only after this machine has sent to the
+    /// address the phone's signaling hello named. Sending is all this does;
+    /// the engine's ticker repeats it for a few rounds and gives up quietly.
+    fn punch_to(&self, endpoint_id: &str, candidates: Vec<std::net::SocketAddr>) {
+        let Some(punches) = self
+            .direct
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(|path| path.punches.clone())
+        else {
+            return;
+        };
+        let target = crate::net::engine::PunchTarget {
+            endpoint_id: endpoint_id.to_string(),
+            candidates,
+        };
+        if punches.try_send(target).is_err() {
+            tracing::debug!("p2p: the engine is not taking another punch target");
+        }
     }
 
     /// The direct path's name, when one is listening.
@@ -3541,6 +3573,71 @@ async fn signal(
 }
 
 /// The signaling conversation, once the socket is upgraded.
+/// The addresses in a phone's signaling hello that this engine can send to.
+///
+/// The relay kind is skipped: it is a URL, and the engine only punches over the
+/// same UDP socket the candidates belong to. Host and server-reflexive
+/// addresses are the two that matter. A malformed candidate is dropped rather
+/// than failing the hello -- an old or partially understood app must still be
+/// able to announce the addresses it does have.
+fn phone_candidates(value: &Value) -> Vec<std::net::SocketAddr> {
+    let mut out: Vec<std::net::SocketAddr> = Vec::new();
+    let Some(candidates) = value.get("candidates").and_then(Value::as_array) else {
+        return out;
+    };
+    for candidate in candidates {
+        let kind = candidate.get("kind").and_then(Value::as_str).unwrap_or("");
+        if kind == "relay" {
+            continue;
+        }
+        let Some(address) = candidate.get("address").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(port) = candidate.get("port").and_then(Value::as_u64) else {
+            continue;
+        };
+        let Ok(port) = u16::try_from(port) else {
+            continue;
+        };
+        let text = if address.contains(':') {
+            format!("[{address}]:{port}")
+        } else {
+            format!("{address}:{port}")
+        };
+        let Ok(address) = text.parse::<std::net::SocketAddr>() else {
+            continue;
+        };
+        if !is_routable_punch_address(address) {
+            continue;
+        }
+        if !out.contains(&address) {
+            out.push(address);
+        }
+        if out.len() >= 8 {
+            break;
+        }
+    }
+    out
+}
+
+/// Whether a candidate is worth sending a punch to.
+///
+/// Loopback and the IPv4/IPv6 link-local ranges are the phone's own interfaces
+/// (AWDL, a stale self-assigned address). A datagram to one of those either
+/// never leaves the machine or lands on a peer-to-peer link that is not the
+/// network path being tested; the reflexive candidate is the one that carries
+/// the conversation across a NAT.
+fn is_routable_punch_address(address: std::net::SocketAddr) -> bool {
+    match address.ip() {
+        std::net::IpAddr::V4(v4) => {
+            !v4.is_loopback() && !v4.is_unspecified() && !v4.is_link_local()
+        }
+        std::net::IpAddr::V6(v6) => {
+            !v6.is_loopback() && !v6.is_unspecified() && !v6.is_unicast_link_local()
+        }
+    }
+}
+
 async fn serve_signal(server: Arc<MizarServer>, peer: SocketAddr, mut socket: WebSocket) {
     let Some(endpoint_id) = server.net_endpoint_id() else {
         // A host with no direct path has nothing to say. Closing is the honest
@@ -3572,6 +3669,23 @@ async fn serve_signal(server: Arc<MizarServer>, peer: SocketAddr, mut socket: We
         );
         return;
     }
+    let phone_endpoint = value
+        .get("endpointId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let phone_candidate_count = value
+        .get("candidates")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    tracing::info!(
+        "p2p: signal hello from {peer} · {phone_candidate_count} candidate(s) · {}…",
+        &phone_endpoint[..phone_endpoint.len().min(8)]
+    );
+    let reachable = phone_candidates(&value);
+    if !phone_endpoint.is_empty() && !reachable.is_empty() {
+        server.punch_to(phone_endpoint, reachable);
+    }
 
     let answer = json!({
         "v": 1,
@@ -3602,6 +3716,14 @@ async fn serve_signal(server: Arc<MizarServer>, peer: SocketAddr, mut socket: We
         };
         match value.get("type").and_then(Value::as_str) {
             Some("hello") => {
+                let phone_endpoint = value
+                    .get("endpointId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let reachable = phone_candidates(&value);
+                if !phone_endpoint.is_empty() && !reachable.is_empty() {
+                    server.punch_to(phone_endpoint, reachable);
+                }
                 let answer = json!({
                     "v": 1,
                     "type": "hello",

@@ -17,11 +17,13 @@
 //!   HKDF for one key per direction, ChaCha20-Poly1305 with the packet number as
 //!   the nonce.
 //!
-//! The socket, the punch, the reliability window and the signalling channel are
-//! the next layer up and are not here yet: this module is the part that has a
-//! written contract in `docs/p2p-wire-v1.md` and shared fixtures in
-//! `protocol/fixtures/p2p/wire.json`, so it is the part that can be proved
-//! against the phone's own implementation without a network at all.
+//! The socket, the punch, the reliability window and the signalling channel live
+//! one layer up: [`engine`] owns the UDP socket and both directions of the
+//! punch, [`session`] is the reliability window, and the server's
+//! `serve_signal` owns the channel. What lives here is the part with a written
+//! contract in `docs/p2p-wire-v1.md` and shared fixtures in
+//! `protocol/fixtures/p2p/wire.json`, so it can be proved against the phone's
+//! own implementation without a network at all.
 //!
 //! ### The one rule that shapes the tests
 //!
