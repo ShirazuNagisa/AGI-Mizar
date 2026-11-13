@@ -737,6 +737,20 @@ impl MizarServer {
         self.publish_turn_end(session, title, end).await;
     }
 
+    /// Wake the phones about one interaction, for the test that pins the
+    /// approval/question push.
+    ///
+    /// The interaction path had no test at all, which is how it kept excluding a
+    /// phone that had merely *said* it was on screen while every neighbouring
+    /// push had already dropped that exclusion.
+    #[doc(hidden)]
+    pub async fn notify_interaction_for_tests(
+        &self,
+        interaction: &agi_protocol::domain::Interaction,
+    ) {
+        self.notify_interaction(interaction).await;
+    }
+
     /// Mark a device's presence for the push-path integration test.
     #[doc(hidden)]
     pub fn set_foreground_for_tests(&self, device_id: &str, foreground: bool) {
@@ -2896,11 +2910,23 @@ impl MizarServer {
             .map_err(|error| error.to_string())
     }
 
-    /// Wake the phones that are not looking at an approval or a question.
+    /// Wake every phone about an approval or a question.
     ///
-    /// A device that has said it is on screen is left out: it already has the
-    /// card. Everything else on this host gets one notification per interaction,
-    /// addressed to the session that is blocked.
+    /// Do not exclude a device just because presence says it is on screen. The
+    /// same rule as [`Self::publish_card`], and it was learned the same way: the
+    /// report is asynchronous, and iOS suspends the process between the scene
+    /// change and the `push.presence` call. A phone that went to the lock screen
+    /// seconds after its last report keeps the host believing it is on screen,
+    /// so an approval or a question raised in that window reached **no** phone:
+    /// the excluded one was asleep, and it was the only one. The agent then
+    /// waited on a card nobody could see until the operator opened the app,
+    /// found the turn stuck and cancelled it.
+    ///
+    /// An interaction is one push, sent once, so there is no later reminder to
+    /// fix this up. A device that really is looking at the card gets a banner it
+    /// does not need -- a small cost the phone itself can pay, because it knows
+    /// what is on its own screen (`PushController.willPresent`) -- while a
+    /// suppressed wake-up is an operator who never learns the agent is blocked.
     async fn notify_interaction(&self, interaction: &agi_protocol::domain::Interaction) {
         let zh = self.store.prefers_chinese();
         let (kind, title, body) = match interaction.kind {
@@ -2938,13 +2964,6 @@ impl MizarServer {
                 )
             }
         };
-        let except: Vec<String> = {
-            let known = self
-                .foreground
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            known.iter().cloned().collect()
-        };
         let session = interaction.session.as_ref().map(|key| key.to_string());
         let body = json!({
             "kind": kind,
@@ -2953,7 +2972,9 @@ impl MizarServer {
             "sessionId": session,
             "threadId": session,
             "timeSensitive": true,
-            "exceptDeviceIds": except,
+            // Empty rather than `foreground_devices()`: see the note above. The
+            // relay reads an empty list as "every registered device".
+            "exceptDeviceIds": Vec::<String>::new(),
         });
         if let Err(error) = self.relay_post("/push/v1/notify", body).await {
             // A phone that cannot be woken is a worse app, not a broken host.

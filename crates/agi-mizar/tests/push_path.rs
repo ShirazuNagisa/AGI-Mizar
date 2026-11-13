@@ -215,6 +215,74 @@ async fn a_finished_turn_does_not_exclude_a_foreground_device_from_the_end_push(
         .is_some_and(Vec::is_empty));
 }
 
+/// One question batch, shaped the way the DSH adapter hands it over.
+fn question_batch() -> Interaction {
+    Interaction {
+        id: "qs-1".to_string(),
+        session: Some(SessionKey::new(EngineId::Dsh, "s-1")),
+        kind: InteractionKind::Question,
+        title: "Which database should this use?".to_string(),
+        detail: None,
+        requested_at: 1_700_000_000_000,
+        questions: vec![agi_protocol::domain::Question {
+            id: "q1".to_string(),
+            text: "Which database should this use?".to_string(),
+            header: Some("Storage".to_string()),
+            detail: None,
+            options: vec!["Postgres".to_string(), "SQLite".to_string()],
+            multi_select: false,
+        }],
+    }
+}
+
+#[tokio::test]
+async fn a_question_reaches_a_device_the_host_still_believes_is_on_screen() {
+    // The incident this pins (2026-11-13, iPhone app 0.9.9): the operator asked
+    // for help on the desktop, the DSH window drew the question with its
+    // options, and the phone was never woken. The app had reported itself on
+    // screen seconds before, iOS suspended it without delivering the scene
+    // change, and the host kept excluding it from the only push that could have
+    // told anybody -- for the whole seven minutes the agent sat blocked. An
+    // interaction is one push, so the exclusion has to fail open.
+    let (server, _store, _dir) = start().await;
+    let (base, seen) = fake_relay().await;
+    server.attach_relay(RelayClient::new(base, "a-tunnel-token", 1));
+    server.set_foreground_for_tests("phone-1", true);
+
+    server.notify_interaction_for_tests(&question_batch()).await;
+
+    let requests = seen.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1, "one wake-up per interaction");
+    assert_eq!(requests[0].path, "/push/v1/notify");
+    assert!(
+        requests[0].body["exceptDeviceIds"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "a stale foreground report suppressed the only wake-up: {}",
+        requests[0].body
+    );
+}
+
+#[tokio::test]
+async fn a_question_push_names_the_session_and_the_text_to_draw() {
+    let (server, _store, _dir) = start().await;
+    let (base, seen) = fake_relay().await;
+    server.attach_relay(RelayClient::new(base, "a-tunnel-token", 1));
+
+    server.notify_interaction_for_tests(&question_batch()).await;
+
+    let requests = seen.lock().unwrap().clone();
+    let body = &requests[0].body;
+    // The phone's delegate classifies by `kind`, opens by `sessionId`, and shows
+    // `title`/`body` as they are: the copy itself is written on this side.
+    assert_eq!(body["kind"], "question");
+    assert_eq!(body["sessionId"], "dsh:s-1");
+    assert_eq!(body["threadId"], "dsh:s-1");
+    assert_eq!(body["body"], "Which database should this use?");
+    assert!(body["title"].is_string());
+    assert_eq!(body["timeSensitive"], true);
+}
+
 #[tokio::test]
 async fn a_card_for_a_punched_connection_advertises_what_the_phone_needs() {
     // `host.info` is how a phone learns there is a direct path at all; the
