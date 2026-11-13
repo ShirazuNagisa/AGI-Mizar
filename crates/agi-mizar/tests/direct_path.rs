@@ -201,6 +201,7 @@ async fn host_info_offers_the_direct_path_only_when_one_is_bound() {
     reach.set_port(51_234);
     let reflexive: std::net::SocketAddr = "124.228.221.210:61921".parse().unwrap();
     reach.set_reflexive(reflexive);
+    reach.set_mapped("203.0.113.9:40100".parse().unwrap());
     let (punches, _punches) = tokio::sync::mpsc::channel(1);
     server.attach_direct_path("an-endpoint-id", reach, punches);
     assert_eq!(server.net_endpoint_id().as_deref(), Some("an-endpoint-id"));
@@ -224,9 +225,14 @@ async fn host_info_offers_the_direct_path_only_when_one_is_bound() {
     // port the NAT handed out.
     let reflexive_row = candidates
         .iter()
-        .find(|candidate| candidate["kind"] == "srflx")
-        .expect("one reflexive candidate");
+        .find(|candidate| candidate["address"] == "124.228.221.210")
+        .expect("the STUN candidate");
     assert_eq!(reflexive_row["port"], 61_921);
-    assert_eq!(reflexive_row["address"], "124.228.221.210");
+    let mapped_row = candidates
+        .iter()
+        .find(|candidate| candidate["address"] == "203.0.113.9")
+        .expect("the gateway mapping is published too");
+    assert_eq!(mapped_row["port"], 40_100);
+    assert_eq!(mapped_row["kind"], "srflx");
     let _ = issued;
 }

@@ -45,6 +45,7 @@
 pub mod crypto;
 pub mod engine;
 pub mod identity;
+pub mod portmap;
 pub mod session;
 pub mod stun;
 pub mod wire;

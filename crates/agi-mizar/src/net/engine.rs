@@ -105,6 +105,8 @@ pub struct Reach {
 struct ReachState {
     port: u16,
     reflexive: Option<SocketAddr>,
+    /// A port the gateway forwards to this machine, if one granted it.
+    mapped: Option<SocketAddr>,
 }
 
 /// One address a phone may reach this computer on.
@@ -153,6 +155,16 @@ impl Reach {
         self.state().reflexive
     }
 
+    /// Record a gateway's forwarding, once one has granted it.
+    pub fn set_mapped(&self, address: SocketAddr) {
+        self.state().mapped = Some(address);
+    }
+
+    /// The outside address a gateway forwards to, when one did.
+    pub fn mapped(&self) -> Option<SocketAddr> {
+        self.state().mapped
+    }
+
     /// Every address this computer may be reached on, best first.
     ///
     /// Host addresses first — they are what a phone on the same network reaches
@@ -177,6 +189,20 @@ impl Reach {
                 port: reflexive.port(),
                 priority: priority(100, 0),
             });
+        }
+        // A mapping is reachable from anywhere, symmetric NAT or not, so it is
+        // worth a candidate of its own. It uses ICE's `srflx` name because it
+        // is an outside address; its priority sits just below the one STUN
+        // observed, which is what a phone should try first when both exist.
+        if let Some(mapped) = state.mapped {
+            if Some(mapped) != state.reflexive {
+                out.push(Candidate {
+                    kind: "srflx",
+                    address: mapped.ip().to_string(),
+                    port: mapped.port(),
+                    priority: priority(95, 0),
+                });
+            }
         }
         out
     }
@@ -381,6 +407,8 @@ impl Engine {
         let (commands_tx, commands_rx) = mpsc::channel(COMMAND_DEPTH);
         let (punch_tx, punch_rx) = mpsc::channel(16);
         reach.set_port(address.port());
+        let mapping_reach = reach.clone();
+        tokio::spawn(async move { maintain_mapping(mapping_reach).await });
         let engine_identity = Arc::clone(&identity);
         let engine_reach = reach.clone();
         tokio::spawn(async move {
@@ -428,6 +456,56 @@ impl Engine {
     /// Wait for the next accepted connection.
     pub async fn accept(&mut self) -> Option<Stream> {
         self.incoming.recv().await
+    }
+}
+
+/// Keep asking the gateway for a forwarding, renewing it before it expires.
+///
+/// Runs for the life of the process. A network that answers no mapping
+/// protocol costs one SSDP window and one NAT-PMP timeout at launch, then
+/// retries rarely; it never blocks the punch or the relay.
+async fn maintain_mapping(reach: Reach) {
+    if std::env::var_os("AGI_DISABLE_PORT_MAPPING").is_some_and(|value| !value.is_empty()) {
+        return;
+    }
+    while reach.port() == 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    loop {
+        let internal = reach.port();
+        match super::portmap::map_port(internal).await {
+            Some(grant) => {
+                let ip = grant
+                    .external_ip
+                    .or_else(|| reach.reflexive().map(|address| address.ip()));
+                match ip {
+                    Some(ip) => {
+                        reach.set_mapped(SocketAddr::new(ip, grant.external_port));
+                        tracing::info!(
+                            "p2p: mapped candidate {} via {}",
+                            SocketAddr::new(ip, grant.external_port),
+                            grant.provider
+                        );
+                    }
+                    None => {
+                        tracing::debug!(
+                            "p2p: {} granted a port but no external address; waiting for STUN",
+                            grant.provider
+                        );
+                        // The mapping exists, but a candidate needs an address.
+                        // Retry soon rather than at the renewal deadline: STUN
+                        // usually answers within seconds of bind.
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                        continue;
+                    }
+                }
+                // Half the lease, bounded: renew well before expiry without
+                // hammering a gateway that promised a long one.
+                let seconds = (grant.lifetime.as_secs() / 2).clamp(60, 1800);
+                tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
+            }
+            None => tokio::time::sleep(std::time::Duration::from_secs(600)).await,
+        }
     }
 }
 
@@ -1306,6 +1384,30 @@ mod tests {
 
     /// The acceptor's own punch: a phone behind a restricted NAT is reached by
     /// this machine sending first, not by the phone's Hello arriving.
+    #[test]
+    fn a_gateway_mapping_is_advertised_after_the_reflexive_candidate() {
+        let reach = Reach::default();
+        reach.set_port(4242);
+        reach.set_reflexive("203.0.113.5:6000".parse().unwrap());
+        reach.set_mapped("203.0.113.7:40100".parse().unwrap());
+        let candidates = reach.candidates();
+        let mapped = candidates
+            .iter()
+            .find(|candidate| candidate.address == "203.0.113.7")
+            .expect("the mapped address is a candidate");
+        assert_eq!(mapped.kind, "srflx");
+        assert_eq!(mapped.port, 40100);
+        assert!(
+            candidates
+                .iter()
+                .find(|candidate| candidate.address == "203.0.113.5")
+                .expect("the STUN address stays")
+                .priority
+                > mapped.priority,
+            "STUN's view should sort before a gateway mapping"
+        );
+    }
+
     #[tokio::test]
     async fn an_acceptor_punch_reaches_a_phone_behind_a_restricted_nat() {
         let identity = Identity::derive(b"the host secret", Purpose::Host);
