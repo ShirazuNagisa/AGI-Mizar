@@ -667,6 +667,55 @@ async fn a_renamed_computer_is_still_not_a_phone() {
 }
 
 #[tokio::test]
+async fn a_diagnostic_pairing_is_not_a_phone() {
+    // A pairing test drives the real `/pair` route with its own name and model,
+    // and its token stays live in the roster afterwards. The tray drew every
+    // live record as a phone, so a one-off probe left a third row ("Diag")
+    // beside the iPhone and the iPad that the account actually has.
+    let (server, store, _core, _fakes, _dir) = start().await;
+    let probe = store
+        .issue("Diag", Some("diag".to_string()))
+        .unwrap();
+    store.describe(&probe.device.id, "diag").unwrap();
+    store
+        .issue("iPhone", Some("iPhone17,1".to_string()))
+        .unwrap();
+
+    let views = agi_core::DeviceStatusSource::device_views(&*server);
+    let names: Vec<&str> = views.iter().map(|view| view.name.as_str()).collect();
+    assert_eq!(names, vec!["iPhone"], "{views:?}");
+}
+
+#[tokio::test]
+async fn another_computers_peer_token_is_not_a_phone() {
+    // Same roster, same live token: a peer token minted for a remote computer
+    // is not a phone, whatever name that computer has.
+    let (server, store, _core, _fakes, _dir) = start().await;
+    let peer = store
+        .issue("VM-0-12-opencloudo", Some("peer:acct:peer-1:dsh".to_string()))
+        .unwrap();
+    store.describe(&peer.device.id, "agi-peer").unwrap();
+
+    let views = agi_core::DeviceStatusSource::device_views(&*server);
+    assert!(views.is_empty(), "{views:?}");
+}
+
+#[tokio::test]
+async fn a_phone_this_host_cannot_name_still_shows() {
+    // The filter is what a record denies being, not what it proves: Android
+    // reports a marketing model (`Pixel 8`) and a person may rename any phone,
+    // so an unrecognised model has to stay in the list.
+    let (server, store, _core, _fakes, _dir) = start().await;
+    store
+        .issue("Android", Some("Pixel 8".to_string()))
+        .unwrap();
+
+    let views = agi_core::DeviceStatusSource::device_views(&*server);
+    let names: Vec<&str> = views.iter().map(|view| view.name.as_str()).collect();
+    assert_eq!(names, vec!["Android"], "{views:?}");
+}
+
+#[tokio::test]
 async fn an_unscoped_phone_still_sees_every_agent() {
     // The older contract: a token with no marker is "the owner's phone", and it
     // saw all three lists before there was a choice to make.

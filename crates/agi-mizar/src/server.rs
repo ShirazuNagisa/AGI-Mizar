@@ -161,6 +161,58 @@ impl Drop for LiveSocket {
     }
 }
 
+/// The models a pairing client uses when it is not a phone.
+///
+/// `/pair` believes whatever name and model the caller sends, which is what lets
+/// the host checks drive the real pairing route: `mizarkit` pairs as
+/// `hostCheck`/`jvm`, the P0 spike as `p0-spike`, and a one-off probe on this Mac
+/// left a `Diag`/`diag` record behind. Those tokens are live in the roster for
+/// good, and the tray drew every live record as a phone — the probe sat beside
+/// the real iPhone and iPad as a third device for a day.
+const NOT_A_PHONE: &[&str] = &["diag", "jvm", "p0-spike"];
+
+/// Whether a roster record is a phone rather than a credential this host minted
+/// for something else.
+///
+/// The roster is a credential store, not a device directory: account sign-in,
+/// peer tokens and pairing tests all write records to it, so "live token" does
+/// not mean "phone". This test is what a record *denies* being, not what it
+/// proves: iOS and Android both report hardware this host cannot enumerate
+/// (`iPhone17,1`, `Pixel 8`), so an unrecognised model has to count as a phone
+/// or real phones would disappear from the list.
+fn is_a_phone(device: &Device) -> bool {
+    for value in [device.model.as_deref(), device.hardware.as_deref()] {
+        let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        // Peer tokens are minted by this host for another computer, and the peer
+        // path writes its own hardware marker. The name filter above catches the
+        // computer this roster belongs to; this catches the others.
+        if value.starts_with("peer:") || value.eq_ignore_ascii_case("agi-peer") {
+            return false;
+        }
+        // A computer, under whatever name it signed in with: the account device
+        // record says `Mac`/`Windows`/`Linux` in the model.
+        if ["Mac", "Windows", "Linux"]
+            .iter()
+            .any(|platform| value.starts_with(platform))
+        {
+            return false;
+        }
+        // A pairing test or a diagnostic client, which is the `Diag` case.
+        if NOT_A_PHONE
+            .iter()
+            .any(|marker| value.eq_ignore_ascii_case(marker))
+        {
+            return false;
+        }
+        if value.starts_with("JVM ") {
+            return false;
+        }
+    }
+    true
+}
+
 impl agi_core::DeviceStatusSource for MizarServer {
     fn device_views(&self) -> Vec<agi_protocol::api::DeviceView> {
         let live = self
@@ -187,6 +239,12 @@ impl agi_core::DeviceStatusSource for MizarServer {
             // name. It is the machine the tray belongs to, not a phone, and
             // showing it there is how a Mac ended up beside two iPhones.
             if device.name == host_name || device.name == platform_name {
+                continue;
+            }
+            // A live token is not a phone: this roster also holds peer tokens and
+            // the records pairing tests leave behind. Only what a phone could be
+            // belongs in the list.
+            if !is_a_phone(&device) {
                 continue;
             }
             // `model` is the provisioning marker for account devices; the
