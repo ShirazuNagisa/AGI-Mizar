@@ -81,7 +81,7 @@ else
 fi
 
 # The updater's signature is what makes a downloaded bundle trusted; without the
-# key the CLI refuses to produce `latest.json`'s artifacts, which is the correct
+# key the CLI refuses to produce the updater artifacts, which is the correct
 # failure for a release but not for a local build.
 UPDATER_ARTIFACTS=false
 if [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" || -n "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ]]; then
@@ -151,6 +151,36 @@ if [[ -n "$DMG" ]]; then
   xcrun stapler validate "$DMG" >/dev/null 2>&1 && echo "dmg: notarized and stapled"
 fi
 
+# The Tauri CLI writes the updater artifacts (the .app.tar.gz and its .sig) but
+# not `latest.json`: that manifest is a release-level merge of every platform and
+# its URLs point at the GitHub release. Write the local one here with the same
+# tool CI runs, so a hand-built release can be published with the manifest the
+# updater expects. GitHub renames uploaded assets (spaces become dots), and the
+# tool applies that rule when it builds the URL.
+LATEST_JSON=""
+if [[ "$UPDATER_ARTIFACTS" == true ]]; then
+  SIG_FILE="$(find "$BUNDLE_DIR/macos" -maxdepth 1 -name '*.app.tar.gz.sig' -print -quit 2>/dev/null || true)"
+  VERSION="$(sed -n 's/^[[:space:]]*"version": "\([0-9][^"]*\)".*/\1/p' crates/agi-app/tauri.conf.json | head -1)"
+  if [[ -z "$SIG_FILE" ]]; then
+    echo "warning: updater artifacts were enabled but no .app.tar.gz.sig exists under $BUNDLE_DIR/macos; latest.json not written" >&2
+  elif [[ -z "$VERSION" ]]; then
+    echo "warning: cannot read the bundle version from crates/agi-app/tauri.conf.json; latest.json not written" >&2
+  elif ! command -v node >/dev/null 2>&1; then
+    echo "error: node is not on PATH; scripts/updater-json.mjs writes latest.json for updater builds" >&2
+    exit 1
+  else
+    LATEST_JSON="$BUNDLE_DIR/latest.json"
+    node scripts/updater-json.mjs \
+      --version "$VERSION" \
+      --tag "v$VERSION" \
+      --repo "${RELEASE_REPO:-ShirazuNagisa/AGI-Mizar}" \
+      --out "$LATEST_JSON" \
+      --platform "darwin-aarch64=$SIG_FILE" \
+      --platform "darwin-x86_64=$SIG_FILE"
+    echo "latest.json: $LATEST_JSON (darwin-aarch64, darwin-x86_64)"
+  fi
+fi
+
 if [[ -n "${APPLE_SIGNING_IDENTITY:-}" && -n "${APPLE_ID:-}" ]]; then
   cat <<DONE
 
@@ -176,4 +206,12 @@ Built. What the bundle still needs before anybody can install it:
     The first launch should offer to install the Claude Code hooks rather than
     doing it silently — ~/.claude/settings.json belongs to the operator.
 NEXT
+fi
+
+# The release upload needs both the signed bundle and the manifest that points
+# at it; saying which of the two is missing here saves a failed release.
+if [[ -n "$LATEST_JSON" ]]; then
+  echo "updater: latest.json is at $LATEST_JSON — upload it next to the .app.tar.gz and its .sig"
+elif [[ "$UPDATER_ARTIFACTS" == true ]]; then
+  echo "updater: no latest.json was written (see the warning above)" >&2
 fi

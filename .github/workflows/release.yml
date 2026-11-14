@@ -35,6 +35,19 @@ jobs:
             exit 1
           fi
 
+      # A release must ship updater artifacts: bundle.createUpdaterArtifacts is
+      # true, so the bundler fails once the bundles are written if the key is
+      # missing, and latest.json has no signatures to name. Fail here instead,
+      # with a sentence somebody can act on.
+      - name: Check the updater signing key is configured
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not configured for this repository. Without it the release has no signed updater artifacts and latest.json cannot be produced — see docs/release.md."
+            exit 1
+          fi
+
       # The hook shim ships beside the app: the installer writes its absolute
       # path into ~/.claude/settings.json, so it has to exist in the bundle.
       # The app bundle is universal, so the shim is lipo'd from both slices — an
@@ -51,6 +64,33 @@ jobs:
             target/aarch64-apple-darwin/release/agi-mizar-hook \
             target/x86_64-apple-darwin/release/agi-mizar-hook
           chmod +x crates/agi-app/resources/agi-mizar-hook
+
+      # The model runtime the app ships. scripts/fetch-llama.sh supports macOS:
+      # it downloads the pinned arm64 and x64 archives, lipos them into one
+      # universal resources/bin and ad-hoc signs the Mach-O files. Without this
+      # the GitHub build cannot run the model, which package.sh has always
+      # staged for local builds.
+      #
+      # Caveat: package.sh re-signs every dylib and the runner with the Developer
+      # ID after the bundler runs (the bundler does not sign Resources/), and
+      # tauri-action has no hook for that. The files here stay ad-hoc signed, so
+      # a *notarized* macOS release must sign them before the app is packed —
+      # see docs/release.md.
+      - name: Fetch the pinned llama.cpp runtime
+        run: ./scripts/fetch-llama.sh
+
+      # The remote-agent sidecar is the MCP/CLI bridge behind the settings
+      # page's install entry. It has to be inside the signed bundle, not a path
+      # in a target directory. Universal app, universal sidecar.
+      - name: Build and stage the remote-agent sidecar
+        run: |
+          cargo build --release -p agi-remote --target aarch64-apple-darwin
+          cargo build --release -p agi-remote --target x86_64-apple-darwin
+          mkdir -p crates/agi-app/resources/bin
+          lipo -create -output crates/agi-app/resources/bin/agi-remote \
+            target/aarch64-apple-darwin/release/agi-remote \
+            target/x86_64-apple-darwin/release/agi-remote
+          chmod +x crates/agi-app/resources/bin/agi-remote
 
       - uses: tauri-apps/tauri-action@v0
         env:
@@ -69,11 +109,45 @@ jobs:
           releaseBody: "See the commits in this tag."
           releaseDraft: true
           prerelease: false
-          # Only the hook shim is injected: this job does not fetch the
-          # llama.cpp runtime, so naming resources/bin here would fail the
-          # bundler with `resource path ... doesn't exist`. package.sh can
-          # inject both because it runs fetch-llama.sh first.
-          args: --target universal-apple-darwin --config '{"bundle":{"resources":{"resources/agi-mizar-hook":"agi-mizar-hook"}}}'
+          # latest.json names every platform at once, so the per-platform files
+          # tauri-action would upload here are not used: the updater-json job
+          # below merges both jobs' signatures into one document. The .sig
+          # files are still produced (and uploaded as release assets).
+          uploadUpdaterJson: false
+          # Both resources are staged above, so naming resources/bin is safe
+          # here (it is what makes this bundle run the model).
+          args: --target universal-apple-darwin --config '{"bundle":{"resources":{"resources/agi-mizar-hook":"agi-mizar-hook","resources/bin":"bin"}}}'
+
+      # The .sig file is what the merged latest.json embeds; keep it (and a
+      # small manifest naming the platform keys and the asset it belongs to)
+      # for the updater-json job.
+      - name: Stage the updater signature
+        run: |
+          set -euo pipefail
+          sig="$(find target -name '*.app.tar.gz.sig' -print -quit)"
+          if [[ -z "$sig" ]]; then
+            echo "::error::no *.app.tar.gz.sig under target: the bundle was not signed. Is TAURI_SIGNING_PRIVATE_KEY valid?"
+            exit 1
+          fi
+          name="$(basename "$sig")"
+          asset="${name%.sig}"
+          mkdir -p updater-artifacts
+          cp "$sig" "updater-artifacts/$name"
+          cat > updater-artifacts/updater-manifest.json <<JSON
+          {
+            "platforms": [
+              {"key": "darwin-aarch64", "sig": "$name", "asset": "$asset", "match": "*.app.tar.gz"},
+              {"key": "darwin-x86_64", "sig": "$name", "asset": "$asset", "match": "*.app.tar.gz"}
+            ]
+          }
+          JSON
+          echo "updater signature: $sig"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: updater-macos
+          path: updater-artifacts
+          if-no-files-found: error
 
   windows:
     name: nsis installer
@@ -99,6 +173,16 @@ jobs:
           $tag = $env:GITHUB_REF_NAME -replace '^v', ''
           if ($version -ne $tag) {
             Write-Error "tag $env:GITHUB_REF_NAME does not match workspace version $version"
+            exit 1
+          }
+
+      - name: Check the updater signing key is configured
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            Write-Error 'TAURI_SIGNING_PRIVATE_KEY is not configured for this repository. Without it the release has no signed updater artifacts and latest.json cannot be produced — see docs/release.md.'
             exit 1
           }
 
@@ -157,8 +241,33 @@ jobs:
       # release itself still works. A certificate alone is not enough for
       # SmartScreen to stay quiet: it must be CA-issued and the binary needs
       # download reputation (see docs/windows.md).
+      #
+      # `secrets` is not an allowed context in `if:`, so the presence of the
+      # secrets is turned into two env flags by a normal step and the later
+      # steps test those.
+      - name: Detect the optional code-signing certificate
+        shell: pwsh
+        env:
+          CERT_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          CERT_THUMBPRINT: ${{ secrets.WINDOWS_THUMBPRINT }}
+        run: |
+          $hasCert = -not [string]::IsNullOrWhiteSpace($env:CERT_BASE64)
+          $hasThumbprint = -not [string]::IsNullOrWhiteSpace($env:CERT_THUMBPRINT)
+          "HAS_WINDOWS_CERT=$($hasCert.ToString().ToLowerInvariant())" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "HAS_WINDOWS_THUMBPRINT=$($hasThumbprint.ToString().ToLowerInvariant())" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          if ($hasCert) {
+            Write-Host 'code signing: importing the WINDOWS_CERTIFICATE_BASE64 certificate'
+          } elseif ($hasThumbprint) {
+            Write-Host 'code signing: using the pre-installed WINDOWS_THUMBPRINT certificate'
+          } else {
+            Write-Host 'code signing: no certificate secrets; the installer stays unsigned (SmartScreen warns)'
+          }
+
       - name: Import the code-signing certificate (optional)
-        if: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 != '' }}
+        if: env.HAS_WINDOWS_CERT == 'true'
         shell: pwsh
         env:
           CERT_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
@@ -183,7 +292,7 @@ jobs:
           Write-Host "imported code-signing certificate $($cert.Thumbprint)"
 
       - name: Use a pre-installed code-signing certificate (optional)
-        if: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 == '' && secrets.WINDOWS_THUMBPRINT != '' }}
+        if: env.HAS_WINDOWS_CERT != 'true' && env.HAS_WINDOWS_THUMBPRINT == 'true'
         shell: pwsh
         env:
           CERT_THUMBPRINT: ${{ secrets.WINDOWS_THUMBPRINT }}
@@ -209,4 +318,100 @@ jobs:
           releaseBody: "See the commits in this tag."
           releaseDraft: true
           prerelease: false
+          # The merged manifest is written by the updater-json job; a
+          # per-platform latest.json here would be overwritten by the other job.
+          uploadUpdaterJson: false
           args: ${{ env.SIGNING_CONFIG != '' && format('--bundles nsis --config {0}', env.SIGNING_CONFIG) || '--bundles nsis' }}
+
+      # The NSIS setup.exe's .sig is what the merged latest.json embeds.
+      - name: Stage the updater signature
+        shell: pwsh
+        run: |
+          $sig = Get-ChildItem -Path target/release/bundle/nsis -Filter '*-setup.exe.sig' -File -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if (-not $sig) {
+            Write-Error 'no *-setup.exe.sig under target/release/bundle/nsis: the installer was not signed. Is TAURI_SIGNING_PRIVATE_KEY valid?'
+            exit 1
+          }
+          New-Item -ItemType Directory -Force updater-artifacts | Out-Null
+          Copy-Item -LiteralPath $sig.FullName -Destination (Join-Path updater-artifacts $sig.Name)
+          $manifest = @{
+            platforms = @(
+              @{
+                key = 'windows-x86_64'
+                sig = $sig.Name
+                asset = ($sig.Name -replace '\.sig$', '')
+                match = '*-setup.exe'
+              }
+            )
+          }
+          # .NET write keeps the file BOM-free: the merge job's JSON.parse does
+          # not strip a UTF-8 BOM.
+          $manifestPath = Join-Path (Resolve-Path updater-artifacts).Path 'updater-manifest.json'
+          [System.IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 5))
+          Write-Host "updater signature: $($sig.FullName)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: updater-windows
+          path: updater-artifacts
+          if-no-files-found: error
+
+  # One latest.json for the whole release. tauri-action writes a per-platform
+  # file (and the two jobs would overwrite each other's), so both jobs hand
+  # their signature to this job and it resolves each URL from the draft
+  # release's own asset list — GitHub normalises asset names (spaces become
+  # dots), so the URL must be the one the API reports, not one rebuilt by hand.
+  updater-json:
+    name: merged latest.json
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: updater-*
+          path: updater
+
+      - name: Build the merged latest.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The normal lookup is the tag endpoint, but while the release is a
+          # draft it is a 404 (`/releases/tags/<tag>` only finds published
+          # releases; tauri-action and gh handle this by listing releases /
+          # GraphQL). Fall back to the release list, which does contain drafts
+          # for a token with push access; scripts/updater-json.mjs then picks
+          # the entry whose tag_name is this tag.
+          if ! gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" > release.json 2>/dev/null; then
+            echo "note: the release is still a draft; selecting it from the release list"
+            gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > release.json
+          fi
+          node scripts/updater-json.mjs \
+            --version "${GITHUB_REF_NAME#v}" \
+            --tag "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --out latest.json \
+            --release-json release.json \
+            --manifest updater/updater-macos/updater-manifest.json \
+            --manifest updater/updater-windows/updater-manifest.json
+          cat latest.json
+
+      - name: Upload latest.json to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" latest.json --clobber
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: latest-json
+          path: latest.json
+          if-no-files-found: error

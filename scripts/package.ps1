@@ -13,7 +13,9 @@
          llama.cpp runtime in it (-FetchLlama runs scripts/fetch-llama.ps1);
       3. run the Tauri CLI through npx (@tauri-apps/cli 2.x; `cargo tauri` is
          not a thing on a clean Windows machine) with an explicit --bundles;
-      4. print the installers and their SHA256.
+      4. print the installers and their SHA256;
+      5. with -WithUpdater, write latest.json next to the bundle — the Tauri CLI
+         writes the .sig files but never latest.json (see docs/release.md).
 
     Signing:
       - The updater manifest is minisign-signed by the Tauri CLI. Without
@@ -49,8 +51,9 @@
 
 .PARAMETER WithUpdater
     Require TAURI_SIGNING_PRIVATE_KEY / TAURI_SIGNING_PRIVATE_KEY_PATH and let
-    the bundler produce the updater artifacts (.sig + latest.json). Fails when
-    neither is set.
+    the bundler produce the updater artifacts (.sig files). The script then
+    writes latest.json next to the bundle with scripts/updater-json.mjs. Fails
+    when neither key source is set.
 
 .PARAMETER Force
     Passed to fetch-llama.ps1: re-download the archive even if cached.
@@ -517,6 +520,38 @@ if ($signatures) {
     foreach ($signature in $signatures) { Write-Host ("updater signature: {0}" -f $signature.FullName) }
 }
 
+# 7. The updater manifest. The Tauri CLI writes the installer's .sig but not
+#    latest.json: that file is a release-level merge of every platform (see
+#    docs/release.md), so a local -WithUpdater build writes the Windows-only one
+#    here, with the asset URL GitHub serves after the tag is published.
+Step 'updater manifest'
+$latestJson = $null
+if ($WithUpdater) {
+    $signature = Get-ChildItem -Path (Join-Path $bundleRoot 'nsis') -Filter '*-setup.exe.sig' -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $signature) {
+        Fail ("-WithUpdater was passed but no *-setup.exe.sig is under {0}; the bundler did not sign the NSIS installer" -f (Join-Path $bundleRoot 'nsis'))
+    }
+    $node = Get-Command node -ErrorAction SilentlyContinue
+    if (-not $node) {
+        Fail 'node is not on PATH; scripts/updater-json.mjs writes latest.json for -WithUpdater builds'
+    }
+    if ($signMode -ne 'none') {
+        Note ('Authenticode signing above ran after the bundler wrote {0}, so that .sig covers the unsigned bytes and no longer matches the signed installer. For a release either let the bundler sign (as CI does through bundle.windows.certificateThumbprint) or re-sign the installer with `npx @tauri-apps/cli@2 signer sign <installer> --app-version <version>` before publishing.' -f $signature.Name)
+    }
+    # The version comes from the bundle config, not from a tag: a local build
+    # may run before the tag exists.
+    $bundleVersion = (Get-Content (Join-Path $root 'crates/agi-app/tauri.conf.json') -Raw | ConvertFrom-Json).version
+    $latestJson = Join-Path $bundleRoot 'latest.json'
+    & $node.Source (Join-Path $root 'scripts/updater-json.mjs') `
+        --version $bundleVersion --tag "v$bundleVersion" `
+        --out $latestJson `
+        --platform ("windows-x86_64=" + $signature.FullName)
+    if ($LASTEXITCODE -ne 0) { Fail ("scripts/updater-json.mjs failed (exit {0})" -f $LASTEXITCODE) }
+    Write-Host ("latest.json: {0}" -f $latestJson)
+    Write-Host ("  platform   windows-x86_64 -> {0}" -f $signature.FullName)
+}
+
 Write-Host ''
 if ($exitCode -eq 0) {
     Write-Host 'Built.' -ForegroundColor Green
@@ -533,8 +568,14 @@ if ($signMode -eq 'none') {
     Write-Host '                        SmartScreen still needs a CA-issued certificate and reputation; a'
     Write-Host '                        self-signed test certificate never removes the warning.'
 }
-Write-Host '  Updater               TAURI_SIGNING_PRIVATE_KEY for .sig + latest.json; without it this build'
+Write-Host '  Updater               the Tauri CLI writes the .sig files; -WithUpdater also writes latest.json'
+Write-Host '                        (platform URL + signature) next to the bundle. Without a key this build'
 Write-Host '                        is a local installer only.'
+if ($latestJson) {
+    Write-Host ("  latest.json           {0}" -f $latestJson)
+    Write-Host '                        Upload it with the installer and its .sig, or let the release workflow'
+    Write-Host '                        merge it with the other platforms (see docs/release.md).'
+}
 Write-Host '  MSI                   installs per-machine (Tauri Wix InstallScope=perMachine): installing needs'
 Write-Host '                        an elevated shell; WiX is cached in %LOCALAPPDATA%\tauri\WixTools314.'
 exit 0

@@ -198,7 +198,9 @@ key`），不是「静默跳过」。所以：
 - 本地构建（不带 `-WithUpdater`、无 key）：`package.ps1` 往临时目录写一份
   `{"bundle":{"createUpdaterArtifacts":false}}`，通过 `--config` 传进去，构建是成功的，只是没有
   `.sig` / `latest.json`；
-- 发布构建（带 `-WithUpdater`）：必须有 key，产出 NSIS 安装包 + `.sig` + `latest.json`。
+- 发布构建（带 `-WithUpdater`）：必须有 key，产出 NSIS 安装包 + `.sig`；脚本随后调用
+  `scripts/updater-json.mjs` 在 bundle 目录写 `latest.json`（Tauri CLI 只产 `.sig`，不产
+  `latest.json`）。完整发布流程见 `docs/release.md`。
 
 `--config` 用的是**临时文件路径**而不是内联 JSON 字符串：仓库路径里有空格（`AGI Mizar`），
 内联 JSON 经 `npx` → `cmd.exe` 再解析容易出问题。
@@ -282,7 +284,8 @@ Tauri 也支持 `bundle.useLocalToolsDir = true`，把工具缓存放进 `target
 Windows 上「签名」是两个完全独立的东西，不要混：
 
 1. **updater 的 minisign 签名**（`TAURI_SIGNING_PRIVATE_KEY`）：保证自动更新下载的安装包可信，
-   产出 `*.sig` 和 `latest.json`。和 Authenticode 无关；`package.ps1 -WithUpdater` 走这条。
+   产出 `*.sig`（`latest.json` 由 `scripts/updater-json.mjs` 汇总生成）。和 Authenticode 无关；
+   `package.ps1 -WithUpdater` 走这条。
 2. **Authenticode 代码签名**（Windows / SmartScreen 认的那个）：对 NSIS `.exe` 和 MSI 用
    `signtool` 签名。Tauri bundler 原生支持 `bundle.windows.certificateThumbprint`（安装包 + 主程序
    一起签）和 `bundle.windows.signCommand`（Azure Trusted Signing 之类）；`scripts/package.ps1`
@@ -392,7 +395,13 @@ scripts\package.ps1 -Bundles nsis,msi -SelfSigned
   `crates/agi-app/resources/agi-mizar-hook.exe`；
 - `scripts/fetch-llama.ps1` 装真实运行时；
 - `tauri-apps/tauri-action@v0`，`args: --bundles nsis`，用现有 secrets
-  （`TAURI_SIGNING_PRIVATE_KEY` / `_PASSWORD`）产出带 `.sig` 的 NSIS 和 `latest.json`，进 draft release。
+  （`TAURI_SIGNING_PRIVATE_KEY` / `_PASSWORD`）产出带 `.sig` 的 NSIS 进 draft release；
+  `includeUpdaterJson: false`（每平台各写一份 `latest.json` 会互相覆盖），`.sig` 作为 workflow
+  artifact 交给合并 job；
+- 之后的 `updater-json` job（`needs: [macos, windows]`，`ubuntu-latest`）把两个平台的 `.sig`
+  合并成一份 `latest.json`：从 release asset 列表解析真实下载 URL（GitHub 会把空格归一成点），
+  再 `gh release upload "$GITHUB_REF_NAME" latest.json --clobber` 传进 draft。完整流程见
+  `docs/release.md`。
 
 `needs: macos` 是为了让两个 job 都调 `tauri-action` 时不抢着创建同一个 draft release；代价是
 Windows 任务在 macOS 之后串行。Authenticode 是**可选**的：只有发布方提供
@@ -403,12 +412,15 @@ Windows 任务在 macOS 之后串行。Authenticode 是**可选**的：只有发
 同一轮也补了 `macos` job 缺 hook shim 的既有缺口（对齐本地 `package.sh` 的行为）：先分别构建
 `agi-hook-shim` 的 arm64 / x86_64 两片，`lipo -create` 成
 `crates/agi-app/resources/agi-mizar-hook` 并 `chmod +x`，再通过 tauri-action 的
-`args: --target universal-apple-darwin --config '{"bundle":{"resources":{"resources/agi-mizar-hook":"agi-mizar-hook"}}}'`
+`args: --target universal-apple-darwin --config '{"bundle":{"resources":{"resources/agi-mizar-hook":"agi-mizar-hook","resources/bin":"bin"}}}'`
 注入。要点：
 
 - app bundle 是 universal，shim 也必须是 universal（单 arch 的嵌套二进制在另一种 Mac 上会
   `bad CPU type`）；
-- **只注入 shim**：这个 job 不跑 `fetch-llama.sh`，写 `resources/bin` 会因源路径不存在让 bundler 失败；
+- `macos` job 现在也跑 `scripts/fetch-llama.sh`（支持 macOS：下载 arm64/x64 两片并 lipo 成
+  `resources/bin`），并把 `agi-remote` 双架构 lipo 进同一目录，所以 `resources/bin` 也一起注入；
+- 这些 dylib 只有 fetch-llama 的 ad-hoc 签名：CI 没有 `package.sh` 那种 build 之后的
+  Developer ID 重签步骤，开启 Apple 公证前需要补签，见 `docs/release.md`；
 - macOS 仍然走 `--config` 注入，不使用 `tauri.windows.conf.json`；原有签名/公证/universal/dmg
   逻辑没有改动。
 
@@ -453,10 +465,11 @@ Windows 任务在 macOS 之后串行。Authenticode 是**可选**的：只有发
   离线打 release 包需要 `-Archive`。
 - **`package.ps1` 的「文件存在即成功」**：CLI 非 0 但安装包落盘时只 warning，避免把
   「只缺 updater 私钥」误判成打包失败；发布流程仍应要求 `-WithUpdater` 并检查 `.sig` 存在。
-- **macOS release job 的 llama 运行时**：hook shim 已修（见 §8，GitHub 的 macOS 包现在会带
-  `agi-mizar-hook`，且是 universal 的）；但这个 job 仍不跑 `fetch-llama.sh`，所以 GitHub 的 macOS
-  包**不含** `llama.cpp` 运行时（本地 `package.sh` 会带）。补齐需要按 `package.sh` 的流程 fetch、
-  对 `Resources/bin` 里每个 dylib 先 `codesign` 再重签 `.app`，属于 macOS 发布链路的独立改动。
+- **macOS release job 的 llama 运行时**：GitHub 的 macOS 包现在带 `agi-mizar-hook`（universal）
+  和 `Resources/bin/`（`fetch-llama.sh` 的 llama.cpp + `agi-remote`，均 universal）。剩余缺口是
+  签名：bundler 不签 `Resources/`，CI 里这些文件只有 ad-hoc 签名，Developer ID 公证前需要补签
+  （本地 `package.sh` 在 build 之后补 `codesign`，`tauri-action` 没有对应 hook）。详见
+  `docs/release.md`。
 
 ---
 
