@@ -28,6 +28,7 @@ import {
   updateCheck,
   updateInstall,
   updateState,
+  type UpdateErrorCode,
   type UpdateStatus,
 } from '../shell'
 import { cn, failureMessage } from '../lib/utils'
@@ -840,7 +841,9 @@ function PrivacySection({
  *
  * The check goes through the shell's updater, which is the only thing that knows
  * how this app was installed; the last result is read on open so the row does
- * not start blank every time the page is visited.
+ * not start blank every time the page is visited. The updater answers with codes
+ * and technical detail rather than sentences, so this page chooses the Chinese
+ * words for each state — the updater's own error only ever shows as a tooltip.
  */
 function AboutSection({ version, kernel }: { version: string; kernel: Kernel }) {
   const available = shellAvailable()
@@ -871,7 +874,10 @@ function AboutSection({ version, kernel }: { version: string; kernel: Kernel }) 
     try {
       setStatus(await updateCheck())
     } catch (failure) {
-      setError(shellFailure(failure))
+      // The bridge's failures are technical English text. The row says what a
+      // person can act on; the detail goes to the log for whoever debugs it.
+      console.error('update check failed', shellFailure(failure))
+      setError('检查更新失败，请稍后再试（详情见日志）')
     } finally {
       setChecking(false)
     }
@@ -883,7 +889,8 @@ function AboutSection({ version, kernel }: { version: string; kernel: Kernel }) 
     try {
       await updateInstall()
     } catch (failure) {
-      setError(shellFailure(failure))
+      console.error('update install failed', shellFailure(failure))
+      setError('安装更新失败，请稍后再试（详情见日志）')
     } finally {
       // A successful install relaunches the app; if the call returns instead,
       // the button must not stay grey for the rest of the session.
@@ -891,7 +898,18 @@ function AboutSection({ version, kernel }: { version: string; kernel: Kernel }) 
     }
   }
 
-  const newer = status !== null && status.available && status.latest !== null
+  const canInstall = status !== null && status.available && status.installable
+  // A newer build exists but this channel publishes no signed installer, so the
+  // page sends people to the release page instead of offering 下载并安装.
+  const needsManualDownload = status !== null && status.available && !status.installable
+  // The release page gets a button when the app cannot install by itself, and
+  // when a failed check still knows where the release lives.
+  const downloadUrl =
+    status !== null &&
+    status.release_url !== null &&
+    (needsManualDownload || (!status.available && status.error_code !== null))
+      ? status.release_url
+      : null
 
   return (
     <div className="mz-border">
@@ -915,7 +933,7 @@ function AboutSection({ version, kernel }: { version: string; kernel: Kernel }) 
             <UpdateSummary checking={checking} status={status} error={error} />
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            {newer && status.latest !== null ? (
+            {canInstall ? (
               <Button
                 size="sm"
                 variant="primary"
@@ -924,6 +942,15 @@ function AboutSection({ version, kernel }: { version: string; kernel: Kernel }) 
               >
                 {installing ? <Spinner /> : null}
                 下载并安装
+              </Button>
+            ) : null}
+            {downloadUrl !== null ? (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void kernel.send({ op: 'open_external', url: downloadUrl })}
+              >
+                打开下载页
               </Button>
             ) : null}
             <Button
@@ -947,6 +974,21 @@ function AboutSection({ version, kernel }: { version: string; kernel: Kernel }) 
   )
 }
 
+/** What each failure code means to a person, in this app's words. */
+const UPDATE_ERROR_COPY: Record<UpdateErrorCode, string> = {
+  feed_missing: '更新通道暂未提供更新清单，请到发布页查看',
+  network: '网络不可用，请稍后再试',
+  unavailable: '当前构建无法检查更新',
+  failed: '检查更新失败，请稍后再试',
+}
+
+/**
+ * The row's status line: what the updater said, in this page's words.
+ *
+ * `error` is a page-level failure (the bridge itself threw), already Chinese;
+ * `status.error_code` picks the copy for a check that answered with a failure.
+ * The updater's technical `status.error` only ever shows as a tooltip.
+ */
 function UpdateSummary({
   checking,
   status,
@@ -966,9 +1008,25 @@ function UpdateSummary({
   }
   if (error !== null) return <span className="bg-ink px-1 text-bg">{error}</span>
   if (status === null) return <span className="text-muted">尚未检查</span>
-  if (status.error !== null) return <span className="bg-ink px-1 text-bg">{status.error}</span>
   if (status.available) {
-    return <span className="text-fg">可更新到 {status.latest ?? '新版本'}</span>
+    if (status.installable) {
+      return <span className="text-fg">可更新到 {status.latest ?? '新版本'}</span>
+    }
+    return (
+      <span className="block">
+        <span className="block text-fg">
+          有新版 {status.latest ?? '新版本'}，需手动下载
+        </span>
+        <span className="block text-muted">当前渠道没有签名安装包，请到发布页下载。</span>
+      </span>
+    )
+  }
+  if (status.error_code !== null) {
+    return (
+      <span className="block" title={status.error ?? undefined}>
+        {UPDATE_ERROR_COPY[status.error_code]}
+      </span>
+    )
   }
   return <span className="text-muted">已是最新</span>
 }

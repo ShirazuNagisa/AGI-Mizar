@@ -12,10 +12,33 @@
 
 import { desktopPlatform, type DesktopPlatform } from './platform'
 
+/** Why a check could not answer. The About page turns each code into Chinese. */
+export type UpdateErrorCode = 'feed_missing' | 'network' | 'unavailable' | 'failed'
+
+/**
+ * What the shell knows about updates, as the About page draws it.
+ *
+ * `available` says a newer release exists; `installable` says this build can
+ * fetch, verify and install it — false for channels that only publish a page,
+ * where `release_url` is what the page offers instead. `error_code` is the
+ * reason a check could not answer, in a form the page can translate into a
+ * sentence; `error` is the updater's own words and belongs in a tooltip, never
+ * in the status row.
+ */
 export interface UpdateStatus {
+  /** The build this window is running. */
   current: string
+  /** The newest release's version, when the check could read one. */
   latest: string | null
+  /** Whether `latest` is newer than `current`. */
   available: boolean
+  /** Whether this build can download, verify and install `latest` itself. */
+  installable: boolean
+  /** The release page to open when it cannot; null when the check has none. */
+  release_url: string | null
+  /** Why the check could not answer; null when it did. */
+  error_code: UpdateErrorCode | null
+  /** The updater's technical detail about a failure. Tooltip material, not copy. */
   error: string | null
 }
 
@@ -114,7 +137,10 @@ export function shellFailure(failure: unknown): string {
   return '桌面命令没有成功'
 }
 
-/** `{ current, latest, available, error }`: ask the updater right now. */
+/**
+ * `{ current, latest, available, installable, release_url, error_code, error }`:
+ * ask the updater right now.
+ */
 export function updateCheck(): Promise<UpdateStatus> {
   return call<UpdateStatus>('app_update_check')
 }
