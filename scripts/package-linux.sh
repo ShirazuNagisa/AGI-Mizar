@@ -205,7 +205,7 @@ Architecture: $DEB_ARCH
 Installed-Size: $INSTALLED_SIZE
 Maintainer: AGI Mizar <noreply@shirazu-nagisa.com>
 Homepage: https://dsh-mizar.shirazu-nagisa.com
-Depends: libc6 (>= 2.34), libgcc-s1
+Depends: libc6 (>= 2.34), libgcc-s1, curl
 Description: AGI Mizar browser UI and headless kernel (public beta)
  The same React UI and kernel used by the AGI Mizar desktop app, packaged
  as a per-user Linux Web UI. It registers a systemd user service and a

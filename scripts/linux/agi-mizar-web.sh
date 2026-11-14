@@ -18,6 +18,14 @@ die() {
   exit 1
 }
 
+# Every health probe below goes through curl, so a machine without it cannot
+# tell "the service is down" from "we cannot ask". Say which one it is instead
+# of waiting 10 s and blaming the kernel.
+need_curl() {
+  command -v curl >/dev/null 2>&1 \
+    || die "curl is required to reach the kernel (Debian/Ubuntu: apt install curl)"
+}
+
 ensure_env() {
   [ -r "$ENV_FILE" ] && return 0
   [ -n "${HOME:-}" ] || die "HOME is not set"
@@ -83,6 +91,7 @@ open_browser() {
 
 case "${1:-open}" in
   open)
+    need_curl
     read_env
     if ! curl -fsS -m 2 "$(health_url)" >/dev/null 2>&1; then
       systemctl --user daemon-reload >/dev/null 2>&1 || true
@@ -108,6 +117,7 @@ case "${1:-open}" in
     systemctl --user restart "$UNIT"
     ;;
   status)
+    need_curl
     read_env
     systemctl --user status "$UNIT" --no-pager || true
     if curl -fsS -m 2 "$(health_url)" >/dev/null 2>&1; then
