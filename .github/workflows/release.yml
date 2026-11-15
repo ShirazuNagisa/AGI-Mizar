@@ -48,6 +48,24 @@ jobs:
             exit 1
           fi
 
+      # The Apple certificate is what makes the .dmg openable on a stranger's Mac.
+      # When the secret is absent GitHub still defines the variable, and Tauri
+      # then runs `security import` on an empty string: the job spends twenty
+      # minutes building and dies with "Unable to decode the provided data",
+      # which says nothing about what to fix. Fail here instead.
+      - name: Check the Apple signing certificate is configured
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          missing=()
+          [[ -n "${APPLE_CERTIFICATE:-}" ]] || missing+=("APPLE_CERTIFICATE")
+          [[ -n "${APPLE_CERTIFICATE_PASSWORD:-}" ]] || missing+=("APPLE_CERTIFICATE_PASSWORD")
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "::error::Apple signing is not configured (missing: ${missing[*]}). The macOS bundle would be unsigned and Gatekeeper would refuse it. Set the Developer ID Application .p12 (base64) and its password as repository secrets — see docs/release.md."
+            exit 1
+          fi
+
       # The hook shim ships beside the app: the installer writes its absolute
       # path into ~/.claude/settings.json, so it has to exist in the bundle.
       # The app bundle is universal, so the shim is lipo'd from both slices — an

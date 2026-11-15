@@ -78,7 +78,7 @@ is optional and env-gated.
 |---|---|---|
 | `TAURI_SIGNING_PRIVATE_KEY` | **yes** | minisign private key that signs the updater artifacts. Either the key content or, for the Tauri CLI, a path (`TAURI_SIGNING_PRIVATE_KEY_PATH` locally). |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | only if the key is encrypted | password for the private key |
-| `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD` | no | Developer ID Application certificate (base64 `.p12`) |
+| `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD` | **yes for the macOS bundle** | Developer ID Application certificate (base64 `.p12`) and its export password. Without them the macOS job now fails in its first minute; before the preflight was added it built for twenty minutes and then died in `security import` with "Unable to decode the provided data", because GitHub defines the variables as empty strings rather than leaving them unset. |
 | `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` | no | code signing / notarization by the Tauri CLI |
 | `WINDOWS_CERTIFICATE_BASE64`, `WINDOWS_CERTIFICATE_PASSWORD` | no | Authenticode `.pfx`; imported into `CurrentUser\My`, thumbprint handed to the bundler |
 | `WINDOWS_THUMBPRINT` | no | certificate already in the runner store (custom runner) |
@@ -91,8 +91,19 @@ Two separate things are called “signing” and must not be conflated:
    never in a workflow file. The matching public key is
    `plugins.updater.pubkey` in `crates/agi-app/tauri.conf.json` and ships inside
    every installed app.
-2. **OS code signing (optional)**. Authenticode decides whether SmartScreen
-   warns; Apple signing/notarization decides whether Gatekeeper opens the app
+2. **OS code signing (optional in the table, required in practice)**.
+   Authenticode decides whether SmartScreen warns; Apple signing/notarization
+   decides whether Gatekeeper opens the app. A `.dmg` built without the Apple
+   certificate is refused by Gatekeeper on a stranger's Mac, so treat the two
+   `APPLE_CERTIFICATE*` secrets as required for any release that ships macOS.
+
+   **Local packaging caveat:** `~/.tauri/agi-mizar.key` on a developer machine
+   may be an older updater key. The updater verifies against
+   `plugins.updater.pubkey` in `crates/agi-app/tauri.conf.json`; if the local
+   public key does not match it, a locally built `.sig` is accepted by nobody.
+   Compare the two before using the "build locally and upload" fallback, and
+   get the current private key from the repository secret rather than assuming
+   the file in `~/.tauri` is the live one.
    without right-click → Open. Neither affects the updater signature, but a
    release built without them is visibly unsigned.
 
