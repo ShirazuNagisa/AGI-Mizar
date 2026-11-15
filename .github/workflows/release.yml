@@ -110,6 +110,28 @@ jobs:
             target/x86_64-apple-darwin/release/agi-remote
           chmod +x crates/agi-app/resources/bin/agi-remote
 
+      # Notarization is optional and this project does not do it. But GitHub
+      # defines a missing secret as an empty string, and Tauri treats "the
+      # variable exists" as "notarization is configured": the v0.2.0 run died
+      # with "Team ID must be at least 3 characters" after a successful
+      # codesign. Export them only when all three are actually present.
+      - name: Export notarization variables only when configured
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [[ -n "${APPLE_ID:-}" && -n "${APPLE_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]]; then
+            {
+              echo "APPLE_ID=${APPLE_ID}"
+              echo "APPLE_PASSWORD=${APPLE_PASSWORD}"
+              echo "APPLE_TEAM_ID=${APPLE_TEAM_ID}"
+            } >> "$GITHUB_ENV"
+            echo "notarization: enabled (all three Apple ID values are configured)"
+          else
+            echo "notarization: off (APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID are not all configured)"
+          fi
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -118,9 +140,6 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "AGI Mizar ${{ github.ref_name }}"
