@@ -259,6 +259,31 @@ fn main() {
             // The kernel boots here, before the windows exist: see the module
             // docs for why it cannot happen before the builder.
             let runtime: &'static mut tokio::runtime::Runtime = Box::leak(Box::new(runtime));
+            // Read the stored server choice before boot, so the tunnel target is
+            // decided from the preference file rather than from a constant in
+            // this binary. Boot reads the same file again; passing the value
+            // makes that agreement explicit and keeps a hand-edited file from
+            // being ignored until the window has drawn once.
+            let server =
+                agi_core::read_preferences(&agi_core::endpoint::default_preferences_path())
+                    .map(|preferences| preferences.server)
+                    .unwrap_or_default();
+            // Official mode keeps the ladder this build has always had:
+            // `AGI_RELAY_URL` first (a local relay, a test), then the unified
+            // account origin. Self-hosted mode leaves `relay_url` to boot, which
+            // dials the stored origin; boot still lets `AGI_RELAY_URL` win for a
+            // development relay.
+            let self_hosted = server.is_self_hosted();
+            let relay_url = if self_hosted {
+                None
+            } else {
+                Some(
+                    std::env::var("AGI_RELAY_URL")
+                        .ok()
+                        .filter(|url| !url.trim().is_empty())
+                        .unwrap_or_else(|| agi_core::account::OFFICIAL_ACCOUNT_URL.to_string()),
+                )
+            };
             let booted = runtime
                 .block_on(boot(BootConfig {
                     endpoint_file: None,
@@ -274,25 +299,14 @@ fn main() {
                     // escape hatch for a scripted setup.
                     install_claude_hooks: std::env::args()
                         .any(|argument| argument == "--install-claude-hooks"),
-                    // Where the tunnel dials. Two relays run side by side, and
-                    // only the account one publishes presence to the service the
-                    // phone reads its desktop list from: dialling the free relay
-                    // connects the tunnel and still leaves the computer
-                    // invisible to the phone. Default to the relay that shares a
-                    // host with the account API, and let `AGI_RELAY_URL` point
-                    // somewhere else (a local relay, say).
-                    relay_url: Some(
-                        std::env::var("AGI_RELAY_URL")
-                            .ok()
-                            .filter(|url| !url.trim().is_empty())
-                            .unwrap_or_else(|| agi_core::account::OFFICIAL_ACCOUNT_URL.to_string()),
-                    ),
+                    relay_url,
                     relay_token: Some(
                         std::env::var("AGI_RELAY_TOKEN")
                             .ok()
                             .filter(|token| !token.trim().is_empty())
                             .unwrap_or_else(stable_relay_token),
                     ),
+                    server: Some(server),
                 }))
                 .expect("the kernel failed to start");
 

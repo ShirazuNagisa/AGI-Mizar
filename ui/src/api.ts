@@ -49,6 +49,47 @@ export interface OnboardingState {
   done: boolean
 }
 
+/** `official` is the public service; `selfHosted` is a relay the operator runs. */
+export type ServerMode = 'official' | 'selfHosted'
+
+/** Which relay this install talks to. */
+export interface ServerPrefs {
+  mode: ServerMode
+  /** The self-hosted origin, `https://host[:port]`; empty in official mode. */
+  origin: string
+  /** The server PIN, when the deployment requires one. Only sent when saving. */
+  pin: string
+}
+
+/** What the window is told about the stored server; the PIN is never included. */
+export interface ServerView {
+  mode: ServerMode
+  /** The stored origin, normalised and without a trailing slash. */
+  origin: string
+  /** Whether a PIN is stored. The value itself stays in the kernel. */
+  hasPin: boolean
+  /** What the last connectivity check said about the PIN, when one ran. */
+  pinRequired: boolean | null
+}
+
+/** The structured answer to a connectivity check. */
+export interface ServerProbeResult {
+  ok: boolean
+  /** The relay build's own version, when `/healthz` named one. */
+  relayVersion: string | null
+  /** The tunnel protocol the relay speaks. */
+  protocol: number | null
+  pinRequired: boolean
+  pinOk: boolean | null
+  /**
+   * A stable failure code: `invalid_origin`, `network`, `not_relay`,
+   * `protocol_too_old`, `pin_required`, `pin_invalid` or `rate_limited`.
+   */
+  error: string | null
+  /** The kernel's English sentence; the window writes the copy a person reads. */
+  message: string | null
+}
+
 /** One model on disk. */
 export interface InstalledModel {
   id: string
@@ -316,6 +357,8 @@ export interface StateSnapshot {
   model: ModelState
   /** Whether this install shares turns to improve Mizarllm. */
   dataset: DatasetState
+  /** Which relay this install talks to. */
+  server: ServerView
   /** The DSH helper plugin's version, and whether npm has a newer one. */
   dshPlugin: DshPluginView
 }
@@ -429,6 +472,9 @@ export type Command =
   | { op: 'usage_overview' }
   | { op: 'set_theme'; theme: 'system' | 'light' | 'dark' | 'oled' }
   | { op: 'relay_status' }
+  | { op: 'server_prefs' }
+  | { op: 'set_server_prefs'; mode: ServerMode; origin: string; pin?: string }
+  | { op: 'server_probe'; origin: string; pin?: string }
   | { op: 'account' }
   | { op: 'account_login'; identifier: string; password: string }
   | { op: 'account_logout' }

@@ -221,7 +221,7 @@ pub fn spawn(core: Weak<Core>) {
             let Some(core) = uploader.upgrade() else {
                 return;
             };
-            if prefs(&core).enabled && upload_tick(&core).await {
+            if core.accounts_enabled() && prefs(&core).enabled && upload_tick(&core).await {
                 // Something went out; look for more without waiting a tick.
                 core.dataset.upload_wake.notify_one();
             }
@@ -233,7 +233,7 @@ pub fn spawn(core: Weak<Core>) {
             let Some(core) = core.upgrade() else {
                 return;
             };
-            if prefs(&core).enabled {
+            if core.accounts_enabled() && prefs(&core).enabled {
                 backfill_tick(&core).await;
             }
             let _ =
@@ -264,6 +264,11 @@ impl Core {
     }
 
     fn capture_with(&self, session: &Session, facts: &Facts, records: &[Record]) {
+        // A self-hosted relay has no account service and no dataset endpoint:
+        // spooling here would only leave files that can never be sent.
+        if !self.accounts_enabled() {
+            return;
+        }
         let prefs = prefs(self);
         if !prefs.enabled || prefs.policy_version == 0 || prefs.install_id.is_empty() {
             return;

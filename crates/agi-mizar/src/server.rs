@@ -357,6 +357,7 @@ impl agi_core::RelayStatusSource for MizarServer {
             Some(relay) => agi_core::RelayStatus {
                 connected: relay.is_connected(),
                 room: relay.current_room(),
+                url: Some(relay.base().to_string()),
             },
             None => agi_core::RelayStatus::default(),
         }
@@ -422,13 +423,21 @@ impl MizarServer {
         "https://dshmizar-1.shirazu-nagisa.com:8443",
     ];
 
-    /// Move the tunnel to another public relay.
+    /// Move the tunnel to another public relay, or to the self-hosted one this
+    /// install is configured for.
     ///
     /// The secret does not change, and the room derives from it, so every
     /// pairing survives the move: phones keep the same room on a new origin.
     fn switch_relay(&self, url: &str) -> Result<Value, &'static str> {
         let base = url.trim_end_matches('/');
-        if !Self::SELECTABLE_RELAYS.contains(&base) {
+        // A self-hosted install has exactly one additional origin it may be
+        // pointed at: the one its operator stored. Accepting an arbitrary URL
+        // would turn this host into a way to send a phone's traffic anywhere.
+        let server = self.core.server_prefs();
+        let configured_self_hosted = server.is_self_hosted()
+            && !server.origin_trimmed().is_empty()
+            && server.origin_trimmed() == base;
+        if !Self::SELECTABLE_RELAYS.contains(&base) && !configured_self_hosted {
             return Err("relay.set: that is not one of the public relays");
         }
         let mut guard = self

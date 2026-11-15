@@ -45,9 +45,28 @@ pub struct StateSnapshot {
     pub devices: Vec<DeviceView>,
     /// Whether this install anonymously shares turns to improve Mizarllm.
     pub dataset: DatasetView,
+    /// Which relay this install talks to: the official service or a self-hosted one.
+    pub server: ServerView,
     /// The DSH helper plugin's version, and whether npm has a newer one.
     #[serde(rename = "dshPlugin")]
     pub dsh_plugin: DshPluginView,
+}
+
+/// Which relay this install talks to.
+///
+/// The PIN is deliberately absent: it is a credential that only the kernel uses
+/// for the desktop list, so the window gets `hasPin` and never the value itself.
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerView {
+    /// `official` or `selfHosted`.
+    pub mode: String,
+    /// The self-hosted origin, `https://host[:port]`; empty in official mode.
+    pub origin: String,
+    /// Whether a server PIN is stored. The value itself never leaves the kernel.
+    pub has_pin: bool,
+    /// What the last connectivity check said about the PIN, when one ran.
+    pub pin_required: Option<bool>,
 }
 
 /// What this install knows about the DSH helper plugin.
@@ -452,6 +471,25 @@ pub enum Command {
 
     /// Whether this window's tunnel to the relay is up.
     RelayStatus,
+    /// Which relay this install talks to, and whether a PIN is stored.
+    ServerPrefs,
+    /// Replace the relay choice. UI token only; never the tool token.
+    SetServerPrefs {
+        /// `official` or `selfHosted`.
+        mode: String,
+        /// The self-hosted origin; ignored in official mode.
+        #[serde(default)]
+        origin: String,
+        /// The server PIN. `None` keeps the stored one, `Some("")` clears it.
+        #[serde(default)]
+        pin: Option<String>,
+    },
+    /// Check one self-hosted origin before it is saved.
+    ServerProbe {
+        origin: String,
+        #[serde(default)]
+        pin: Option<String>,
+    },
     /// The account this window is signed in to, and the devices under it.
     Account,
     /// Sign in to the relay's account service.
@@ -608,6 +646,34 @@ pub enum Command {
 }
 
 impl Command {
+    /// Whether this command needs the relay's account service.
+    ///
+    /// A self-hosted relay runs no `/account/v1`, so the kernel refuses these
+    /// before any network call. Keeping the list next to the enum means a new
+    /// account-shaped command cannot quietly start dialling the official
+    /// service on a server the operator chose themselves.
+    pub fn needs_account(&self) -> bool {
+        matches!(
+            self,
+            Self::Account
+                | Self::AccountLogin { .. }
+                | Self::AccountLogout
+                | Self::AccountDesktops
+                | Self::AccountGithubStart
+                | Self::AccountGithubExchange { .. }
+                | Self::AccountAppleStart
+                | Self::AccountAppleExchange { .. }
+                | Self::AccountAppleAwait { .. }
+                | Self::AccountGithubAwait { .. }
+                | Self::LanCertificate
+                | Self::RemotePeers
+                | Self::RemoteOptions { .. }
+                | Self::RemoteDelegate { .. }
+                | Self::RemoteSend { .. }
+                | Self::RemoteAnswer { .. }
+        )
+    }
+
     /// Whether this is one of the tool-token commands.
     ///
     /// The UI bearer answers everything; `agent-tool.json` is deliberately

@@ -315,3 +315,63 @@ async fn asking_for_the_code_again_does_not_deadlock() {
     );
     assert!(views[0].uri.starts_with("mizar://pair?"));
 }
+
+/// A self-hosted install may be moved to the one origin its operator stored.
+///
+/// The whitelist is the phone's safety net: a host that accepted any origin
+/// would become a way to point a phone's traffic anywhere. The stored origin is
+/// the operator's own choice, so it is the one addition the list allows.
+#[tokio::test]
+async fn the_tunnel_moves_only_to_the_configured_self_hosted_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = DeviceStore::open(dir.path().join("devices.json"), "test-host").unwrap();
+    let core = Core::new(Vec::new());
+    core.start().await;
+    core.set_server_prefs(agi_core::ServerPrefs {
+        mode: "selfHosted".to_string(),
+        origin: "https://127.0.0.1:1".to_string(),
+        pin: String::new(),
+    })
+    .unwrap();
+    let server = MizarServer::new(core, Arc::clone(&store), "/tmp/dsh-home");
+    server.bind(0).await.unwrap();
+    server.attach_relay(agi_mizar::RelayClient::new(
+        "https://dshmizar.shirazu-nagisa.com",
+        "tunnel-secret",
+        1,
+    ));
+    let issued = store.issue("iPhone", None).unwrap();
+    let (mut socket, _) = connect(server.port(), &issued.token).await;
+
+    // A different self-hosted origin is still refused: only the stored one is
+    // this install's server.
+    socket
+        .send(Message::Text(
+            json!({
+                "v": 1, "type": "relay.set", "id": "r1",
+                "payload": { "url": "https://other.example.com" }
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let refused = next(&mut socket).await;
+    assert_eq!(refused["type"], "error");
+    assert_eq!(refused["code"], "MALFORMED_FRAME");
+
+    // The stored origin is accepted, even though it is not a public relay.
+    socket
+        .send(Message::Text(
+            json!({
+                "v": 1, "type": "relay.set", "id": "r2",
+                "payload": { "url": "https://127.0.0.1:1" }
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let answer = next(&mut socket).await;
+    assert_eq!(answer["type"], "ok");
+    assert_eq!(answer["result"]["url"], "https://127.0.0.1:1");
+    assert_eq!(answer["result"]["room"], Value::Null);
+}

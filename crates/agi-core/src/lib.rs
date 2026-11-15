@@ -30,6 +30,7 @@ pub mod dependencies;
 pub mod endpoint;
 pub mod models;
 pub mod plugin;
+pub mod relay_probe;
 pub mod remote;
 pub mod remote_health;
 pub mod server;
@@ -43,8 +44,8 @@ use agi_engine::{Engine, EngineError, EngineEvent};
 use agi_layout::model::{Backend, LabelMap, ModelManifest};
 use agi_layout::{facts_from_turn, Item, JournalEntry, Layout, LayoutService, Live, StateMachine};
 use agi_protocol::api::{
-    ApiEvent, Command, CommandResponse, DshPluginView, EngineStatus, OnboardingView, StateSnapshot,
-    UsageOverview, DSH_PLUGIN_MIN_VERSION,
+    ApiEvent, Command, CommandResponse, DshPluginView, EngineStatus, OnboardingView, ServerView,
+    StateSnapshot, UsageOverview, DSH_PLUGIN_MIN_VERSION,
 };
 use agi_protocol::domain::{Interaction, Record, RecordKind, Session, SessionKey};
 use agi_protocol::engine::EngineId;
@@ -109,6 +110,63 @@ pub struct Preferences {
     /// Whether this computer accepts remote peers, and where they may work.
     #[serde(default)]
     pub remote: RemotePrefs,
+    /// Which relay this install talks to: the official service or the
+    /// operator's own. Missing from an old file means the official service.
+    #[serde(default)]
+    pub server: ServerPrefs,
+}
+
+/// The guide revision this build ships.
+///
+/// A stored `onboarding.done` is only "done" when it was written at this
+/// version: the 0.2.0 build inserts the server step and changes which steps a
+/// self-hosted install walks, so an older guide is replayed with the settings
+/// that are already stored.
+pub const GUIDE_VERSION: &str = "0.2.0";
+
+/// Which relay this install talks to.
+///
+/// `mode` is a string rather than an enum so a file written by a newer build
+/// still loads here: an unknown mode is treated as official (the safe default)
+/// instead of failing the whole preference file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerPrefs {
+    /// `official` or `selfHosted`.
+    #[serde(default = "default_server_mode")]
+    pub mode: String,
+    /// The self-hosted origin, `https://host[:port]`; empty in official mode.
+    #[serde(default)]
+    pub origin: String,
+    /// The server PIN for the desktop list. Never returned by the API.
+    #[serde(default)]
+    pub pin: String,
+}
+
+impl Default for ServerPrefs {
+    fn default() -> Self {
+        Self {
+            mode: default_server_mode(),
+            origin: String::new(),
+            pin: String::new(),
+        }
+    }
+}
+
+impl ServerPrefs {
+    /// Whether this install talks to a relay the operator runs.
+    pub fn is_self_hosted(&self) -> bool {
+        self.mode == "selfHosted"
+    }
+
+    /// The stored origin without a trailing slash, for comparisons.
+    pub fn origin_trimmed(&self) -> &str {
+        self.origin.trim().trim_end_matches('/')
+    }
+}
+
+fn default_server_mode() -> String {
+    "official".to_string()
 }
 
 /// One LAN peer seen in the last few seconds.
@@ -210,6 +268,17 @@ pub struct DatasetPrefs {
 pub struct Onboarding {
     #[serde(default)]
     pub done: bool,
+    /// The guide revision that was completed. Missing means a build that
+    /// predates the field, which is exactly the case that has to replay.
+    #[serde(rename = "guideVersion", default)]
+    pub guide_version: String,
+}
+
+impl Onboarding {
+    /// Whether the stored answer was written by the guide this build ships.
+    pub fn is_complete(&self) -> bool {
+        self.done && self.guide_version == GUIDE_VERSION
+    }
 }
 
 /// Which agents were configured, by the guide or from an agent page.
@@ -258,8 +327,19 @@ impl Default for Preferences {
             engines: EnginePrefs::default(),
             dataset: DatasetPrefs::default(),
             remote: RemotePrefs::default(),
+            server: ServerPrefs::default(),
         }
     }
+}
+
+/// Read a preference file, when there is one this build can parse.
+///
+/// Public because the window decides its tunnel target before the kernel boots:
+/// both callers must read the same file with the same tolerances (a file from a
+/// newer build must not take the app down).
+pub fn read_preferences(path: &std::path::Path) -> Option<Preferences> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<Preferences>(&text).ok()
 }
 
 /// Normalise a workspace path for the remote-policy comparison.
@@ -417,6 +497,10 @@ pub struct Core {
     /// Fires when the remote-peer policy changes, so live peer sockets can
     /// notice a block without waiting for their next frame.
     remote_prefs_changed: broadcast::Sender<()>,
+    /// Fires when the relay choice changes, so boot can rebuild the tunnel.
+    server_prefs_changed: broadcast::Sender<()>,
+    /// What the last connectivity check said about the stored server's PIN.
+    server_pin_required: RwLock<Option<bool>>,
     /// LAN peers seen by the beacon listener, by device id.
     lan_peers: RwLock<HashMap<String, LanPeer>>,
     /// Where the LAN certificate is cached, once boot points us at it.
@@ -495,12 +579,16 @@ pub struct Core {
 /// holding a sidecar all night.
 pub const PHONE_IDLE_RELEASE: Duration = Duration::from_secs(300);
 
+/// The refusal every account-shaped command answers on a self-hosted relay.
+const ACCOUNTS_OFF: &str = "this server is self-hosted; accounts are off";
+
 impl Core {
     /// Build a kernel over the given engines.
     pub fn new(engines: Vec<Arc<dyn Engine>>) -> Arc<Self> {
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         let (frame_tx, _) = broadcast::channel(EVENT_BUFFER);
         let (remote_prefs_changed, _) = broadcast::channel(8);
+        let (server_prefs_changed, _) = broadcast::channel(8);
         let model_service = ModelService::open(models_dir());
         // The judge is **not** built here. A launch with nobody listening has no
         // reason to hold a model, and the sidecar it starts is the largest thing
@@ -521,6 +609,8 @@ impl Core {
             lan_identity: RwLock::new(None),
             lan_certificate: RwLock::new(None),
             remote_prefs_changed: remote_prefs_changed.clone(),
+            server_prefs_changed,
+            server_pin_required: RwLock::new(None),
             lan_peers: RwLock::new(HashMap::new()),
             lan_certificate_path: RwLock::new(None),
             relay_status: RwLock::new(None),
@@ -797,6 +887,9 @@ impl Core {
     pub async fn refresh_account(
         &self,
     ) -> Result<Option<agi_protocol::account::AccountUser>, String> {
+        if !self.accounts_enabled() {
+            return Err(ACCOUNTS_OFF.to_string());
+        }
         self.account
             .refresh()
             .await
@@ -804,12 +897,21 @@ impl Core {
     }
 
     /// The account this window is signed in to, when it is.
+    ///
+    /// A self-hosted install has no account service, so a token left over from
+    /// a previous official server is not an account this server can use.
     pub fn account_user(&self) -> Option<agi_protocol::account::AccountUser> {
+        if !self.accounts_enabled() {
+            return None;
+        }
         self.account.user()
     }
 
     /// The session and device id the tunnel presents, when signed in.
     pub fn relay_account(&self) -> Option<(String, String)> {
+        if !self.accounts_enabled() {
+            return None;
+        }
         self.account.session()
     }
 
@@ -830,6 +932,9 @@ impl Core {
 
     /// Refresh the account in the background, at launch.
     pub fn refresh_account_in_background(self: &Arc<Self>) {
+        if !self.accounts_enabled() {
+            return;
+        }
         let core = Arc::clone(self);
         tokio::spawn(async move {
             if let Err(error) = core.account.refresh().await {
@@ -873,8 +978,25 @@ impl Core {
         self.save_preferences();
     }
 
-    /// Whether the first-run guide has been completed on this install.
+    /// Whether the first-run guide has been completed for this build.
+    ///
+    /// A stored `done` from an older guide does not count: the server step and
+    /// the self-hosted flow arrived in 0.2.0, so anybody who finished before it
+    /// sees the guide again with their settings already filled in.
     pub fn onboarding_done(&self) -> bool {
+        self.preferences
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .onboarding
+            .is_complete()
+    }
+
+    /// The stored `done` flag, ignoring the guide version.
+    ///
+    /// Boot uses this to tell "never guided on this machine" (an install that
+    /// predates the guide, which is grandfathered) from "finished an older
+    /// guide" (which has to replay).
+    pub fn onboarding_finished(&self) -> bool {
         self.preferences
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -883,19 +1005,137 @@ impl Core {
     }
 
     /// Remember that the guide finished, or re-arm it from the settings page.
+    ///
+    /// Finishing stamps the current [`GUIDE_VERSION`]: that is what makes a
+    /// later release able to insert a step and have the guide replay once.
     pub fn set_onboarding_done(&self, done: bool) -> bool {
         {
             let mut preferences = self
                 .preferences
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if preferences.onboarding.done == done {
-                return preferences.onboarding.done;
+            let onboarding = &mut preferences.onboarding;
+            if done {
+                if onboarding.is_complete() {
+                    return true;
+                }
+                onboarding.done = true;
+                onboarding.guide_version = GUIDE_VERSION.to_string();
+            } else {
+                if !onboarding.done && onboarding.guide_version.is_empty() {
+                    return false;
+                }
+                onboarding.done = false;
             }
-            preferences.onboarding.done = done;
         }
         self.save_preferences();
         done
+    }
+
+    /// Which relay this install talks to.
+    pub fn server_prefs(&self) -> ServerPrefs {
+        self.preferences
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .server
+            .clone()
+    }
+
+    /// What the window is allowed to know about the server choice.
+    ///
+    /// The PIN never crosses this boundary; `hasPin` is enough for the settings
+    /// page to say one is stored.
+    pub fn server_view(&self) -> ServerView {
+        let server = self.server_prefs();
+        ServerView {
+            mode: if server.is_self_hosted() {
+                "selfHosted".to_string()
+            } else {
+                "official".to_string()
+            },
+            origin: server.origin_trimmed().to_string(),
+            has_pin: !server.pin.trim().is_empty(),
+            pin_required: *self
+                .server_pin_required
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        }
+    }
+
+    /// Whether the relay's account service may be used at all.
+    ///
+    /// A self-hosted relay runs no `/account/v1` and this install must not ask
+    /// one: every account entry point looks at this first, so "no requests" is a
+    /// property of the kernel rather than of each caller.
+    pub fn accounts_enabled(&self) -> bool {
+        !self.server_prefs().is_self_hosted()
+    }
+
+    /// Replace the relay choice, normalising the origin on the way in.
+    ///
+    /// Returns the view the window should draw. An unchanged choice is a no-op,
+    /// and a self-hosted choice with an unusable origin is refused rather than
+    /// stored: the tunnel would otherwise be pointed at nothing on the next
+    /// launch.
+    pub fn set_server_prefs(&self, next: ServerPrefs) -> Result<ServerView, String> {
+        let mode = match next.mode.trim() {
+            "official" => "official",
+            "selfHosted" => "selfHosted",
+            other => return Err(format!("unknown server mode {other:?}")),
+        };
+        let mut normalized = ServerPrefs {
+            mode: mode.to_string(),
+            origin: next.origin.trim().to_string(),
+            pin: next.pin.trim().to_string(),
+        };
+        if normalized.is_self_hosted() {
+            normalized.origin = relay_probe::normalize_origin(&normalized.origin)?;
+        }
+        let origin_changed = {
+            let preferences = self
+                .preferences
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            preferences.server.origin_trimmed() != normalized.origin_trimmed()
+        };
+        {
+            let mut preferences = self
+                .preferences
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if preferences.server == normalized {
+                return Ok(self.server_view());
+            }
+            preferences.server = normalized;
+        }
+        // A different server knows nothing about the old PIN requirement; the
+        // same server's answer stays until a new check replaces it.
+        if origin_changed {
+            *self
+                .server_pin_required
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+        self.save_preferences();
+        let _ = self.server_prefs_changed.send(());
+        Ok(self.server_view())
+    }
+
+    /// Watch server-choice changes; boot rebuilds the tunnel from this.
+    pub fn subscribe_server_prefs(&self) -> broadcast::Receiver<()> {
+        self.server_prefs_changed.subscribe()
+    }
+
+    /// Remember what a successful check said about the stored server.
+    fn remember_pin_requirement(&self, origin: &str, required: bool) {
+        let server = self.server_prefs();
+        if server.origin_trimmed() != origin.trim_end_matches('/') {
+            return;
+        }
+        *self
+            .server_pin_required
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(required);
     }
 
     /// Whether an agent was configured, by the guide or from its page.
@@ -929,6 +1169,9 @@ impl Core {
 
     /// Same, for mDNS, which reports an address without a socket.
     pub fn record_lan_beacon_ip(&self, beacon: &agi_lan::LanBeacon, ip: std::net::IpAddr) {
+        if !self.accounts_enabled() {
+            return;
+        }
         let prefs = self.remote_prefs();
         if !prefs.enabled || !prefs.allow_lan {
             return;
@@ -1105,6 +1348,9 @@ impl Core {
 
     /// Fetch or renew the account CA certificate and verify it locally.
     pub async fn refresh_lan_certificate(&self) -> Result<Value, String> {
+        if !self.accounts_enabled() {
+            return Err(ACCOUNTS_OFF.to_string());
+        }
         let identity = self.lan_identity()?;
         let public = identity.public();
         let answer = self
@@ -1126,6 +1372,13 @@ impl Core {
 
     /// The credentials a LAN listener/client needs, fetched on demand.
     pub async fn lan_credentials(&self) -> Result<agi_lan::LanCredentials, String> {
+        // The LAN identity is issued by the account CA, which a self-hosted
+        // relay does not run. Refusing here keeps boot's listener loop from
+        // asking `/account/v1/lan/certificate` on a server that has no account
+        // service.
+        if !self.accounts_enabled() {
+            return Err(ACCOUNTS_OFF.to_string());
+        }
         let prefs = self.remote_prefs();
         if !prefs.enabled || !prefs.allow_lan {
             return Err("LAN peers are disabled on this computer".to_string());
@@ -2114,6 +2367,7 @@ impl Core {
             model: self.model_service.state(),
             devices: self.device_views(),
             dataset: dataset::view(self),
+            server: self.server_view(),
             dsh_plugin: self.dsh_plugin_view(),
         }
     }
@@ -2298,6 +2552,9 @@ impl Core {
 
     /// Run one command.
     pub async fn dispatch(&self, command: Command) -> CommandResponse {
+        if command.needs_account() && !self.accounts_enabled() {
+            return CommandResponse::error("ACCOUNTS_DISABLED", ACCOUNTS_OFF);
+        }
         match command {
             Command::State => CommandResponse::ok(self.snapshot()),
             Command::RelayStatus => {
@@ -2311,7 +2568,34 @@ impl Core {
                 CommandResponse::ok(json!({
                     "connected": status.connected,
                     "room": status.room,
+                    "url": status.url,
                 }))
+            }
+            Command::ServerPrefs => CommandResponse::ok(self.server_view()),
+            Command::SetServerPrefs { mode, origin, pin } => {
+                let mut next = self.server_prefs();
+                next.mode = mode;
+                next.origin = origin;
+                // `None` means "the window did not touch the PIN field", which
+                // must not erase the stored one; `Some("")` is how it clears it.
+                if let Some(pin) = pin {
+                    next.pin = pin;
+                }
+                match self.set_server_prefs(next) {
+                    Ok(view) => CommandResponse::ok(view),
+                    Err(message) => CommandResponse::error("INVALID_SERVER", message),
+                }
+            }
+            Command::ServerProbe { origin, pin } => {
+                let result = relay_probe::probe(&origin, pin.as_deref().unwrap_or("")).await;
+                if result.ok {
+                    if let Ok(normalized) = relay_probe::normalize_origin(&origin) {
+                        self.remember_pin_requirement(&normalized, result.pin_required);
+                    }
+                }
+                // The result carries its own `ok`: a failed check is a fact the
+                // guide draws, not an API error the window has to parse.
+                CommandResponse::ok(result)
             }
             Command::Account => {
                 // A reading from the relay is better than a cached one, but a
@@ -3085,6 +3369,8 @@ pub struct RelayStatus {
     pub connected: bool,
     /// The room the relay assigned, once it has.
     pub room: Option<String>,
+    /// The relay origin this tunnel is on, when one is configured.
+    pub url: Option<String>,
 }
 
 /// A tunnel that can say whether it is up.
@@ -3786,6 +4072,169 @@ mod tests {
 
         let facts = core.facts_for(&key, 1, &finished);
         assert!(facts.jobs.is_empty(), "{:?}", facts.jobs);
+    }
+
+    #[test]
+    fn a_missing_server_block_means_official_and_an_unknown_field_is_ignored() {
+        let prefs: Preferences = serde_json::from_str(
+            r#"{"theme":"dark","server":{"mode":"selfHosted","origin":"https://relay.example.com","pin":"p"},"futureField":true}"#,
+        )
+        .unwrap();
+        assert_eq!(prefs.server.mode, "selfHosted");
+        assert_eq!(prefs.server.origin, "https://relay.example.com");
+        assert_eq!(prefs.server.pin, "p");
+
+        // A file written before the field existed still reads, and official is
+        // what such a file meant.
+        let old: Preferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.server, ServerPrefs::default());
+        assert_eq!(old.server.mode, "official");
+        assert!(old.server.origin.is_empty());
+    }
+
+    #[test]
+    fn the_server_choice_is_normalised_persisted_and_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preferences.json");
+        let core = Core::new(Vec::new());
+        core.load_preferences(path.clone());
+        assert!(core.accounts_enabled());
+
+        let view = core
+            .set_server_prefs(ServerPrefs {
+                mode: "selfHosted".to_string(),
+                origin: "relay.example.com/".to_string(),
+                pin: " K7QP-3M2X ".to_string(),
+            })
+            .unwrap();
+        assert_eq!(view.mode, "selfHosted");
+        assert_eq!(view.origin, "https://relay.example.com");
+        assert!(view.has_pin);
+        assert!(
+            !core.accounts_enabled(),
+            "a self-hosted relay has no account"
+        );
+
+        // The PIN is saved but never part of the view the window reads.
+        let stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(stored["server"]["mode"], "selfHosted");
+        assert_eq!(stored["server"]["origin"], "https://relay.example.com");
+        assert_eq!(stored["server"]["pin"], "K7QP-3M2X");
+        let view_json = serde_json::to_string(&view).unwrap();
+        assert!(
+            !view_json.contains("K7QP"),
+            "the view never carries the PIN"
+        );
+
+        let restart = Core::new(Vec::new());
+        restart.load_preferences(path);
+        assert_eq!(restart.server_prefs(), core.server_prefs());
+        assert!(!restart.accounts_enabled());
+
+        // Back to official: the stored origin is kept for the next switch.
+        let official = restart
+            .set_server_prefs(ServerPrefs {
+                mode: "official".to_string(),
+                origin: "https://relay.example.com".to_string(),
+                pin: String::new(),
+            })
+            .unwrap();
+        assert_eq!(official.mode, "official");
+        // The direct setter replaces the whole PIN; it is the command layer that
+        // treats an omitted field as "keep what is stored".
+        assert!(!official.has_pin);
+        assert!(restart.accounts_enabled());
+    }
+
+    #[test]
+    fn a_server_that_is_not_https_or_not_known_is_refused() {
+        let core = Core::new(Vec::new());
+        assert!(core
+            .set_server_prefs(ServerPrefs {
+                mode: "corporate".to_string(),
+                ..ServerPrefs::default()
+            })
+            .is_err());
+        assert!(core
+            .set_server_prefs(ServerPrefs {
+                mode: "selfHosted".to_string(),
+                origin: "http://relay.example.com".to_string(),
+                pin: String::new(),
+            })
+            .is_err());
+        assert!(core
+            .set_server_prefs(ServerPrefs {
+                mode: "selfHosted".to_string(),
+                origin: "https://relay.example.com/admin".to_string(),
+                pin: String::new(),
+            })
+            .is_err());
+        assert_eq!(core.server_prefs().mode, "official");
+    }
+
+    #[test]
+    fn a_guide_finished_by_an_older_build_replays_and_stamps_the_new_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preferences.json");
+        std::fs::write(
+            &path,
+            r#"{"theme":"dark","onboarding":{"done":true},"unknownTop":1}"#,
+        )
+        .unwrap();
+        let core = Core::new(Vec::new());
+        core.load_preferences(path.clone());
+        // The flag is there, but it was written before the server step existed.
+        assert!(core.onboarding_finished());
+        assert!(!core.onboarding_done());
+
+        assert!(core.set_onboarding_done(true));
+        assert!(core.onboarding_done());
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["onboarding"]["done"], true);
+        assert_eq!(saved["onboarding"]["guideVersion"], GUIDE_VERSION);
+    }
+
+    #[test]
+    fn the_snapshot_carries_the_server_choice_without_the_pin() {
+        let core = Core::new(Vec::new());
+        core.set_server_prefs(ServerPrefs {
+            mode: "selfHosted".to_string(),
+            origin: "https://relay.example.com".to_string(),
+            pin: "do-not-leak-this".to_string(),
+        })
+        .unwrap();
+        let snapshot = core.snapshot();
+        assert_eq!(snapshot.server.mode, "selfHosted");
+        assert_eq!(snapshot.server.origin, "https://relay.example.com");
+        assert!(snapshot.server.has_pin);
+        let text = serde_json::to_string(&snapshot).unwrap();
+        assert!(!text.contains("do-not-leak-this"));
+    }
+
+    #[tokio::test]
+    async fn a_self_hosted_install_answers_account_commands_without_a_request() {
+        let core = Core::new(Vec::new());
+        core.set_server_prefs(ServerPrefs {
+            mode: "selfHosted".to_string(),
+            origin: "https://relay.example.com".to_string(),
+            pin: String::new(),
+        })
+        .unwrap();
+        assert!(!core.accounts_enabled());
+        assert!(core.account_user().is_none());
+        assert!(core.relay_account().is_none());
+
+        let answer = core.dispatch(Command::AccountDesktops).await;
+        assert!(!answer.ok);
+        let error = answer.error.expect("an explicit refusal");
+        assert_eq!(error.code, "ACCOUNTS_DISABLED");
+        assert!(error.message.contains("self-hosted"));
+
+        // A local command still works: self-hosted hides accounts, not the app.
+        let ping = core.dispatch(Command::Ping).await;
+        assert!(ping.ok);
     }
 }
 

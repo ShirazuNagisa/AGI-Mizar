@@ -21,9 +21,9 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use agi_core::{endpoint, server, Core};
+use agi_core::{endpoint, server, Core, ServerPrefs};
 use agi_engine::Engine;
 use agi_engine_claude::ClaudeEngine;
 use agi_engine_codex::{AppServerConfig, CodexEngine};
@@ -42,10 +42,21 @@ pub struct BootConfig {
     /// Off by default: that file belongs to the operator, and a process started
     /// to look at something should not change it.
     pub install_claude_hooks: bool,
-    /// Dial this relay. `None` leaves the LAN-only path.
+    /// The relay the caller would dial in official mode. `None` leaves the
+    /// LAN-only path (the window passes the official default; the daemon leaves
+    /// it to `AGI_RELAY_URL`).
+    ///
+    /// A stored self-hosted choice replaces this; see [`effective_relay_url`].
     pub relay_url: Option<String>,
     /// The tunnel secret. `None` invents one, which means a new room each launch.
     pub relay_token: Option<String>,
+    /// The server choice the caller read before boot.
+    ///
+    /// The window reads `preferences.json` first so the tunnel decision is not
+    /// made before the file exists in the kernel. Boot adopts this value (and
+    /// writes it back only when it differs), so the snapshot and the file the
+    /// next launch reads cannot disagree.
+    pub server: Option<ServerPrefs>,
 }
 
 /// A running kernel.
@@ -198,9 +209,23 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
         // An install that has already signed in has been configured by hand, in
         // public builds that predate the guide. Do not lock those people behind
         // a flow they never saw; a genuinely new machine has neither file.
-        if home.join("account.json").exists() && !core.onboarding_done() {
+        //
+        // Only "never finished any guide" is grandfathered. A file whose
+        // `onboarding.done` was written by an older guide has to replay: the
+        // server step and the self-hosted flow arrived after it, and the stored
+        // settings are carried into the replay.
+        if home.join("account.json").exists() && !core.onboarding_finished() {
             core.set_onboarding_done(true);
             tracing::info!("onboarding: existing install, marked done");
+        }
+    }
+
+    // The caller may have read the preference file before boot (the window does,
+    // so the tunnel target is decided before the kernel exists). Adopt it here so
+    // the in-memory choice, the snapshot and the file all agree.
+    if let Some(server) = config.server.clone() {
+        if let Err(error) = core.set_server_prefs(server) {
+            tracing::warn!("preferences: ignoring the caller's server choice — {error}");
         }
     }
     core.start().await;
@@ -409,81 +434,48 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
         }
     }
 
-    if let Some(url) = config
-        .relay_url
-        .as_ref()
-        .filter(|url| !url.trim().is_empty())
-    {
-        let token = config.relay_token.unwrap_or_else(random_token);
-        // The direct path's identity is derived from the same tunnel secret the
-        // room is, so it survives a restart the way the room does. Kept before
-        // the client takes ownership of the token.
-        let net_token = token.clone();
-        // The account instance (:8443) answers a phone's desktop list from its
-        // own presence, and a desktop on the unified 443 origin is invisible
-        // there -- iOS showed this Mac as offline while the tunnel was plainly
-        // up. Keep a second tunnel on that instance for presence (the same
-        // room, the same store), so /desktops and /connect find this computer
-        // on either relay. Created only while signed in: that instance refuses
-        // anonymous tunnels.
-        let legacy_url = (url.trim_end_matches('/') == "https://dshmizar-1.shirazu-nagisa.com")
-            .then_some("https://dshmizar-1.shirazu-nagisa.com:8443");
-        let legacy_token = token.clone();
-        let legacy_roster = Arc::clone(&roster_for_relay);
-        let legacy_core = Arc::clone(&core);
-        let legacy_port = mizar.port();
-        let build_legacy = move || -> Option<Arc<RelayClient>> {
-            let base = legacy_url?;
-            let client = RelayClient::new(base, legacy_token.clone(), legacy_port);
-            client.attach_store(Arc::clone(&legacy_roster));
-            let core_for_account = Arc::clone(&legacy_core);
-            client.set_account_source(Arc::new(move || core_for_account.relay_account()));
-            let core_for_policy = Arc::clone(&legacy_core);
-            client.set_peer_policy(Arc::new(move || {
-                let prefs = core_for_policy.remote_prefs();
-                prefs.enabled && prefs.allow_wan
-            }));
-            Some(client)
-        };
-        let legacy_slot: Arc<std::sync::Mutex<Option<Arc<RelayClient>>>> =
-            Arc::new(std::sync::Mutex::new(None));
-        if core.relay_account().is_some() {
-            if let Some(client) = build_legacy() {
-                let running = Arc::clone(&client);
-                *legacy_slot
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(client);
-                tokio::spawn(async move { running.run().await });
-            }
-        }
-        let legacy_for_changes = Arc::clone(&legacy_slot);
-        let relay = RelayClient::new(url, token, mizar.port());
-        relay.attach_store(Arc::clone(&roster_for_relay));
-        let core_for_relay = Arc::clone(&core);
-        relay.set_account_source(Arc::new(move || core_for_relay.relay_account()));
-        let core_for_policy = Arc::clone(&core);
-        relay.set_peer_policy(Arc::new(move || {
-            let prefs = core_for_policy.remote_prefs();
-            prefs.enabled && prefs.allow_wan
-        }));
-        core.attach_relay_status(Arc::clone(&mizar) as Arc<dyn agi_core::RelayStatusSource>);
-        mizar.attach_relay(Arc::clone(&relay));
+    // Which relay this install dials. The decision belongs here, after the
+    // preference file has been read: a stored self-hosted origin replaces the
+    // caller's default, and `AGI_RELAY_URL` is the escape hatch for a local
+    // relay in tests and development and wins over both.
+    let requested_relay = config.relay_url.clone();
+    let explicit_relay = std::env::var("AGI_RELAY_URL").ok();
+    let effective_relay = effective_relay_url(
+        &core.server_prefs(),
+        explicit_relay.as_deref(),
+        requested_relay.as_deref(),
+    );
+    let token = config.relay_token.unwrap_or_else(random_token);
+    let tunnels = Tunnels::new(
+        token.clone(),
+        mizar.port(),
+        Arc::clone(&roster_for_relay),
+        Arc::clone(&core),
+        Arc::clone(&mizar),
+    );
 
-        // The relay routes by session, so a sign-in has to redial with the new
-        // headers; a sign-out revokes the tokens this account was handed and
-        // drops the presence the phones were finding it by.
-        // The phone server refuses a phone signed in to another account, and the
-        // answer has to be current rather than taken at launch: a sign-out must
-        // take effect on the next connection.
-        mizar.set_account_user(
-            core.account_user()
-                .map(|user| user.id)
-                .filter(|id| !id.is_empty()),
-        );
+    // The window's status lamp reads this even when no tunnel is configured: the
+    // answer is then "not connected", which is the truth.
+    core.attach_relay_status(Arc::clone(&mizar) as Arc<dyn agi_core::RelayStatusSource>);
+    // The phone server refuses a phone signed in to another account, and the
+    // answer has to be current rather than taken at launch.
+    mizar.set_account_user(
+        core.account_user()
+            .map(|user| user.id)
+            .filter(|id| !id.is_empty()),
+    );
+    match effective_relay.as_deref() {
+        Some(url) => tunnels.move_to(url),
+        None => tracing::info!("relay: no tunnel configured"),
+    }
+
+    // Signing in or out changes what the tunnel presents and which presence
+    // tunnels may exist: the account instance refuses anonymous tunnels.
+    {
         let mut changes = core.subscribe_account();
         let mizar_for_changes = Arc::clone(&mizar);
-        let relay_for_changes = Arc::clone(&relay);
         let roster_for_changes = Arc::clone(&roster_for_relay);
+        let tunnels = Arc::clone(&tunnels);
         tokio::spawn(async move {
             while let Ok(event) = changes.recv().await {
                 mizar_for_changes
@@ -493,38 +485,64 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
                         agi_mizar::relay::revoke_account_tokens(&roster_for_changes, user);
                     }
                 }
-                relay_for_changes.recycle();
-
-                // The :8443 presence tunnel follows the session the same way:
-                // present while signed in, gone on sign-out (that relay would
-                // otherwise refuse every redial).
-                let mut slot = legacy_for_changes
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if event.signed_in {
-                    match slot.as_ref() {
-                        Some(client) => client.recycle(),
-                        None => {
-                            if let Some(client) = build_legacy() {
-                                let running = Arc::clone(&client);
-                                *slot = Some(client);
-                                tokio::spawn(async move { running.run().await });
-                            }
-                        }
-                    }
-                } else if let Some(client) = slot.take() {
-                    client.recycle();
-                    client.stop();
+                // A redial carries the new (or no) account headers; the presence
+                // tunnel follows the session the same way.
+                if let Some(relay) = tunnels.main_relay() {
+                    relay.recycle();
                 }
+                tunnels.sync_legacy();
             }
         });
-        tokio::spawn(async move { relay.run().await });
+    }
 
+    // The server page replaces the tunnel without a restart. The old client is
+    // stopped and a new one dials the chosen origin; the account source and the
+    // peer policy are attached by `Tunnels`, so nothing else has to be rebuilt.
+    {
+        let mut changes = core.subscribe_server_prefs();
+        let core_for_changes = Arc::clone(&core);
+        let tunnels = Arc::clone(&tunnels);
+        tokio::spawn(async move {
+            while changes.recv().await.is_ok() {
+                let next = effective_relay_url(
+                    &core_for_changes.server_prefs(),
+                    explicit_relay.as_deref(),
+                    requested_relay.as_deref(),
+                );
+                match next {
+                    Some(url) if tunnels.current_origin().as_deref() != Some(url.as_str()) => {
+                        tracing::info!("relay: moving the tunnel to {url}");
+                        tunnels.move_to(&url);
+                    }
+                    Some(_) => {}
+                    None => {
+                        tracing::warn!(
+                            "relay: the stored server has no usable origin; the tunnel is stopped"
+                        );
+                        tunnels.stop();
+                    }
+                }
+                tunnels.mizar.set_account_user(
+                    core_for_changes
+                        .account_user()
+                        .map(|user| user.id)
+                        .filter(|id| !id.is_empty()),
+                );
+            }
+        });
+    }
+
+    if let Some(url) = effective_relay.as_deref() {
         // The direct path. Its socket belongs to the process, so it is bound
         // here rather than per connection; the accept loop hands each punched
         // stream to the same method dispatch a WebSocket uses.
+        //
+        // Bound once, on the origin this launch dialled: a runtime server switch
+        // moves the tunnel but not this socket, so the candidate refresh keeps
+        // asking the launch-time STUN host until the next start. That is the
+        // same rule the tunnel's own room follows across a move.
         let identity = agi_mizar::net::identity::Identity::derive(
-            net_token.as_bytes(),
+            token.as_bytes(),
             agi_mizar::net::identity::Purpose::Host,
         );
         // The reflexive candidate comes from the relay's own STUN server: the
@@ -567,6 +585,194 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
         pairing_uri,
         endpoint_file,
     })
+}
+
+/// The relay half of boot: the tunnel, the official-only presence tunnel, and
+/// the rules for replacing either without restarting the kernel.
+///
+/// The tunnel token and room survive a move — the room derives from the token —
+/// so a phone that paired on one origin keeps finding this computer on the new
+/// one. What changes is the origin the socket dials and the account headers it
+/// may present.
+struct Tunnels {
+    token: String,
+    port: u16,
+    roster: Arc<DeviceStore>,
+    core: Arc<Core>,
+    mizar: Arc<MizarServer>,
+    main: Mutex<Option<Arc<RelayClient>>>,
+    /// The account instance's presence tunnel. Official-only, and only while
+    /// signed in: that deployment refuses anonymous tunnels.
+    legacy: Mutex<Option<Arc<RelayClient>>>,
+    /// The origin the main tunnel is on right now.
+    origin: Mutex<Option<String>>,
+}
+
+impl Tunnels {
+    fn new(
+        token: String,
+        port: u16,
+        roster: Arc<DeviceStore>,
+        core: Arc<Core>,
+        mizar: Arc<MizarServer>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            token,
+            port,
+            roster,
+            core,
+            mizar,
+            main: Mutex::new(None),
+            legacy: Mutex::new(None),
+            origin: Mutex::new(None),
+        })
+    }
+
+    /// One client for `base`, with the account source and peer policy attached.
+    ///
+    /// Both read the kernel on every dial, not at construction: a sign-in, a
+    /// server switch or a policy change is visible to the very next redial.
+    fn client(&self, base: &str) -> Arc<RelayClient> {
+        let client = RelayClient::new(base, self.token.clone(), self.port);
+        client.attach_store(Arc::clone(&self.roster));
+        let core = Arc::clone(&self.core);
+        client.set_account_source(Arc::new(move || core.relay_account()));
+        let core = Arc::clone(&self.core);
+        client.set_peer_policy(Arc::new(move || {
+            let prefs = core.remote_prefs();
+            prefs.enabled && prefs.allow_wan
+        }));
+        client
+    }
+
+    fn main_relay(&self) -> Option<Arc<RelayClient>> {
+        self.main
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn current_origin(&self) -> Option<String> {
+        self.origin
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Point the tunnel at `base`, replacing whatever was there.
+    fn move_to(&self, base: &str) {
+        let next = self.client(base);
+        {
+            let mut slot = self
+                .main
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(old) = slot.replace(Arc::clone(&next)) {
+                old.stop();
+            }
+        }
+        *self
+            .origin
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(base.trim_end_matches('/').to_string());
+        // The phone server's `host.info` must name the new origin before the
+        // socket comes back up, so a phone that asks during the move is not sent
+        // to a room on the old relay.
+        self.mizar.attach_relay(Arc::clone(&next));
+        let running = Arc::clone(&next);
+        tokio::spawn(async move { running.run().await });
+        self.sync_legacy();
+    }
+
+    /// Stop the tunnel entirely, leaving the phone server without one.
+    fn stop(&self) {
+        {
+            let mut slot = self
+                .main
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(old) = slot.take() {
+                old.stop();
+            }
+        }
+        *self
+            .origin
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        self.sync_legacy();
+    }
+
+    /// Keep the official account instance's presence tunnel in step.
+    ///
+    /// It exists because the account gate routes `/desktops` and `/connect`
+    /// there, and a desktop that only dials the unified 443 origin is invisible
+    /// to it. A self-hosted install must never dial it: that deployment is not
+    /// this operator's server.
+    fn sync_legacy(&self) {
+        let origin = self.current_origin();
+        let wanted = origin
+            .as_deref()
+            .and_then(legacy_relay_url)
+            .filter(|_| self.core.accounts_enabled() && self.core.relay_account().is_some());
+        let mut slot = self
+            .legacy
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match wanted {
+            Some(url) => {
+                if let Some(client) = slot.as_ref() {
+                    client.recycle();
+                } else {
+                    let client = self.client(url);
+                    *slot = Some(Arc::clone(&client));
+                    tokio::spawn(async move { client.run().await });
+                }
+            }
+            None => {
+                if let Some(client) = slot.take() {
+                    client.recycle();
+                    client.stop();
+                }
+            }
+        }
+    }
+}
+
+/// The one origin whose account deployment keeps its own presence tunnel.
+///
+/// Kept as a literal rather than read from a preference: it is a fact about the
+/// official service, and a typo there would silently drop every computer from
+/// the account's desktop list.
+fn legacy_relay_url(base: &str) -> Option<&'static str> {
+    (base.trim_end_matches('/') == agi_core::account::OFFICIAL_ACCOUNT_URL)
+        .then_some("https://dshmizar-1.shirazu-nagisa.com:8443")
+}
+
+/// Which relay this launch should dial.
+///
+/// The order is the contract: an explicit `AGI_RELAY_URL` wins (tests and a
+/// developer's local relay), then the stored self-hosted origin, then whatever
+/// the caller asked for in official mode. A self-hosted choice with no usable
+/// origin returns `None` rather than falling back to the official service: the
+/// operator asked not to talk to it, and dialling it anyway would leak the
+/// tunnel to a party they did not choose.
+fn effective_relay_url(
+    server: &ServerPrefs,
+    explicit: Option<&str>,
+    requested: Option<&str>,
+) -> Option<String> {
+    let clean = |value: &str| {
+        let trimmed = value.trim().trim_end_matches('/');
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    };
+    if let Some(explicit) = explicit.and_then(clean) {
+        return Some(explicit);
+    }
+    if server.is_self_hosted() {
+        return clean(server.origin_trimmed());
+    }
+    requested.and_then(clean)
 }
 
 /// Install the Claude Code hooks, reporting the outcome rather than failing.
@@ -866,4 +1072,116 @@ fn configured_api_token() -> Option<String> {
 /// which both this crate and the engines consult.
 pub fn which(binary: &str) -> Option<PathBuf> {
     agi_platform::which(binary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const OFFICIAL: &str = "https://dshmizar-1.shirazu-nagisa.com";
+
+    fn self_hosted(origin: &str) -> ServerPrefs {
+        ServerPrefs {
+            mode: "selfHosted".to_string(),
+            origin: origin.to_string(),
+            pin: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_official_default_is_kept_when_the_stored_choice_is_official() {
+        assert_eq!(
+            effective_relay_url(&ServerPrefs::default(), None, Some(OFFICIAL)),
+            Some(OFFICIAL.to_string())
+        );
+        // The daemon's "no tunnel" request is still no tunnel.
+        assert_eq!(
+            effective_relay_url(&ServerPrefs::default(), None, None),
+            None
+        );
+    }
+
+    #[test]
+    fn a_stored_self_hosted_origin_replaces_the_official_default() {
+        assert_eq!(
+            effective_relay_url(
+                &self_hosted("https://relay.example.com/"),
+                None,
+                Some(OFFICIAL)
+            ),
+            Some("https://relay.example.com".to_string())
+        );
+        assert_eq!(
+            effective_relay_url(
+                &self_hosted("https://relay.example.com:8443"),
+                None,
+                Some(OFFICIAL)
+            ),
+            Some("https://relay.example.com:8443".to_string())
+        );
+    }
+
+    #[test]
+    fn an_explicit_relay_url_wins_over_the_stored_choice() {
+        assert_eq!(
+            effective_relay_url(
+                &self_hosted("https://relay.example.com"),
+                Some("http://127.0.0.1:9000/"),
+                Some(OFFICIAL)
+            ),
+            Some("http://127.0.0.1:9000".to_string())
+        );
+    }
+
+    #[test]
+    fn a_self_hosted_choice_without_an_origin_never_falls_back_to_official() {
+        // A hand-edited file can carry `mode: selfHosted` and no origin. Dialling
+        // the official service instead would hand the tunnel to a party the
+        // operator explicitly moved away from.
+        assert_eq!(
+            effective_relay_url(&self_hosted("   "), None, Some(OFFICIAL)),
+            None
+        );
+    }
+
+    #[test]
+    fn only_the_official_origin_keeps_the_presence_tunnel() {
+        assert_eq!(
+            legacy_relay_url("https://dshmizar-1.shirazu-nagisa.com/"),
+            Some("https://dshmizar-1.shirazu-nagisa.com:8443")
+        );
+        assert_eq!(legacy_relay_url("https://relay.example.com"), None);
+        assert_eq!(
+            legacy_relay_url("https://dshmizar.shirazu-nagisa.com"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_guide_finished_before_this_build_is_not_done() {
+        // No stored version at all: the file predates the field.
+        let old = agi_core::Onboarding {
+            done: true,
+            guide_version: String::new(),
+        };
+        assert!(!old.is_complete(), "the new steps still have to be shown");
+        // A version from another older release is the same answer.
+        let older = agi_core::Onboarding {
+            done: true,
+            guide_version: "0.1.9".to_string(),
+        };
+        assert!(!older.is_complete());
+        // Finishing the shipped guide is what turns the flag off.
+        let current = agi_core::Onboarding {
+            done: true,
+            guide_version: agi_core::GUIDE_VERSION.to_string(),
+        };
+        assert!(current.is_complete());
+        // A version without the flag is still an unfinished guide.
+        let unfinished = agi_core::Onboarding {
+            done: false,
+            guide_version: agi_core::GUIDE_VERSION.to_string(),
+        };
+        assert!(!unfinished.is_complete());
+    }
 }

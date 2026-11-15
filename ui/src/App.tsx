@@ -5,6 +5,7 @@ import {
   type ApiEvent,
   type DshPluginView,
   type EngineId,
+  type ServerView,
   type StateSnapshot,
   type UsageOverview,
 } from './api'
@@ -43,6 +44,10 @@ export function App() {
   const [accountError, setAccountError] = useState<string | null>(null)
   const [banner, setBanner] = useState<string | null>(null)
   const [serverConnected, setServerConnected] = useState(false)
+  // The origin the tunnel is actually on. It comes from the kernel rather than
+  // from the stored preference: a failed dial still leaves the preference in
+  // place, and the status row should name what is running, not what was chosen.
+  const [relayUrl, setRelayUrl] = useState<string | null>(null)
   const [onlineDesktops, setOnlineDesktops] = useState<Set<string>>(new Set())
   // The DSH plugin update popup. The release it was dismissed for is kept in a
   // ref, not state: forgetting it on the next snapshot poll would reopen the
@@ -113,17 +118,24 @@ export function App() {
 
   // The tunnel comes and goes without the window asking; reading it on a slow
   // timer is enough for a status light.
-  useEffect(() => {
-    const read = () => {
-      void kernel
-        .send<{ connected: boolean }>({ op: 'relay_status' })
-        .then((answer) => setServerConnected(answer.connected))
-        .catch(() => setServerConnected(false))
+  const readRelayStatus = useCallback(async () => {
+    try {
+      const answer = await kernel.send<{ connected: boolean; url?: string | null }>({
+        op: 'relay_status',
+      })
+      setServerConnected(answer.connected)
+      setRelayUrl(answer.url ?? null)
+    } catch {
+      setServerConnected(false)
+      setRelayUrl(null)
     }
-    read()
-    const timer = window.setInterval(read, 5_000)
-    return () => window.clearInterval(timer)
   }, [])
+
+  useEffect(() => {
+    void readRelayStatus()
+    const timer = window.setInterval(() => void readRelayStatus(), 5_000)
+    return () => window.clearInterval(timer)
+  }, [readRelayStatus])
 
   useEffect(() => {
     let cancelled = false
@@ -296,6 +308,14 @@ export function App() {
     setSnapshot(next)
   }, [])
 
+  // A saved server choice rebuilds the tunnel in the kernel. The window rereads
+  // the snapshot (the server view is in it) and the tunnel status, so the
+  // sidebar's lamp and the settings page agree within one round trip.
+  const serverChanged = useCallback(async () => {
+    await refreshState()
+    await readRelayStatus()
+  }, [refreshState, readRelayStatus])
+
   const reconnect = useCallback(
     async (_engine: EngineId) => {
       // Until the engines expose a real reconnect, a fresh snapshot is the honest
@@ -440,6 +460,14 @@ export function App() {
   // desktops. The pre-render attribute already answered it; this is the answer
   // the kernel owns, and it updates if a browser page was opened without one.
   const platform = platformOf(snapshot?.platform)
+  // A kernel older than this window has no `server` field; official is what it
+  // would have been, so the fallback is not a guess about the user's choice.
+  const serverView: ServerView = snapshot?.server ?? {
+    mode: 'official',
+    origin: '',
+    hasPin: false,
+    pinRequired: null,
+  }
 
   // The tray page is a window of its own, loading this same bundle. It draws
   // nothing but the three lists.
@@ -456,6 +484,7 @@ export function App() {
         kernel={kernel}
         account={account}
         serverConnected={serverConnected}
+        serverInfo={serverView}
         engines={snapshot.engines}
         model={snapshot.model ?? null}
         dataset={snapshot.dataset ?? { enabled: false, policyVersion: 0, since: null, excludedProjects: [] }}
@@ -483,6 +512,8 @@ export function App() {
         engines={snapshot?.engines ?? []}
         page={page}
         serverConnected={serverConnected}
+        serverMode={serverView.mode}
+        serverOrigin={relayUrl ?? (serverView.mode === 'selfHosted' ? serverView.origin : null)}
         onNavigate={setPage}
         onRerunOnboarding={rerunOnboarding}
       />
@@ -539,6 +570,8 @@ export function App() {
             devices={snapshot?.devices ?? []}
             running={(snapshot?.sessions ?? []).some((session) => session.running)}
             serverConnected={serverConnected}
+            server={serverView}
+            onServerChanged={serverChanged}
             theme={theme}
             onThemeChange={chooseTheme}
             kernel={kernel}

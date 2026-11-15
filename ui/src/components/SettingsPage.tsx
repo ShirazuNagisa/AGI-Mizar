@@ -7,6 +7,9 @@ import type {
   ModelCheck,
   ModelRuntime,
   ModelState,
+  ServerMode,
+  ServerProbeResult,
+  ServerView,
 } from '../api'
 import { THEMES, type ThemePreference } from '../theme'
 import { formatEta, formatGigabytes, formatModelVersion, formatSpeed } from '../format'
@@ -20,6 +23,7 @@ import { Toolbar } from './Toolbar'
 import { ShellSettingsList } from './ShellSettingsList'
 import { RemoteAgentSettings } from './RemoteAgentSettings'
 import { LoginPage } from './LoginPage'
+import { ServerChoice } from './ServerChoice'
 import { useShellSettings } from '../lib/use-shell-settings'
 import type { DesktopPlatform } from '../platform'
 import {
@@ -32,6 +36,7 @@ import {
   type UpdateStatus,
 } from '../shell'
 import { cn, failureMessage } from '../lib/utils'
+import { probeFailureCopy, probeSuccessCopy } from '../lib/server'
 
 interface SettingsPageProps {
   version: string
@@ -44,6 +49,10 @@ interface SettingsPageProps {
   /** Whether any session is running, which is when live activity matters. */
   running: boolean
   serverConnected: boolean
+  /** The relay this install talks to; the 服务器 tab edits it. */
+  server: ServerView
+  /** Called after a saved server choice so the window can reread and reconnect. */
+  onServerChanged: () => Promise<void>
   theme: ThemePreference
   onThemeChange: (theme: ThemePreference) => void
   kernel: Kernel
@@ -74,6 +83,8 @@ export function SettingsPage({
   devices,
   running,
   serverConnected,
+  server,
+  onServerChanged,
   theme,
   onThemeChange,
   kernel,
@@ -88,11 +99,23 @@ export function SettingsPage({
   onAppleStart,
   onAppleExchange,
 }: SettingsPageProps) {
-  const [tab, setTab] = useState<SettingsTabId>('account')
+  // A self-hosted relay has no account service and no dataset endpoint, so the
+  // account page would be a sign-in form that cannot work and the privacy page
+  // would offer a switch that never uploads. Both tabs are hidden rather than
+  // disabled: there is nothing on them this install can use.
+  const selfHosted = server.mode === 'selfHosted'
+  const tabs = SETTINGS_TABS.filter(
+    (option) =>
+      !selfHosted || (option.id !== 'account' && option.id !== 'privacy'),
+  )
+  const [tab, setTab] = useState<SettingsTabId>(() => (selfHosted ? 'server' : 'account'))
+  useEffect(() => {
+    if (!tabs.some((option) => option.id === tab)) setTab('server')
+  }, [tabs, tab])
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
       <Toolbar title="设置" />
-      <SettingsTabs tab={tab} onChange={setTab} />
+      <SettingsTabs tabs={tabs} tab={tab} onChange={setTab} />
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-[720px] px-8 py-6">
           {tab === 'account' ? (
@@ -111,21 +134,63 @@ export function SettingsPage({
             />
           ) : null}
 
+          {tab === 'server' ? (
+            <ServerSection kernel={kernel} server={server} onChanged={onServerChanged} />
+          ) : null}
+
           {tab === 'devices' ? (
             <>
               <Section title="设备">
                 <Group title="AGI Mizar 桌面端">
                   <DeviceList
-                    devices={account?.devices.filter((device) => device.platform !== 'ios') ?? []}
+                    devices={
+                      selfHosted
+                        ? []
+                        : (account?.devices.filter((device) => device.platform !== 'ios') ?? [])
+                    }
                     online={onlineDesktops}
-                    empty={account === null ? '登录后可查看同一账户下的桌面端' : '这个账户下还没有桌面端'}
+                    empty={
+                      selfHosted
+                        ? '自建服务器不提供账户设备列表'
+                        : account === null
+                          ? '登录后可查看同一账户下的桌面端'
+                          : '这个账户下还没有桌面端'
+                    }
                   />
                 </Group>
                 <Group title="Mizar 手机端">
                   <DeviceList
-                    devices={account?.devices.filter((device) => device.platform === 'ios') ?? []}
-                    online={phoneOnlineIds(account, devices, running)}
-                    empty={account === null ? '登录后可查看同一账户下的手机' : '这个账户下还没有手机'}
+                    devices={
+                      selfHosted
+                        ? // The local roster knows the paired phones without an
+                          // account; that is what a self-hosted install has.
+                          devices.map((device, index) => ({
+                            id: `local-${index}`,
+                            name: device.name,
+                            model: device.model ?? '',
+                            platform: 'ios',
+                            loginAt: 0,
+                            lastSeenAt: device.lastSeenMs,
+                            current: false,
+                          }))
+                        : (account?.devices.filter((device) => device.platform === 'ios') ?? [])
+                    }
+                    online={
+                      selfHosted
+                        ? new Set(
+                            devices.flatMap((device, index) =>
+                              device.online ? [`local-${index}`] : [],
+                            ),
+                          )
+                        : phoneOnlineIds(account, devices, running)
+                    }
+                    empty={
+                      selfHosted
+                        ? '还没有配对的手机'
+                        : account === null
+                          ? '登录后可查看同一账户下的手机'
+                          : '这个账户下还没有手机'
+                    }
                   />
                 </Group>
               </Section>
@@ -142,7 +207,11 @@ export function SettingsPage({
                     {serverConnected ? '已连接' : '未连接'}
                   </span>
                   <span className="text-[12px] text-muted">
-                    {account === null ? '登录后自动连接' : '中继由账户决定'}
+                    {selfHosted
+                      ? '自建服务器'
+                      : account === null
+                        ? '登录后自动连接'
+                        : '中继由账户决定'}
                   </span>
                 </div>
               </Section>
@@ -208,6 +277,7 @@ export function SettingsPage({
 
 const SETTINGS_TABS = [
   { id: 'account', label: '账户' },
+  { id: 'server', label: '服务器' },
   { id: 'devices', label: '设备与连接' },
   { id: 'remote', label: '远程Agent' },
   { id: 'approval', label: '审批模型' },
@@ -220,16 +290,18 @@ const SETTINGS_TABS = [
 type SettingsTabId = (typeof SETTINGS_TABS)[number]['id']
 
 function SettingsTabs({
+  tabs,
   tab,
   onChange,
 }: {
+  tabs: readonly { id: SettingsTabId; label: string }[]
   tab: SettingsTabId
   onChange: (tab: SettingsTabId) => void
 }) {
   return (
     <div className="mz-divide-b shrink-0 overflow-x-auto px-6">
       <div role="tablist" aria-label="设置页面" className="flex min-w-max items-center gap-1 py-2">
-        {SETTINGS_TABS.map((option) => (
+        {tabs.map((option) => (
           <button
             key={option.id}
             type="button"
@@ -246,6 +318,231 @@ function SettingsTabs({
         ))}
       </div>
     </div>
+  )
+}
+
+/**
+ * Which relay this install talks to, and the check that makes a self-hosted one
+ * trustworthy.
+ *
+ * The current choice is drawn first, because the common visit is "which server
+ * am I on?" rather than "change it". Saving says what will happen to the tunnel
+ * and to the remote agent: switching servers is a reconnect, and a phone or peer
+ * that paired on the old origin may have to pair again.
+ */
+function ServerSection({
+  kernel,
+  server,
+  onChanged,
+}: {
+  kernel: Kernel
+  server: ServerView
+  onChanged: () => Promise<void>
+}) {
+  const [mode, setMode] = useState<ServerMode>(server.mode)
+  const [origin, setOrigin] = useState(server.origin)
+  const [pin, setPin] = useState('')
+  const [probing, setProbing] = useState(false)
+  const [probe, setProbe] = useState<ServerProbeResult | null>(null)
+  const [probeError, setProbeError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+
+  // A saved choice refreshes the snapshot; the form follows it without losing
+  // the unsaved PIN field (which the snapshot never carries).
+  useEffect(() => {
+    setMode(server.mode)
+    setOrigin(server.origin)
+  }, [server.mode, server.origin])
+
+  const selfHosted = mode === 'selfHosted'
+  const dirty = mode !== server.mode || origin.trim() !== server.origin || pin !== ''
+  const switching = dirty && (mode !== server.mode || origin.trim() !== server.origin)
+  const verified = !selfHosted || probe?.ok === true
+
+  function forgetCheck() {
+    setProbe(null)
+    setProbeError(null)
+    setError(null)
+    setNotice(null)
+  }
+
+  function chooseMode(next: ServerMode) {
+    setMode(next)
+    forgetCheck()
+  }
+
+  function changeOrigin(next: string) {
+    setOrigin(next)
+    forgetCheck()
+  }
+
+  async function verify() {
+    setProbing(true)
+    setProbe(null)
+    setProbeError(null)
+    setError(null)
+    try {
+      const result = await kernel.send<ServerProbeResult>({
+        op: 'server_probe',
+        origin,
+        pin: pin.trim(),
+      })
+      setProbe(result)
+    } catch (failure) {
+      setProbeError(failureMessage(failure, '验证失败'))
+    } finally {
+      setProbing(false)
+    }
+  }
+
+  async function save() {
+    setSaving(true)
+    setError(null)
+    setNotice(null)
+    try {
+      await kernel.send({
+        op: 'set_server_prefs',
+        mode,
+        origin,
+        // An empty field means "the PIN did not change"; the kernel keeps the
+        // stored one.
+        ...(pin.trim() === '' ? {} : { pin: pin.trim() }),
+      })
+      setPin('')
+      setProbe(null)
+      setNotice('已保存。正在重新连接服务器；远程 Agent 与手机可能需要重新配对。')
+      await onChanged()
+    } catch (failure) {
+      setError(failureMessage(failure, '没有保存服务器设置'))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Section title="服务器">
+      <div className="mz-border">
+        <div className="divide-y divide-ink">
+          <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[12px]">
+            <span className="shrink-0 text-muted">当前服务器</span>
+            <span className="truncate text-fg">
+              {server.mode === 'selfHosted'
+                ? `自建 · ${server.origin === '' ? '未填写域名' : server.origin}`
+                : '官方'}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 px-4 py-3">
+            <ServerChoice
+              title="官方服务器"
+              detail="dshmizar-1.shirazu-nagisa.com"
+              hint="账户、订阅与匿名数据共享"
+              selected={mode === 'official'}
+              onClick={() => chooseMode('official')}
+            />
+            <ServerChoice
+              title="自建服务器"
+              detail="你自己的 relay"
+              hint="无需账户"
+              selected={selfHosted}
+              onClick={() => chooseMode('selfHosted')}
+            />
+          </div>
+
+          {selfHosted ? (
+            <div className="px-4 py-3">
+              <div className="flex flex-col gap-2">
+                <label className="text-[12px] text-muted" htmlFor="settings-server-origin">
+                  服务器域名
+                </label>
+                <input
+                  id="settings-server-origin"
+                  value={origin}
+                  onChange={(event) => changeOrigin(event.target.value)}
+                  placeholder="relay.example.com"
+                  autoCapitalize="off"
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="h-9 mz-border bg-transparent px-3 font-mono text-[12px] text-fg outline-none"
+                />
+                <label className="mt-2 text-[12px] text-muted" htmlFor="settings-server-pin">
+                  服务器 PIN
+                </label>
+                <input
+                  id="settings-server-pin"
+                  type="password"
+                  value={pin}
+                  onChange={(event) => {
+                    setPin(event.target.value)
+                    forgetCheck()
+                  }}
+                  autoComplete="off"
+                  placeholder={
+                    server.hasPin ? '已保存 PIN，留空保持不变' : '服务器没有 PIN 可以留空'
+                  }
+                  className="h-9 mz-border bg-transparent px-3 font-mono text-[12px] tracking-wider text-fg outline-none"
+                />
+              </div>
+              <div className="mt-3 flex items-center justify-between gap-4">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void verify()}
+                  disabled={probing || origin.trim() === ''}
+                >
+                  {probing ? <Spinner /> : null}
+                  验证连通性
+                </Button>
+                <span className="text-right text-[12px] leading-5">
+                  {probing ? (
+                    <span className="flex items-center gap-1.5 text-muted">
+                      <Spinner size={12} />
+                      正在验证…
+                    </span>
+                  ) : probeError !== null ? (
+                    <span className="bg-ink px-1.5 text-bg">{probeError}</span>
+                  ) : probe === null ? (
+                    <span className="text-muted">修改域名或 PIN 后需要重新验证</span>
+                  ) : probe.ok ? (
+                    <span className="text-fg">{probeSuccessCopy(probe)}</span>
+                  ) : (
+                    <span className="bg-ink px-1.5 text-bg">{probeFailureCopy(probe)}</span>
+                  )}
+                </span>
+              </div>
+            </div>
+          ) : null}
+
+          <div className="flex items-start justify-between gap-4 px-4 py-2.5">
+            <span className="text-[12px] leading-5 text-muted">
+              {switching
+                ? '切换服务器会重新连接，远程 Agent 与手机可能需要重新配对。'
+                : selfHosted
+                  ? '自建服务器：无需登录，不启用账户、订阅和匿名数据共享。'
+                  : '官方服务器：账户、订阅和匿名数据共享按现有方式工作。'}
+            </span>
+            <Button
+              size="sm"
+              variant="primary"
+              className="shrink-0"
+              onClick={() => void save()}
+              disabled={!dirty || saving || (selfHosted && !verified)}
+            >
+              {saving ? <Spinner /> : null}
+              保存并切换
+            </Button>
+          </div>
+        </div>
+        {notice === null ? null : (
+          <p className="mz-divide-t px-4 py-1.5 text-[12px] leading-5 text-muted">{notice}</p>
+        )}
+        {error === null ? null : (
+          <p className="mz-divide-t bg-ink px-4 py-1.5 text-[12px] leading-5 text-bg">{error}</p>
+        )}
+      </div>
+    </Section>
   )
 }
 

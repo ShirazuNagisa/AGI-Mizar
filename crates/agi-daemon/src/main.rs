@@ -43,6 +43,10 @@ async fn main() -> anyhow::Result<()> {
         install_claude_hooks: install_hooks,
         relay_url: std::env::var("AGI_RELAY_URL").ok(),
         relay_token: std::env::var("AGI_RELAY_TOKEN").ok(),
+        // The daemon lets boot read the preference file itself: a stored
+        // self-hosted origin still applies, and its own `AGI_RELAY_URL` keeps
+        // working exactly as before.
+        server: None,
     })
     .await?;
 

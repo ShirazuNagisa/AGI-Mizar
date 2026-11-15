@@ -319,6 +319,24 @@ impl RelayClient {
             );
         }
 
+        // The self-hosted relay's desktop directory reads these two: a phone
+        // finds this computer by its display name and platform, not by an
+        // account. The name is UTF-8, so it is percent-encoded — a header value
+        // is bytes, and a Chinese host name is not one. Both are optional on the
+        // wire, so an older relay ignores them.
+        request.headers_mut().insert(
+            "x-mizar-device-name",
+            percent_encode(&agi_platform::host_name())
+                .parse()
+                .map_err(|_| anyhow::anyhow!("the device name is not a header value"))?,
+        );
+        request.headers_mut().insert(
+            "x-mizar-device-platform",
+            device_platform()
+                .parse()
+                .map_err(|_| anyhow::anyhow!("the device platform is not a header value"))?,
+        );
+
         // Advertised per dial: the relay answers `wsMsgBinary` in `welcome` when
         // it will carry framed `ws-msg`, and only then does this side send one.
         // A relay older than the header keeps receiving JSON + base64.
@@ -957,6 +975,39 @@ pub fn tunnel_url(base: &str) -> anyhow::Result<String> {
     Ok(format!("{scheme}{rest}{TUNNEL_PATH}"))
 }
 
+/// Percent-encode one UTF-8 string for an HTTP header value.
+///
+/// The relay's self-hosted desktop list shows this computer by its name, and a
+/// name is arbitrary text ("李的 MacBook"). A header value is a byte string that
+/// must stay in ASCII, so everything outside the RFC 3986 unreserved set is
+/// written as `%XX`. Uppercase hex, because that is the spelling the relay and
+/// the phone decode against.
+fn percent_encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(*byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+/// The platform spelling the relay contract uses: `macos`, `windows` or `linux`.
+///
+/// Anything else is reported as `linux`: the relay only uses the value to draw a
+/// row, and a desktop that is neither of the two commercial platforms behaves
+/// like the Unix one.
+fn device_platform() -> &'static str {
+    match agi_platform::platform() {
+        "macos" => "macos",
+        "windows" => "windows",
+        _ => "linux",
+    }
+}
+
 /// Standard base64, for binary frames that have to ride inside JSON.
 pub(crate) fn base64(bytes: &[u8]) -> String {
     agi_protocol::b64::encode(bytes)
@@ -1124,6 +1175,30 @@ mod tests {
         assert_eq!(
             client.phone_base_url().as_deref(),
             Some("https://relay.example.com/r/abc")
+        );
+    }
+
+    #[test]
+    fn a_device_name_reaches_the_relay_as_ascii() {
+        // A plain name is untouched, so the common case stays readable.
+        assert_eq!(percent_encode("MacBook Pro"), "MacBook%20Pro");
+        // Non-ASCII text becomes UTF-8 percent escapes: eight bytes become 24
+        // characters, and every one is a header-legal ASCII byte.
+        assert_eq!(
+            percent_encode("李的 MacBook"),
+            "%E6%9D%8E%E7%9A%84%20MacBook"
+        );
+        assert!(percent_encode("李的 MacBook").is_ascii());
+        // Reserved characters are encoded too: `;` and `/` are legal in a name
+        // but not safe to hand a header parser unescaped.
+        assert_eq!(percent_encode("a/b;c"), "a%2Fb%3Bc");
+        assert_eq!(
+            device_platform(),
+            match agi_platform::platform() {
+                "macos" => "macos",
+                "windows" => "windows",
+                _ => "linux",
+            }
         );
     }
 

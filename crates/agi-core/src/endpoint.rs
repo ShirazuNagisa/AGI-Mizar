@@ -85,6 +85,15 @@ pub fn default_endpoint_path() -> PathBuf {
     agi_platform::data_dir().join("endpoint.json")
 }
 
+/// `~/.agi-mizar/preferences.json`.
+///
+/// Sits beside the endpoint file because both belong to this install rather than
+/// to the browser: the window's origin changes with the port on every launch, so
+/// its own storage cannot remember the relay choice.
+pub fn default_preferences_path() -> PathBuf {
+    agi_platform::data_dir().join("preferences.json")
+}
+
 /// Publish the endpoint atomically.
 ///
 /// A reader that catches the file mid-write would see truncated JSON and treat it

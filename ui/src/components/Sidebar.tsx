@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { EngineStatus } from '../api'
+import type { EngineStatus, ServerMode } from '../api'
 import { AGENT_TABS, type AgentTab, type Page, samePage } from '../navigation'
 import { ENGINE_MARKS, GearIcon, RingMark } from '../icons'
 import { cn } from '../lib/utils'
@@ -11,6 +11,10 @@ interface SidebarProps {
   engines: EngineStatus[]
   page: Page
   serverConnected: boolean
+  /** Which relay the status row names: the official service or this install's. */
+  serverMode: ServerMode
+  /** The relay origin, shown as the row's tooltip so the domain is checkable. */
+  serverOrigin: string | null
   onNavigate: (page: Page) => void
   /** Developer-only: put the first-run guide back on screen. */
   onRerunOnboarding: () => Promise<void>
@@ -85,11 +89,24 @@ export function Sidebar({
   engines,
   page,
   serverConnected,
+  serverMode,
+  serverOrigin,
   onNavigate,
   onRerunOnboarding,
 }: SidebarProps) {
   const oled = useIsOled()
   const [rerunning, setRerunning] = useState(false)
+  // The same two states, named for the server this install actually talks to: a
+  // self-hosted install is not "connected to the server" in the official sense,
+  // and saying so is how a person notices the switch took effect.
+  const serverLabel =
+    serverMode === 'selfHosted'
+      ? serverConnected
+        ? '已连接到自建服务器'
+        : '未连接到自建服务器'
+      : serverConnected
+        ? '已连接到服务器'
+        : '未连接'
 
   async function rerunGuide() {
     if (rerunning) return
@@ -176,11 +193,10 @@ export function Sidebar({
           className="flex h-8 items-center text-left text-[12px]"
           contentClassName={cn(ROW_LABEL, 'gap-2')}
         >
-          <Lamp
-            state={serverConnected ? 'on' : 'off'}
-            label={serverConnected ? '已连接到服务器' : '未连接'}
-          />
-          {serverConnected ? '已连接到服务器' : '未连接'}
+          <Lamp state={serverConnected ? 'on' : 'off'} label={serverLabel} />
+          <span className="min-w-0 truncate" title={serverOrigin ?? undefined}>
+            {serverLabel}
+          </span>
         </WipeButton>
 
         <WipeButton

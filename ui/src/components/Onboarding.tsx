@@ -8,6 +8,9 @@ import type {
   ModelCheck,
   ModelState,
   RemotePrefs,
+  ServerPrefs,
+  ServerProbeResult,
+  ServerView,
 } from '../api'
 import { AGENTS } from '../navigation'
 import { ENGINE_INSTALL_HINTS } from '../engines'
@@ -21,41 +24,61 @@ import { Progress } from './ui/progress'
 import { Switch } from './ui/switch'
 import { CheckIcon, ENGINE_MARKS, RingMark, Spinner } from '../icons'
 import { DshPluginHint } from './DshPluginHint'
+import { ServerChoice } from './ServerChoice'
 import { useIsOled } from '../lib/oled'
 import { ShellSettingsList } from './ShellSettingsList'
 import { WindowControls } from './WindowControls'
 import { WindowResizeHandles } from './WindowResizeHandles'
 import { cn, failureMessage } from '../lib/utils'
+import { probeFailureCopy, probeSuccessCopy } from '../lib/server'
 
-/** The eight steps, in the order the guide walks them. */
-const STEP_TITLES = [
-  '欢迎',
-  '登录',
-  '选择 Agent',
-  '下载模型',
-  '远程 Agent',
-  '偏好',
-  '共享会话数据',
-  '完成',
+/** Every step the guide can draw, in the order it walks them. */
+const STEP_ORDER = [
+  'welcome',
+  'server',
+  'login',
+  'choose',
+  'model',
+  'remote',
+  'preferences',
+  'sharing',
+  'finish',
 ] as const
+
+type StepId = (typeof STEP_ORDER)[number]
+
+/** The titles, keyed by step so a hidden step cannot shift the others' names. */
+const STEP_TITLES: Record<StepId, string> = {
+  welcome: '欢迎',
+  server: '服务器',
+  login: '登录',
+  choose: '选择 Agent',
+  model: '下载模型',
+  remote: '远程 Agent',
+  preferences: '偏好',
+  sharing: '共享会话数据',
+  finish: '完成',
+}
+
+/**
+ * The steps a self-hosted install does not walk.
+ *
+ * No account service means no sign-in, and no dataset endpoint means the sharing
+ * question has no recipient. Everything else — agents, model, remote policy,
+ * startup — is local and stays.
+ */
+const SELF_HOSTED_HIDDEN: readonly StepId[] = ['login', 'sharing']
 
 /** The phone app's current distribution channels; the guide links to both. */
 const MOBILE_APP_TESTFLIGHT = 'https://testflight.apple.com/join/MyaqdT1z'
 const MOBILE_APP_ANDROID = 'https://github.com/ShirazuNagisa/DSH-Mizar-Android/releases'
 
-const WELCOME = 0
-const LOGIN = 1
-const CHOOSE = 2
-const MODEL = 3
-const REMOTE = 4
-const PREFERENCES = 5
-const SHARING = 6
-const FINISH = 7
-
 interface OnboardingProps {
   kernel: Kernel
   account: AccountUser | null
   serverConnected: boolean
+  /** The stored relay choice, which this guide may change on its server step. */
+  serverInfo: ServerView
   engines: EngineStatus[]
   model: ModelState | null
   /** The operator's current answer about anonymous session sharing. */
@@ -75,27 +98,27 @@ interface OnboardingProps {
 }
 
 /**
- * The first-run guide: eight steps, full window, no sidebar.
+ * The first-run guide: a server question, then everything local and, on the
+ * official server, the account.
  *
- * It cannot be skipped — the account is what makes the phone side work, so the
- * login step will not let the window past until it has one. The two deliberate
- * ways out are 退出应用 on the login step (this guide is not for you right now)
- * and 稍后再下载 on the model step (1 GB is not a decision to force).
+ * The list of steps is not fixed: a self-hosted install skips 登录 and 共享会话数据
+ * because its relay runs neither service. Progress and the footer's next/back
+ * buttons walk the visible list, so "第 3 步 / 共 7 步" counts what this person
+ * will actually see.
  *
- * The sharing step is the one place this guide asks for something that is not
- * needed to use the product. It arrives pre-ticked, because that is the
- * operator's product decision; the copy says exactly what leaves the machine and
- * the settings page can stop it at any time.
+ * The official flow is unchanged: the account is what makes the phone side work,
+ * so on that path the login step will not let the window past without one.
  *
- * State lives where it is used: the account comes down from the window, the
- * engines from the snapshot, a download's progress from the kernel's events, and
- * the three shell switches from IPC — each step reads the source that owns it
- * rather than copying it here.
+ * State lives where it is used: the server choice and the verification are this
+ * component's (the guide is the only place that asks before saving), the account
+ * comes down from the window, the engines from the snapshot, a download's
+ * progress from the kernel's events, and the three shell switches from IPC.
  */
 export function Onboarding({
   kernel,
   account,
   serverConnected,
+  serverInfo,
   engines,
   model,
   dataset,
@@ -110,7 +133,18 @@ export function Onboarding({
   onRefreshState,
   onFinished,
 }: OnboardingProps) {
-  const [step, setStep] = useState(WELCOME)
+  const [step, setStep] = useState<StepId>('welcome')
+  const [server, setServer] = useState<ServerPrefs>(() => ({
+    mode: serverInfo.mode,
+    origin: serverInfo.origin,
+    pin: '',
+  }))
+  const [probe, setProbe] = useState<ServerProbeResult | null>(null)
+  const [probing, setProbing] = useState(false)
+  const [probeError, setProbeError] = useState<string | null>(null)
+  // Which origin+PIN pair a successful check was made with. Editing either field
+  // changes the key, so a stale "verified" cannot let a different server through.
+  const [verifiedFor, setVerifiedFor] = useState<string | null>(null)
   const [selected, setSelected] = useState<Set<EngineId>>(
     () => new Set(engines.filter((engine) => engine.configured).map((engine) => engine.engine)),
   )
@@ -164,9 +198,66 @@ export function Onboarding({
     })
   }
 
+  // What this person actually walks. A hidden step can never be the current one:
+  // the mode changes on the server step, before either hidden step is reachable.
+  const visible = STEP_ORDER.filter((id) =>
+    server.mode === 'selfHosted' ? !SELF_HOSTED_HIDDEN.includes(id) : true,
+  )
+  const place = Math.max(visible.indexOf(step), 0)
+
+  function neighbours(from: StepId) {
+    const at = Math.max(visible.indexOf(from), 0)
+    return {
+      next: visible[Math.min(at + 1, visible.length - 1)] ?? 'finish',
+      previous: visible[Math.max(at - 1, 0)] ?? 'welcome',
+    }
+  }
+
+  const verificationKey = `${server.mode}|${server.origin.trim()}|${server.pin.trim()}`
+  const serverVerified = server.mode === 'official' || verifiedFor === verificationKey
+
+  function chooseMode(mode: ServerPrefs['mode']) {
+    setServer((current) => ({ ...current, mode }))
+    forgetVerification()
+  }
+
+  function changeOrigin(origin: string) {
+    setServer((current) => ({ ...current, origin }))
+    forgetVerification()
+  }
+
+  function changePin(pin: string) {
+    setServer((current) => ({ ...current, pin }))
+    forgetVerification()
+  }
+
+  function forgetVerification() {
+    setProbe(null)
+    setProbeError(null)
+    setVerifiedFor(null)
+  }
+
+  async function verify() {
+    setProbing(true)
+    forgetVerification()
+    try {
+      const result = await kernel.send<ServerProbeResult>({
+        op: 'server_probe',
+        origin: server.origin,
+        pin: server.pin.trim(),
+      })
+      setProbe(result)
+      setVerifiedFor(result.ok ? verificationKey : null)
+    } catch (failure) {
+      setProbeError(failureMessage(failure, '验证失败'))
+    } finally {
+      setProbing(false)
+    }
+  }
+
   function back() {
     setError(null)
-    setStep((current) => Math.max(current - 1, WELCOME))
+    setStep(neighbours(step).previous)
   }
 
   function forward() {
@@ -175,7 +266,30 @@ export function Onboarding({
   }
 
   async function moveForward() {
-    if (step === CHOOSE) {
+    if (step === 'server') {
+      setBusy(true)
+      try {
+        await kernel.send({
+          op: 'set_server_prefs',
+          mode: server.mode,
+          origin: server.origin,
+          // An untouched PIN field must not erase the stored one; a typed value
+          // is the new PIN. Clearing it happens by switching servers and typing
+          // a new one, which is the only case where an empty field is meaningful.
+          ...(server.pin.trim() === '' ? {} : { pin: server.pin.trim() }),
+        })
+        // The tunnel is rebuilt by the kernel; the snapshot carries the new
+        // server view the rest of the guide and the window draw from.
+        await onRefreshState().catch(() => undefined)
+        setStep(neighbours('server').next)
+      } catch (failure) {
+        setError(failureMessage(failure, '没有记住服务器设置'))
+      } finally {
+        setBusy(false)
+      }
+      return
+    }
+    if (step === 'choose') {
       setBusy(true)
       try {
         for (const { engine } of AGENTS) {
@@ -187,7 +301,7 @@ export function Onboarding({
         // A failed reread is not a reason to hold the guide: the window polls,
         // and the settings it just wrote are already on disk.
         await onRefreshState().catch(() => undefined)
-        setStep(MODEL)
+        setStep(neighbours('choose').next)
       } catch (failure) {
         setError(failureMessage(failure, '没有记住所选的 Agent'))
       } finally {
@@ -195,11 +309,11 @@ export function Onboarding({
       }
       return
     }
-    if (step === REMOTE) {
+    if (step === 'remote') {
       // Nothing was read means nothing is remembered: it would replace whatever
       // the machine already had with defaults.
       if (remote === null) {
-        setStep(PREFERENCES)
+        setStep(neighbours('remote').next)
         return
       }
       setBusy(true)
@@ -213,7 +327,7 @@ export function Onboarding({
           workspaces: remote.workspaces,
           blocked: remote.blocked,
         })
-        setStep(PREFERENCES)
+        setStep(neighbours('remote').next)
       } catch (failure) {
         setError(failureMessage(failure, '没有记住远程 Agent 的选择'))
       } finally {
@@ -221,11 +335,11 @@ export function Onboarding({
       }
       return
     }
-    if (step === SHARING) {
+    if (step === 'sharing') {
       setBusy(true)
       try {
         await kernel.send({ op: 'dataset_share', enabled: share })
-        setStep(FINISH)
+        setStep(neighbours('sharing').next)
       } catch (failure) {
         setError(failureMessage(failure, '没有记住共享选择'))
       } finally {
@@ -233,7 +347,7 @@ export function Onboarding({
       }
       return
     }
-    if (step === FINISH) {
+    if (step === 'finish') {
       setBusy(true)
       try {
         await kernel.send({ op: 'onboarding_complete' })
@@ -245,16 +359,18 @@ export function Onboarding({
       }
       return
     }
-    setStep(step + 1)
+    setStep(neighbours(step).next)
   }
 
   const anyAvailable = engines.some((candidate) => candidate.available)
   const canAdvance =
-    step === LOGIN
-      ? account !== null
-      : step === CHOOSE
-        ? selected.size > 0 || !anyAvailable
-        : true
+    step === 'server'
+      ? serverVerified
+      : step === 'login'
+        ? account !== null
+        : step === 'choose'
+          ? selected.size > 0 || !anyAvailable
+          : true
 
   return (
     <div className="flex h-full w-full flex-col bg-bg text-fg">
@@ -272,23 +388,38 @@ export function Onboarding({
       <div className="flex min-h-0 flex-1 justify-center overflow-y-auto px-8 pb-8">
         <div className="flex min-h-full w-full max-w-[560px] flex-col pt-2">
           <div className="flex items-center gap-1.5">
-            {STEP_TITLES.map((title, index) => (
+            {visible.map((id, index) => (
               <span
-                key={title}
+                key={id}
                 className={cn(
                   'h-2 flex-1 mz-border',
-                  index <= step ? 'bg-ink' : 'bg-transparent',
+                  index <= place ? 'bg-ink' : 'bg-transparent',
                 )}
               />
             ))}
           </div>
           <p className="mt-2.5 text-[12px] text-muted">
-            第 {step + 1} 步 / 共 {STEP_TITLES.length} 步 · {STEP_TITLES[step] ?? ''}
+            第 {place + 1} 步 / 共 {visible.length} 步 · {STEP_TITLES[step] ?? ''}
           </p>
 
           <div className="mt-8 flex-1">
-            {step === WELCOME ? <WelcomeStep /> : null}
-            {step === LOGIN ? (
+            {step === 'welcome' ? <WelcomeStep /> : null}
+            {step === 'server' ? (
+              <ServerStep
+                mode={server.mode}
+                origin={server.origin}
+                pin={server.pin}
+                hasPin={serverInfo.hasPin}
+                probing={probing}
+                probe={probe}
+                probeError={probeError}
+                onMode={chooseMode}
+                onOrigin={changeOrigin}
+                onPin={changePin}
+                onVerify={() => void verify()}
+              />
+            ) : null}
+            {step === 'login' ? (
               <LoginStep
                 kernel={kernel}
                 account={account}
@@ -302,7 +433,7 @@ export function Onboarding({
                 onAppleExchange={onAppleExchange}
               />
             ) : null}
-            {step === CHOOSE ? (
+            {step === 'choose' ? (
               <AgentStep
                 kernel={kernel}
                 engines={engines}
@@ -311,18 +442,19 @@ export function Onboarding({
                 onRefreshState={onRefreshState}
               />
             ) : null}
-            {step === MODEL ? (
+            {step === 'model' ? (
               <ModelStep
                 kernel={kernel}
                 model={model}
                 onLater={() => {
                   setError(null)
-                  setStep(REMOTE)
+                  setStep(neighbours('model').next)
                 }}
               />
             ) : null}
-            {step === REMOTE ? (
+            {step === 'remote' ? (
               <RemoteStep
+                selfHosted={server.mode === 'selfHosted'}
                 prefs={remote}
                 loading={remoteLoading}
                 error={remoteError}
@@ -330,13 +462,14 @@ export function Onboarding({
                 onRetry={() => void retryRemote()}
               />
             ) : null}
-            {step === PREFERENCES ? <PreferenceStep shell={shell} platform={platform} /> : null}
-            {step === SHARING ? (
+            {step === 'preferences' ? <PreferenceStep shell={shell} platform={platform} /> : null}
+            {step === 'sharing' ? (
               <SharingStep kernel={kernel} share={share} onChange={setShare} />
             ) : null}
-            {step === FINISH ? (
+            {step === 'finish' ? (
               <DoneStep
                 account={account}
+                server={serverInfo}
                 engines={engines}
                 selected={selected}
                 model={model}
@@ -353,24 +486,188 @@ export function Onboarding({
           )}
 
           <footer className="mt-8 flex shrink-0 items-center gap-2 mz-divide-t pt-4">
-            <Button variant="ghost" onClick={back} disabled={step === WELCOME || busy}>
+            <Button variant="ghost" onClick={back} disabled={step === 'welcome' || busy}>
               上一步
             </Button>
             <div className="flex-1" />
-            {step === LOGIN && account === null ? (
+            {step === 'server' && server.mode === 'selfHosted' && !serverVerified ? (
+              <span className="text-[12px] text-muted">验证连通性后才能继续</span>
+            ) : null}
+            {step === 'login' && account === null ? (
               <span className="text-[12px] text-muted">登录后才能继续</span>
             ) : null}
-            {step === CHOOSE && selected.size === 0 ? (
+            {step === 'choose' && selected.size === 0 ? (
               <span className="text-[12px] text-muted">至少选一个 Agent</span>
             ) : null}
             <Button variant="primary" size="lg" onClick={forward} disabled={!canAdvance || busy}>
               {busy ? <Spinner /> : null}
-              {step === FINISH ? '开始使用' : '下一步'}
+              {step === 'finish' ? '开始使用' : '下一步'}
             </Button>
           </footer>
         </div>
       </div>
     </div>
+  )
+}
+
+/**
+ * The second question the guide asks: which relay, and — for a self-hosted one —
+ * whether it can be reached.
+ *
+ * The official card is the default and needs no check. The self-hosted card
+ * requires a passing connectivity check before the footer's 下一步 unlocks: a
+ * saved origin that does not answer would leave the person with a tunnel that
+ * never comes up and no explanation on the next screen.
+ */
+function ServerStep({
+  mode,
+  origin,
+  pin,
+  hasPin,
+  probing,
+  probe,
+  probeError,
+  onMode,
+  onOrigin,
+  onPin,
+  onVerify,
+}: {
+  mode: ServerPrefs['mode']
+  origin: string
+  pin: string
+  hasPin: boolean
+  probing: boolean
+  probe: ServerProbeResult | null
+  probeError: string | null
+  onMode: (mode: ServerPrefs['mode']) => void
+  onOrigin: (origin: string) => void
+  onPin: (pin: string) => void
+  onVerify: () => void
+}) {
+  return (
+    <section>
+      <h2 className="text-[24px] leading-8">连接服务器</h2>
+      <p className="mt-1.5 text-[12px] leading-5 text-muted">
+        手机通过一台服务器找到这台电脑。用官方服务器不用设置；有自己的 relay 就选自建，填域名和 PIN。
+      </p>
+
+      <div className="mt-4 grid grid-cols-2 gap-2">
+        <ServerChoice
+          title="官方服务器"
+          detail="dshmizar-1.shirazu-nagisa.com"
+          hint="需要登录账户"
+          selected={mode === 'official'}
+          onClick={() => onMode('official')}
+        />
+        <ServerChoice
+          title="自建服务器"
+          detail="你自己的 relay"
+          hint="无需账户"
+          selected={mode === 'selfHosted'}
+          onClick={() => onMode('selfHosted')}
+        />
+      </div>
+
+      {mode === 'official' ? (
+        <div className="mt-4 mz-border px-4 py-3">
+          <div className="text-[12px] text-fg">官方服务器</div>
+          <p className="mt-0.5 text-[12px] leading-5 text-muted">
+            手机与这台电脑登录同一个账户后就能互相找到；下一步是登录。
+          </p>
+        </div>
+      ) : (
+        <div className="mt-4 mz-border">
+          <div className="flex flex-col gap-2 px-4 py-3">
+            <label className="text-[12px] text-muted" htmlFor="onboarding-origin">
+              服务器域名
+            </label>
+            <input
+              id="onboarding-origin"
+              value={origin}
+              onChange={(event) => onOrigin(event.target.value)}
+              placeholder="relay.example.com"
+              autoCapitalize="off"
+              autoComplete="off"
+              spellCheck={false}
+              className="h-9 mz-border bg-transparent px-3 font-mono text-[12px] text-fg outline-none"
+            />
+            <p className="-mt-0.5 text-[11px] leading-4 text-muted">
+              只填域名或 https://域名；必须使用 https，不能带路径。
+            </p>
+            <label className="mt-2 text-[12px] text-muted" htmlFor="onboarding-pin">
+              服务器 PIN
+            </label>
+            <input
+              id="onboarding-pin"
+              type="password"
+              value={pin}
+              onChange={(event) => onPin(event.target.value)}
+              autoComplete="off"
+              placeholder={hasPin ? '已保存 PIN，留空保持不变' : '服务器没有 PIN 可以留空'}
+              className="h-9 mz-border bg-transparent px-3 font-mono text-[12px] tracking-wider text-fg outline-none"
+            />
+          </div>
+          <div className="mz-divide-t flex items-center justify-between gap-4 px-4 py-2.5">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={onVerify}
+              disabled={probing || origin.trim() === ''}
+            >
+              {probing ? <Spinner /> : null}
+              验证连通性
+            </Button>
+            <ProbeStatus
+              probing={probing}
+              probe={probe}
+              error={probeError}
+            />
+          </div>
+          <p className="mz-divide-t px-4 py-2 text-[12px] leading-5 text-muted">
+            自建服务器：无需登录，也不会启用账户、订阅和匿名数据共享。
+          </p>
+        </div>
+      )}
+    </section>
+  )
+}
+
+/** What the last connectivity check said, in this page's words. */
+function ProbeStatus({
+  probing,
+  probe,
+  error,
+}: {
+  probing: boolean
+  probe: ServerProbeResult | null
+  error: string | null
+}) {
+  if (probing) {
+    return (
+      <span className="flex items-center gap-1.5 text-[12px] text-muted">
+        <Spinner size={12} />
+        正在验证…
+      </span>
+    )
+  }
+  if (error !== null) {
+    return <span className="text-right text-[12px] leading-5 bg-ink px-1.5 text-bg">{error}</span>
+  }
+  if (probe === null) {
+    return <span className="text-right text-[12px] leading-5 text-muted">先验证再继续</span>
+  }
+  if (probe.ok) {
+    return (
+      <span className="flex items-start justify-end gap-1.5 text-right text-[12px] leading-5 text-fg">
+        <CheckIcon size={14} />
+        <span>{probeSuccessCopy(probe)}</span>
+      </span>
+    )
+  }
+  return (
+    <span className="text-right text-[12px] leading-5 bg-ink px-1.5 text-bg">
+      {probeFailureCopy(probe)}
+    </span>
   )
 }
 
@@ -380,12 +677,12 @@ function WelcomeStep() {
       <RingMark size={48} />
       <h1 className="mt-5 text-[24px] font-semibold tracking-tight text-fg">欢迎使用 AGI Mizar</h1>
       <p className="mt-3 text-[12px] leading-6 text-muted">
-        这是一台电脑端宿主：它把本机的 agent 交给你的手机。手机端 DSH Mizar 用同一个账户登录后，
-        就能看到并操控这台电脑，不需要扫码配对。
+        这是一台电脑端宿主：它把本机的 agent 交给你的手机。用官方服务器时，手机端 DSH Mizar
+        登录同一个账户就能看到并操控这台电脑；也可以把它接到你自己的 relay 上。
       </p>
       <p className="mt-2 text-[12px] leading-6 text-muted">
-        接下来依次登录账户、选择要用的 Agent、准备模型，再决定这台电脑以后怎么启动。
-        已经登录的账户、已安装的 Agent 和模型都会原样带过来。
+        接下来先选服务器，再决定用哪些 Agent、准备模型，最后决定这台电脑以后怎么启动。
+        已经保存的账户、已安装的 Agent 和模型都会原样带过来。
       </p>
     </section>
   )
@@ -563,10 +860,10 @@ function LoginStep({
         <div className="mt-4 mz-border px-4 py-3">
           <div className="flex items-center gap-2 text-[12px] text-fg">
             <CheckIcon size={14} />
-            已登录 {account.username}
+            已登录为 {account.username}
           </div>
           <p className="mt-1 text-[12px] leading-5 text-muted">
-            手机端用同一个账户登录后，就能在这台电脑的会话里远程操作。
+            手机端用同一个账户登录后，就能在这台电脑的会话里远程操作。也可以直接点下一步。
           </p>
         </div>
       )}
@@ -976,12 +1273,14 @@ function ModelStep({ kernel, model, onLater }: ModelStepProps) {
  * paid route on with it.
  */
 function RemoteStep({
+  selfHosted,
   prefs,
   loading,
   error,
   onChange,
   onRetry,
 }: {
+  selfHosted: boolean
   prefs: RemotePrefs | null
   loading: boolean
   error: string | null
@@ -992,8 +1291,9 @@ function RemoteStep({
     <section>
       <h2 className="text-[24px] leading-8">远程 Agent</h2>
       <p className="mt-1.5 text-[12px] leading-5 text-muted">
-        同账户的另一台电脑可以把任务交给这台电脑上的 Agent，反过来也可以。这里先决定这台电脑是否接受；
-        之后随时可以在「设置 → 远程Agent」里改。
+        {selfHosted
+          ? '自建服务器模式下，另一台电脑可以把任务交给这台电脑上的 Agent。这里先决定这台电脑是否接受；之后随时可以在「设置 → 远程Agent」里改。'
+          : '同账户的另一台电脑可以把任务交给这台电脑上的 Agent，反过来也可以。这里先决定这台电脑是否接受；之后随时可以在「设置 → 远程Agent」里改。'}
       </p>
 
       {loading ? (
@@ -1025,8 +1325,12 @@ function RemoteStep({
               onChange={(allowLan) => onChange({ ...prefs, allowLan })}
             />
             <RemoteRow
-              label="允许跨网（付费）"
-              hint="通过账户中继；需要付费账户。"
+              label={selfHosted ? '允许跨网（自建服务器）' : '允许跨网（付费）'}
+              hint={
+                selfHosted
+                  ? '通过你自己的 relay 转发；不需要账户。'
+                  : '通过账户中继；需要付费账户。'
+              }
               checked={prefs.allowWan}
               disabled={!prefs.enabled}
               onChange={(allowWan) => onChange({ ...prefs, allowWan })}
@@ -1044,6 +1348,22 @@ function RemoteStep({
           </p>
         </div>
       )}
+
+      {selfHosted ? (
+        <div className="mt-4 mz-border px-4 py-3">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <div className="text-[12px] text-fg">配对另一台电脑</div>
+              <p className="mt-0.5 text-[12px] leading-5 text-muted">
+                自建模式的跨网 peer 配对即将由配对码完成。
+              </p>
+            </div>
+            <Button size="sm" variant="outline" disabled className="shrink-0">
+              即将支持
+            </Button>
+          </div>
+        </div>
+      ) : null}
     </section>
   )
 }
@@ -1163,6 +1483,8 @@ function SharingStep({
 
 interface DoneStepProps {
   account: AccountUser | null
+  /** The relay the guide just kept or chose. */
+  server: ServerView
   engines: EngineStatus[]
   selected: Set<EngineId>
   model: ModelState | null
@@ -1175,6 +1497,7 @@ interface DoneStepProps {
 /** What is in place, so the window does not leave the guide quietly wrong. */
 function DoneStep({
   account,
+  server,
   engines,
   selected,
   model,
@@ -1183,6 +1506,11 @@ function DoneStep({
   sharing,
   remote,
 }: DoneStepProps) {
+  const selfHosted = server.mode === 'selfHosted'
+  const serverText = selfHosted
+    ? `自建 · ${server.origin === '' ? '未填写域名' : server.origin}`
+    : '官方'
+
   const configured = AGENTS.filter(
     ({ engine }) =>
       selected.has(engine) ||
@@ -1226,7 +1554,11 @@ function DoneStep({
         下面这些已经就绪；没准备好的，进主页后也能补。
       </p>
       <div className="mt-4 divide-y divide-ink mz-border">
-        <DoneRow label="登录账户" value={account?.username ?? '未登录'} />
+        <DoneRow label="服务器" value={serverText} />
+        <DoneRow
+          label="登录账户"
+          value={selfHosted ? '自建服务器：无需登录' : (account?.username ?? '未登录')}
+        />
         <DoneRow
           label="Agent"
           value={configured.length === 0 ? '未选择' : configured.map(({ name }) => name).join('、')}
@@ -1234,7 +1566,9 @@ function DoneStep({
         <DoneRow label="模型" value={active === null ? '未下载' : `Mizarllm ${active.version}`} />
         <DoneRow label="偏好" value={preferenceText} />
         <DoneRow label="远程 Agent" value={remoteText} />
-        <DoneRow label="会话数据" value={sharing ? '匿名共享中' : '仅保留在本机'} />
+        {selfHosted ? null : (
+          <DoneRow label="会话数据" value={sharing ? '匿名共享中' : '仅保留在本机'} />
+        )}
       </div>
     </section>
   )
