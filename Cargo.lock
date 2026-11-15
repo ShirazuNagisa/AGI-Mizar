@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "agi-app"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "agi-boot",
  "agi-core",
@@ -70,7 +70,7 @@ dependencies = [
 
 [[package]]
 name = "agi-boot"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "agi-core",
  "agi-engine",
@@ -90,7 +90,7 @@ dependencies = [
 
 [[package]]
 name = "agi-core"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "agi-engine",
  "agi-engine-claude",
@@ -121,7 +121,7 @@ dependencies = [
 
 [[package]]
 name = "agi-daemon"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "agi-boot",
  "agi-core",
@@ -133,7 +133,7 @@ dependencies = [
 
 [[package]]
 name = "agi-engine"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "agi-platform",
  "agi-protocol",
@@ -148,7 +148,7 @@ dependencies = [
 
 [[package]]
 name = "agi-engine-claude"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "agi-engine",
  "agi-platform",
@@ -166,7 +166,7 @@ dependencies = [
 
 [[package]]
 name = "agi-engine-codex"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "agi-engine",
  "agi-platform",
@@ -186,7 +186,7 @@ dependencies = [
 
 [[package]]
 name = "agi-engine-dsh"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "agi-engine",
  "agi-protocol",
@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "agi-hook-shim"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "agi-platform",
  "serde_json",
@@ -210,7 +210,7 @@ dependencies = [
 
 [[package]]
 name = "agi-lan"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "agi-platform",
  "anyhow",
@@ -231,7 +231,7 @@ dependencies = [
 
 [[package]]
 name = "agi-layout"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "agi-protocol",
  "async-trait",
@@ -243,7 +243,7 @@ dependencies = [
 
 [[package]]
 name = "agi-mizar"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "agi-core",
  "agi-engine",
@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "agi-peer"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "agi-platform",
  "agi-protocol",
@@ -295,7 +295,7 @@ dependencies = [
 
 [[package]]
 name = "agi-platform"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "dunce",
  "tempfile",
@@ -306,7 +306,7 @@ dependencies = [
 
 [[package]]
 name = "agi-protocol"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -315,7 +315,7 @@ dependencies = [
 
 [[package]]
 name = "agi-remote"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "agi-platform",
  "anyhow",
