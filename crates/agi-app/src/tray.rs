@@ -59,8 +59,11 @@ pub fn install(app: &AppHandle, window: &WebviewWindow) -> tauri::Result<()> {
 
     // The notification area is drawn small and in colour, so the bundle's own
     // tile is the right mark. A right-click menu is where Windows puts the two
-    // actions the flyout does not carry (show the window, quit); the flag says
-    // whether a left click opens that menu too.
+    // actions the flyout does not carry (show the window, quit). The menu is
+    // the *right* button's here: a left click is the shell's own action
+    // (`left_click`), because leaving it to the platform meant that whenever
+    // that menu did not come up, the page it replaced was suppressed too and
+    // the icon answered nothing at all.
     #[cfg(windows)]
     let builder = TrayIconBuilder::with_id("main")
         .icon(tauri::image::Image::from_bytes(include_bytes!(
@@ -73,7 +76,7 @@ pub fn install(app: &AppHandle, window: &WebviewWindow) -> tauri::Result<()> {
             "quit" => app.exit(0),
             _ => {}
         })
-        .show_menu_on_left_click(shell::tray_menu_only());
+        .show_menu_on_left_click(false);
 
     // Tauri's tray also exists on the Unix desktops, where the panel simply
     // follows the pointer; nothing there needs a menu of its own.
@@ -93,16 +96,15 @@ pub fn install(app: &AppHandle, window: &WebviewWindow) -> tauri::Result<()> {
                 ..
             } = event
             {
-                // On Windows, "left click opens the menu" is the menu's own
-                // job; opening the panel as well would leave two surfaces
-                // fighting for the focus. macOS keeps its one behaviour.
-                #[cfg(windows)]
-                {
-                    if shell::tray_menu_only() {
-                        return;
-                    }
+                // The switch chooses *which* surface the click opens, never
+                // whether one opens. A tray icon that answers with nothing is
+                // the one failure this must not have, so the shell draws the
+                // outcome itself instead of asking the platform to open a menu
+                // on the left button.
+                match left_click(shell::tray_menu_only()) {
+                    TrayClick::Panel => toggle_panel(tray.app_handle()),
+                    TrayClick::Window => show_window(tray.app_handle()),
                 }
-                toggle_panel(tray.app_handle());
             }
         })
         .build(app)?;
@@ -147,9 +149,52 @@ fn tray_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<Wry>> {
         .build()
 }
 
+/// What a left click on the tray icon opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // `Window` is the Windows branch; see `left_click`.
+pub(crate) enum TrayClick {
+    /// The page under the icon: the quick menu with the agents and phones.
+    Panel,
+    /// The window, on whatever it was showing.
+    Window,
+}
+
+/// Which surface a left click opens.
+///
+/// The switch says what it means — on, the quick menu; off, the window (its
+/// own detail text has always promised the window). Windows honoured neither:
+/// it suppressed the page and left the click to the platform's native menu,
+/// which belongs to the right button; when that menu did not come up on a left
+/// click the page was already gone, so the icon answered with nothing. The
+/// click is the shell's action on both desktops now, and the native menu stays
+/// where Windows puts its menus.
+///
+/// macOS has no menu on its status item (the page replaced it), so its click
+/// has only ever been the page; the switch is remembered but chooses nothing
+/// there.
+pub(crate) fn left_click(menu_only: bool) -> TrayClick {
+    #[cfg(windows)]
+    {
+        if menu_only {
+            TrayClick::Panel
+        } else {
+            TrayClick::Window
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = menu_only;
+        TrayClick::Panel
+    }
+}
+
 /// Show the page under the tray icon, or hide it if it is already open.
 pub fn toggle_panel(app: &AppHandle) {
     let Some(panel) = app.get_webview_window(PANEL) else {
+        // No panel in this process (a build without the tray page, or a window
+        // that failed to create): the click must still land somewhere, so the
+        // window is the answer rather than nothing.
+        show_window(app);
         return;
     };
     if panel.is_visible().unwrap_or(false) {
@@ -305,7 +350,34 @@ pub fn show_settings(app: &AppHandle) {
 /// Bring the window back, from the tray or from a second launch.
 pub fn show_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(WINDOW) {
+        // Hidden and minimized are two different states, and a window that was
+        // minimized before it was hidden comes back minimized unless it is
+        // restored first — `show` alone leaves a taskbar button and no window.
+        let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The switch's off state is the window and its on state is the page on
+    /// Windows; neither may be "nothing", which is the bug this replaced.
+    #[cfg(windows)]
+    #[test]
+    fn the_switch_opens_the_page_or_the_window() {
+        assert_eq!(left_click(true), TrayClick::Panel);
+        assert_eq!(left_click(false), TrayClick::Window);
+    }
+
+    /// macOS attaches no menu to its status item; a click has always been the
+    /// page, whatever the (remembered) switch says.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_click_is_the_page_where_there_is_no_native_menu() {
+        assert_eq!(left_click(true), TrayClick::Panel);
+        assert_eq!(left_click(false), TrayClick::Panel);
     }
 }

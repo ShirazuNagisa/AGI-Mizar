@@ -26,7 +26,7 @@ pub struct ShellSettings {
     /// tray-only.
     #[serde(default = "default_true")]
     pub show_dock_icon: bool,
-    /// A click on the tray icon opens the menu instead of the window.
+    /// A click on the tray icon opens the quick menu instead of the window.
     #[serde(default)]
     pub tray_menu_only: bool,
 }
@@ -86,7 +86,7 @@ fn save(settings: &ShellSettings) -> Result<(), String> {
         .map_err(|error| format!("could not move {} into place: {error}", temp.display()))
 }
 
-/// Whether a click on the tray icon should open the menu.
+/// Whether a click on the tray icon should open the quick menu.
 pub fn tray_menu_only() -> bool {
     TRAY_MENU_ONLY.load(Ordering::Relaxed)
 }
@@ -122,9 +122,16 @@ pub fn apply(app: &AppHandle, settings: &ShellSettings) -> Result<(), String> {
     }
 
     // The tray's click behaviour is a builder-time flag, but the tray can be
-    // re-armed while it runs.
+    // re-armed while it runs. On Windows the native menu belongs to the right
+    // button — the left click is the shell's own action (`tray::left_click`) —
+    // and macOS never attached a menu to its status item, so the platform's
+    // menu must not claim a left click: when it did, the click opened nothing.
     if let Some(tray) = app.tray_by_id("main") {
-        let _ = tray.set_show_menu_on_left_click(settings.tray_menu_only);
+        #[cfg(windows)]
+        let on_left_click = false;
+        #[cfg(not(windows))]
+        let on_left_click = settings.tray_menu_only;
+        let _ = tray.set_show_menu_on_left_click(on_left_click);
     }
 
     #[cfg(target_os = "macos")]
