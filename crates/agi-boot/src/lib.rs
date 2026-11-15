@@ -203,6 +203,7 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
         core.load_account(home.join("account.json"));
         core.load_lan_certificate(home.join("lan-certificate.json"));
         core.load_remote(agi_core::remote::default_path());
+        core.load_peers(agi_core::peer::default_path());
         core.set_remote_audit_path(agi_core::remote::default_audit_path());
         dsh.set_usage_cache_path(home.join("usage-dsh.json"));
 

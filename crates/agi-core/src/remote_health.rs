@@ -293,6 +293,17 @@ fn token_item() -> DependencyItem {
 }
 
 fn account_item(core: &Core) -> DependencyItem {
+    // A self-hosted relay runs no account service; listing "not signed in" as a
+    // missing dependency would make a working install look broken.
+    if !core.accounts_enabled() {
+        return item(
+            "account",
+            "账户",
+            "ok",
+            "自建服务器：不需要账户，用配对码互认".to_string(),
+            None,
+        );
+    }
     match core.account_user() {
         Some(user) => item(
             "account",
@@ -350,12 +361,19 @@ fn policy_item(prefs: &crate::RemotePrefs) -> DependencyItem {
 }
 
 fn relay_item(core: &Core, prefs: &crate::RemotePrefs) -> DependencyItem {
+    // On a self-hosted install "跨网" means "through the operator's own relay";
+    // there is no account behind it and no paid tier to mention.
+    let self_hosted = !core.accounts_enabled();
     if !prefs.allow_wan {
         return item(
             "relay",
             "中继连接",
             "unknown",
-            "未开启跨网，不经过中继".to_string(),
+            if self_hosted {
+                "未开启跨网，不经过自建服务器".to_string()
+            } else {
+                "未开启跨网，不经过中继".to_string()
+            },
             None,
         );
     }
@@ -364,7 +382,11 @@ fn relay_item(core: &Core, prefs: &crate::RemotePrefs) -> DependencyItem {
             "relay",
             "中继连接",
             "ok",
-            "已连接到账户中继".to_string(),
+            if self_hosted {
+                "已连接到自建服务器".to_string()
+            } else {
+                "已连接到账户中继".to_string()
+            },
             None,
         )
     } else {
@@ -372,7 +394,11 @@ fn relay_item(core: &Core, prefs: &crate::RemotePrefs) -> DependencyItem {
             "relay",
             "中继连接",
             "missing",
-            "跨网已开启，但中继没有连上".to_string(),
+            if self_hosted {
+                "跨网已开启，但自建服务器没有连上".to_string()
+            } else {
+                "跨网已开启，但中继没有连上".to_string()
+            },
             Some("检查网络后重启，或等它自动重连"),
         )
     }

@@ -506,12 +506,22 @@ impl MizarServer {
     }
 
     /// The tunnel's base URL for this room, when one is known.
+    ///
+    /// A self-hosted install spells the stored origin itself rather than
+    /// trusting whatever the attached client was last dialled with: the tunnel
+    /// can be mid-move after a server switch, and a QR that names the official
+    /// relay would send a phone (or the other computer) to the wrong server.
     fn relay_base_url(&self) -> Option<String> {
         let guard = self
             .relay
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.as_ref()?.phone_base_url()
+        let relay = guard.as_ref()?;
+        pairing_relay_base(
+            &self.core.server_prefs(),
+            relay.base(),
+            relay.current_room().as_deref(),
+        )
     }
 
     /// The `mizar://pair?...` URI for a code, using the address a phone can reach.
@@ -3491,6 +3501,86 @@ async fn hello(
     .into_response()
 }
 
+/// The relay address a pairing URI should carry, if any.
+///
+/// `attached` is the origin the tunnel client is on and `room` what the relay
+/// assigned. Official installs take that answer as given (it is a public relay
+/// both sides know). A self-hosted install uses the origin the operator stored,
+/// so a stale attached client cannot put the official relay in its own QR.
+fn pairing_relay_base(
+    server: &agi_core::ServerPrefs,
+    attached: &str,
+    room: Option<&str>,
+) -> Option<String> {
+    let room = room?;
+    if room.is_empty() {
+        return None;
+    }
+    let base = if server.is_self_hosted() {
+        let origin = server.origin_trimmed();
+        if origin.is_empty() {
+            return None;
+        }
+        origin
+    } else {
+        attached.trim_end_matches('/')
+    };
+    if base.is_empty() {
+        return None;
+    }
+    Some(format!("{base}/r/{room}"))
+}
+
+/// The longest device id a peer may claim in its pairing request.
+const PEER_DEVICE_ID_MAX: usize = 64;
+
+/// The device id a peer's token marker will carry.
+///
+/// Only a request that said `peer: true` reaches this, and it takes the id the
+/// caller typed — sanitised — so the marker is this machine's identity for that
+/// caller rather than something the caller spelled to look like somebody else.
+/// Anything outside `[A-Za-z0-9._-]{1,64}` becomes a fresh random id: the
+/// pairing still succeeds, but nobody can choose to impersonate another peer.
+fn sanitize_peer_device_id(raw: Option<&str>) -> String {
+    let candidate = raw.map(str::trim).unwrap_or_default();
+    let acceptable = !candidate.is_empty()
+        && candidate.len() <= PEER_DEVICE_ID_MAX
+        && candidate.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+        });
+    if acceptable {
+        candidate.to_string()
+    } else {
+        uuid::Uuid::new_v4().to_string()
+    }
+}
+
+/// The marker a self-hosted peer token carries.
+///
+/// `peer:selfhost:<caller device id>:dsh`. The relay's peer identity parser
+/// (`peer_identity_of_marker`) keeps `peer:selfhost:<id>`, which is what confines
+/// the connection to the sessions it created.
+fn self_hosted_peer_marker(device_id: &str) -> String {
+    format!("peer:selfhost:{device_id}:dsh")
+}
+
+/// The `model` a pairing request should record.
+///
+/// A peer's marker is built here from `peer: true` and the caller's `deviceId`;
+/// a `deviceModel` the caller sent is ignored for peers, so a request cannot
+/// hand itself somebody else's marker. Every other request keeps the old
+/// behaviour exactly: whatever `deviceModel` it sent.
+fn pairing_model(
+    peer: bool,
+    device_id: Option<&str>,
+    device_model: Option<&str>,
+) -> Option<String> {
+    if peer {
+        return Some(self_hosted_peer_marker(&sanitize_peer_device_id(device_id)));
+    }
+    device_model.map(str::to_string)
+}
+
 /// `POST /mizar/v1/pair` — a code for a token, once.
 async fn pair(
     State(server): State<Arc<MizarServer>>,
@@ -3560,14 +3650,21 @@ async fn pair(
         return frame_response(ServerFrame::error(None, code, code_message(code)));
     }
 
+    // A computer asking for a peer token says so; anything else is a phone and
+    // keeps the old shape byte for byte. The flag is honoured only on a
+    // self-hosted install: an official relay has a paid gate in front of peer
+    // tokens, and a code typed on the LAN must not be able to bypass it.
+    let peer = body.get("peer").and_then(Value::as_bool).unwrap_or(false)
+        && !server.core.accounts_enabled();
     let name = body
         .get("deviceName")
         .and_then(Value::as_str)
-        .unwrap_or("Phone");
-    let model = body
-        .get("deviceModel")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+        .unwrap_or(if peer { "Computer" } else { "Phone" });
+    let model = pairing_model(
+        peer,
+        body.get("deviceId").and_then(Value::as_str),
+        body.get("deviceModel").and_then(Value::as_str),
+    );
 
     match server.store.issue(name, model) {
         Ok(issued) => {
@@ -3985,6 +4082,29 @@ async fn serve_peer(server: Arc<MizarServer>, peer: String, connection: Peer) {
                 None,
                 ErrorCode::Unauthenticated,
                 "this device is blocked on this computer",
+            ),
+        )
+        .await;
+        return;
+    }
+
+    // A self-hosted relay has no paid gate in front of its rooms, so the host
+    // is where "this computer does not accept remote agents" is enforced for a
+    // peer token. Official installs are untouched: their relay already refuses
+    // an unpermitted peer, and this adds no second opinion.
+    if MizarServer::peer_key(&device).is_some()
+        && !server.core.accounts_enabled()
+        && !server.core.remote_prefs().enabled
+    {
+        tracing::warn!(
+            "mizar: {peer} presented a peer token, but remote agents are off on this computer"
+        );
+        let _ = send(
+            &out,
+            ServerFrame::error(
+                None,
+                ErrorCode::Unauthenticated,
+                "this computer does not accept remote agents; turn it on in Settings → Remote Agent",
             ),
         )
         .await;
@@ -4568,5 +4688,99 @@ mod tests {
         assert_eq!(value["data"]["requestId"], "a1");
         assert_eq!(value["data"]["toolName"], "bash");
         assert_eq!(value["data"]["sessionId"], "dsh:s1");
+    }
+
+    /// A peer's marker is the host's to build, from the flag and the id; a
+    /// `deviceModel` the caller sends is not consulted.
+    #[test]
+    fn a_peer_pairing_builds_its_marker_and_ignores_the_client_model() {
+        assert_eq!(
+            pairing_model(true, Some("caller-1"), Some("phone:acct:1")),
+            Some("peer:selfhost:caller-1:dsh".to_string())
+        );
+        // No id at all still pairs, under a fresh random one.
+        let marker = pairing_model(true, None, Some("iPhone17,1")).unwrap();
+        let id = marker
+            .strip_prefix("peer:selfhost:")
+            .and_then(|rest| rest.strip_suffix(":dsh"))
+            .unwrap();
+        assert_eq!(id.len(), 36, "a UUID, not a client-chosen marker: {marker}");
+
+        // An id outside the allowed alphabet is replaced, not escaped: a caller
+        // must not be able to spell a marker that reads as another peer.
+        let marker = pairing_model(true, Some("bad id:/x"), None).unwrap();
+        assert!(marker.starts_with("peer:selfhost:"));
+        assert!(marker.ends_with(":dsh"));
+        assert!(!marker.contains("bad id"));
+
+        assert_eq!(sanitize_peer_device_id(Some("A.b_c-1")), "A.b_c-1");
+        assert_eq!(sanitize_peer_device_id(Some("  spaced  ")), "spaced");
+        assert_eq!(sanitize_peer_device_id(Some("two words")).len(), 36);
+        assert_eq!(sanitize_peer_device_id(Some("")).len(), 36);
+        assert_eq!(sanitize_peer_device_id(Some(&"x".repeat(65))).len(), 36);
+        assert_eq!(sanitize_peer_device_id(Some(&"x".repeat(64))).len(), 64);
+    }
+
+    /// The phone route is byte-for-byte what it was: the caller's model is
+    /// stored, or nothing is.
+    #[test]
+    fn a_phone_pairing_keeps_the_model_it_sent() {
+        assert_eq!(
+            pairing_model(false, Some("caller-1"), Some("iPhone17,1")),
+            Some("iPhone17,1".to_string())
+        );
+        assert_eq!(pairing_model(false, Some("caller-1"), None), None);
+        assert_eq!(pairing_model(false, None, Some("")), Some(String::new()));
+    }
+
+    /// The QR a self-hosted install draws must name its own relay, not the
+    /// public one the tunnel client may still be attached to.
+    #[test]
+    fn a_self_hosted_pairing_uri_names_the_stored_origin() {
+        let self_hosted = agi_core::ServerPrefs {
+            mode: "selfHosted".to_string(),
+            origin: "https://relay.example.com".to_string(),
+            pin: String::new(),
+        };
+        assert_eq!(
+            pairing_relay_base(
+                &self_hosted,
+                "https://dshmizar.shirazu-nagisa.com",
+                Some("ROOM")
+            ),
+            Some("https://relay.example.com/r/ROOM".to_string())
+        );
+        // No room yet is no relay half: a URL a phone cannot dial is worse than
+        // the LAN-only URI the card already falls back to.
+        assert_eq!(
+            pairing_relay_base(&self_hosted, "https://relay.example.com", None),
+            None
+        );
+        assert_eq!(
+            pairing_relay_base(&self_hosted, "https://relay.example.com", Some("")),
+            None
+        );
+        // A self-hosted choice with no origin never falls back to the official
+        // relay, even while a tunnel to it is still attached.
+        let unset = agi_core::ServerPrefs {
+            mode: "selfHosted".to_string(),
+            origin: String::new(),
+            pin: String::new(),
+        };
+        assert_eq!(
+            pairing_relay_base(&unset, "https://dshmizar.shirazu-nagisa.com", Some("ROOM")),
+            None
+        );
+
+        // Official installs keep taking the attached relay as the answer.
+        let official = agi_core::ServerPrefs::default();
+        assert_eq!(
+            pairing_relay_base(
+                &official,
+                "https://dshmizar.shirazu-nagisa.com/",
+                Some("ROOM")
+            ),
+            Some("https://dshmizar.shirazu-nagisa.com/r/ROOM".to_string())
+        );
     }
 }

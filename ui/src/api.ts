@@ -90,6 +90,66 @@ export interface ServerProbeResult {
   message: string | null
 }
 
+/** One computer the operator's own relay lists as online. */
+export interface SelfHostDesktop {
+  /** The room to pair through, `/r/<room>`. */
+  room: string
+  /** The computer's stable id, when it sent one; empty without an account. */
+  deviceId: string
+  name: string
+  /** `macos`, `windows`, `linux` or `unknown`. */
+  platform: string
+  /** Epoch milliseconds when its tunnel attached. */
+  onlineSince: number
+}
+
+/** The answer to the self-hosted computer list. */
+export interface SelfHostDesktopsResult {
+  desktops: SelfHostDesktop[]
+  /**
+   * Why the list could not be read: `NO_SERVER`, `UNREACHABLE`,
+   * `PIN_REQUIRED`, `PIN_INVALID`, `RATE_LIMITED`, `BAD_ANSWER` or
+   * `SERVER_ERROR`.
+   */
+  error: ApiError | null
+}
+
+/** A computer this one paired with on a self-hosted relay. Never its token. */
+export interface RemotePeerView {
+  /** The host-issued device id; also the window's id. */
+  id: string
+  /** The remote computer's name. */
+  name: string
+  /** The relay origin the token belongs to. */
+  origin: string
+  /** The remote computer's room. */
+  room: string
+  /** This machine's device id, as the host recorded it. */
+  deviceId: string
+  /** Epoch milliseconds when the pairing was stored. */
+  pairedAt: number
+}
+
+/** One entry of `remote_peers` in self-hosted mode. */
+export interface RemotePeerRow {
+  /** Same as `deviceId`; kept because the official rows only have `deviceId`. */
+  id?: string
+  deviceId: string
+  name: string
+  origin?: string
+  room?: string | null
+  online: boolean
+  /** `selfhost` on this server; `wan` / `lan` on the official one. */
+  route?: string
+  routes?: string[]
+}
+
+/** The two shapes `remote_peers` answers with. */
+export interface RemotePeersResult {
+  thisDeviceId: string | null
+  peers: RemotePeerRow[]
+}
+
 /** One model on disk. */
 export interface InstalledModel {
   id: string
@@ -475,6 +535,9 @@ export type Command =
   | { op: 'server_prefs' }
   | { op: 'set_server_prefs'; mode: ServerMode; origin: string; pin?: string }
   | { op: 'server_probe'; origin: string; pin?: string }
+  | { op: 'selfhost_desktops' }
+  | { op: 'peer_pair'; room: string; code: string }
+  | { op: 'peer_forget'; id: string }
   | { op: 'account' }
   | { op: 'account_login'; identifier: string; password: string }
   | { op: 'account_logout' }
@@ -489,6 +552,7 @@ export type Command =
   | { op: 'lan_certificate' }
   | { op: 'remote_target_settings' }
   | { op: 'set_remote_target_settings'; enabled: boolean; allow_lan: boolean; allow_wan: boolean; allow_all_workspaces: boolean; workspaces: string[]; blocked: string[] }
+  | { op: 'remote_peers' }
   | { op: 'remote_audit' }
   | { op: 'remote_health'; repair?: boolean }
   | { op: 'remote_logs' }

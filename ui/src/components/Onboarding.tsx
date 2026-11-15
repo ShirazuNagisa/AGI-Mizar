@@ -7,6 +7,7 @@ import type {
   Kernel,
   ModelCheck,
   ModelState,
+  PairingView,
   RemotePrefs,
   ServerPrefs,
   ServerProbeResult,
@@ -454,6 +455,7 @@ export function Onboarding({
             ) : null}
             {step === 'remote' ? (
               <RemoteStep
+                kernel={kernel}
                 selfHosted={server.mode === 'selfHosted'}
                 prefs={remote}
                 loading={remoteLoading}
@@ -1273,6 +1275,7 @@ function ModelStep({ kernel, model, onLater }: ModelStepProps) {
  * paid route on with it.
  */
 function RemoteStep({
+  kernel,
   selfHosted,
   prefs,
   loading,
@@ -1280,6 +1283,7 @@ function RemoteStep({
   onChange,
   onRetry,
 }: {
+  kernel: Kernel
   selfHosted: boolean
   prefs: RemotePrefs | null
   loading: boolean
@@ -1287,6 +1291,41 @@ function RemoteStep({
   onChange: (next: RemotePrefs) => void
   onRetry: () => void
 }) {
+  // The guide's entry into pairing is deliberately one code, not the whole
+  // settings surface: a person setting up two machines is told where to type it
+  // now, and the list of paired computers stays in the settings page.
+  const [pairing, setPairing] = useState<PairingView | null>(null)
+  const [pairingError, setPairingError] = useState<string | null>(null)
+  const [pairingBusy, setPairingBusy] = useState(false)
+
+  useEffect(() => {
+    if (!selfHosted) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const next = await kernel.send<PairingView>({ op: 'pairing', refresh: false })
+        if (!cancelled) setPairing(next)
+      } catch (failure) {
+        if (!cancelled) setPairingError(failureMessage(failure, '没有拿到本机的配对码'))
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [kernel, selfHosted])
+
+  async function refreshPairing() {
+    setPairingBusy(true)
+    setPairingError(null)
+    try {
+      setPairing(await kernel.send<PairingView>({ op: 'pairing', refresh: true }))
+    } catch (failure) {
+      setPairingError(failureMessage(failure, '没有换到新的配对码'))
+    } finally {
+      setPairingBusy(false)
+    }
+  }
+
   return (
     <section>
       <h2 className="text-[24px] leading-8">远程 Agent</h2>
@@ -1351,17 +1390,31 @@ function RemoteStep({
 
       {selfHosted ? (
         <div className="mt-4 mz-border px-4 py-3">
-          <div className="flex items-start justify-between gap-4">
-            <div className="min-w-0">
-              <div className="text-[12px] text-fg">配对另一台电脑</div>
-              <p className="mt-0.5 text-[12px] leading-5 text-muted">
-                自建模式的跨网 peer 配对即将由配对码完成。
-              </p>
-            </div>
-            <Button size="sm" variant="outline" disabled className="shrink-0">
-              即将支持
+          <div className="text-[12px] text-fg">这台电脑的配对码</div>
+          <p className="mt-0.5 text-[12px] leading-5 text-muted">
+            在另一台电脑上打开「设置 → 远程 Agent → 配对另一台电脑」，选中这台电脑，再输入下面的码。
+            已配对的电脑和完整的配对入口都在那个页面里，这里只把两边的第一句话对上。
+          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-3">
+            <span className="selectable font-mono text-[20px] leading-8 tracking-[3px] text-fg">
+              {pairing?.code ?? '—'}
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void refreshPairing()}
+              disabled={pairingBusy}
+            >
+              {pairingBusy ? <Spinner /> : null}
+              {pairingBusy ? '正在生成…' : '换一个'}
             </Button>
           </div>
+          {pairingError === null ? null : (
+            <p className="mt-1 text-[11px] leading-5 text-muted">{pairingError}</p>
+          )}
+          <p className="mt-1 text-[11px] leading-5 text-muted">
+            打开上面的总开关和「允许跨网（自建服务器）」后，另一台电脑才能连进来。配对码只能用一次。
+          </p>
         </div>
       ) : null}
     </section>

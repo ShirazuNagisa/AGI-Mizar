@@ -375,3 +375,118 @@ async fn the_tunnel_moves_only_to_the_configured_self_hosted_origin() {
     assert_eq!(answer["result"]["url"], "https://127.0.0.1:1");
     assert_eq!(answer["result"]["room"], Value::Null);
 }
+
+/// A self-hosted install turns a peer pairing request into a marker of its own
+/// making, and refuses the resulting token until the operator allows remote
+/// agents. Kills the two halves that would otherwise be silent: a `/pair` that
+/// trusts the caller's `deviceModel`, and a relay-less install with no gate at
+/// all.
+#[tokio::test]
+async fn a_self_hosted_peer_pairs_with_a_marker_and_is_gated_by_the_remote_switch() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = DeviceStore::open(dir.path().join("devices.json"), "test-host").unwrap();
+    let core = Core::new(Vec::new());
+    core.start().await;
+    core.set_server_prefs(agi_core::ServerPrefs {
+        mode: "selfHosted".to_string(),
+        origin: "https://127.0.0.1:1".to_string(),
+        pin: String::new(),
+    })
+    .unwrap();
+    let server = MizarServer::new(Arc::clone(&core), Arc::clone(&store), "/tmp/dsh-home");
+    server.bind(0).await.unwrap();
+    let code = server.issue_code();
+
+    let (status, body) = http(
+        server.port(),
+        "POST",
+        "/mizar/v1/pair",
+        &json!({
+            "code": code.display,
+            "deviceName": "Other Mac",
+            "deviceId": "caller-1",
+            // A caller trying to choose its own marker: the host must ignore it.
+            "deviceModel": "peer:acct-9:somebody-else:dsh",
+            "peer": true,
+            "protocolVersion": 1,
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let value: Value = serde_json::from_str(&body).unwrap();
+    let token = value["deviceToken"].as_str().unwrap().to_string();
+    // The response id is the host's record id, not the caller's id.
+    assert_ne!(value["deviceId"], "caller-1");
+    let device_id = value["deviceId"].as_str().unwrap().to_string();
+
+    let issued = store
+        .devices()
+        .into_iter()
+        .find(|device| device.id == device_id)
+        .expect("the paired device is in the roster");
+    assert_eq!(issued.name, "Other Mac");
+    assert_eq!(
+        issued.model.as_deref(),
+        Some("peer:selfhost:caller-1:dsh"),
+        "the host built the marker from the flag and the caller id"
+    );
+
+    // Remote agents are off by default on a fresh kernel: the token is refused.
+    let (_, refused) = connect(server.port(), &token).await;
+    assert_eq!(refused["type"], "error");
+    assert_eq!(refused["code"], "UNAUTHENTICATED");
+    assert!(
+        refused["message"]
+            .as_str()
+            .unwrap()
+            .contains("remote agents"),
+        "{refused}"
+    );
+
+    // The same token is welcome once the operator turns the feature on.
+    core.set_remote_prefs(agi_core::RemotePrefs {
+        enabled: true,
+        allow_lan: false,
+        allow_wan: true,
+        allow_all_workspaces: true,
+        workspaces: Vec::new(),
+        blocked: Vec::new(),
+    });
+    let (_socket, welcome) = connect(server.port(), &token).await;
+    assert_eq!(welcome["type"], "welcome");
+    assert_eq!(welcome["hostName"], "test-host");
+}
+
+/// The official route is unchanged: the same request is a phone, and its
+/// `deviceModel` is stored as sent.
+#[tokio::test]
+async fn an_official_install_ignores_the_peer_flag() {
+    let (server, store, _dir) = start().await;
+    let code = server.issue_code();
+
+    let (status, body) = http(
+        server.port(),
+        "POST",
+        "/mizar/v1/pair",
+        &json!({
+            "code": code.display,
+            "deviceName": "iPhone 17",
+            "deviceId": "caller-1",
+            "deviceModel": "iPhone17,1",
+            "peer": true,
+            "protocolVersion": 1,
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let value: Value = serde_json::from_str(&body).unwrap();
+    assert!(value["deviceToken"].as_str().unwrap().starts_with("mz_"));
+    let model = store
+        .devices()
+        .into_iter()
+        .find_map(|device| device.model)
+        .expect("a model was stored");
+    assert_eq!(model, "iPhone17,1");
+}

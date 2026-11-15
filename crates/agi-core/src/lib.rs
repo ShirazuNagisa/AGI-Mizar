@@ -29,6 +29,7 @@ pub mod dataset;
 pub mod dependencies;
 pub mod endpoint;
 pub mod models;
+pub mod peer;
 pub mod plugin;
 pub mod relay_probe;
 pub mod remote;
@@ -44,8 +45,9 @@ use agi_engine::{Engine, EngineError, EngineEvent};
 use agi_layout::model::{Backend, LabelMap, ModelManifest};
 use agi_layout::{facts_from_turn, Item, JournalEntry, Layout, LayoutService, Live, StateMachine};
 use agi_protocol::api::{
-    ApiEvent, Command, CommandResponse, DshPluginView, EngineStatus, OnboardingView, ServerView,
-    StateSnapshot, UsageOverview, DSH_PLUGIN_MIN_VERSION,
+    ApiError, ApiEvent, Command, CommandResponse, DshPluginView, EngineStatus, OnboardingView,
+    RemotePeerView, SelfHostDesktopsView, ServerView, StateSnapshot, UsageOverview,
+    DSH_PLUGIN_MIN_VERSION,
 };
 use agi_protocol::domain::{Interaction, Record, RecordKind, Session, SessionKey};
 use agi_protocol::engine::EngineId;
@@ -167,6 +169,17 @@ impl ServerPrefs {
 
 fn default_server_mode() -> String {
     "official".to_string()
+}
+
+/// One computer this install may delegate to.
+///
+/// The two routes name it differently: the account calls it a device id, the
+/// self-hosted peer list calls it the host-issued peer id. Both are opaque to
+/// the call sites below, which only need to find it and ask whether it is up.
+struct PeerTarget {
+    device_id: String,
+    name: String,
+    online: bool,
 }
 
 /// One LAN peer seen in the last few seconds.
@@ -490,6 +503,8 @@ pub struct Core {
     account: account::AccountService,
     /// Delegations to same-account peers.
     remote: Arc<remote::RemoteManager>,
+    /// The computers this machine paired with on a self-hosted relay.
+    peers: peer::PeerStore,
     /// This machine's LAN keypair, created lazily and kept for the process.
     lan_identity: RwLock<Option<Arc<agi_lan::DeviceIdentity>>>,
     /// The account CA certificate for this LAN identity, after a fetch.
@@ -606,6 +621,7 @@ impl Core {
             preferences_path: RwLock::new(None),
             account: account::AccountService::new(account_base()),
             remote: remote::RemoteManager::new(),
+            peers: peer::PeerStore::new(),
             lan_identity: RwLock::new(None),
             lan_certificate: RwLock::new(None),
             remote_prefs_changed: remote_prefs_changed.clone(),
@@ -871,6 +887,14 @@ impl Core {
     /// Read the delegation records from disk.
     pub fn load_remote(&self, path: PathBuf) {
         self.remote.load(path);
+    }
+
+    /// Read the self-hosted peers this machine paired with.
+    ///
+    /// A missing or corrupt file becomes an empty list: a crashed write must not
+    /// keep the window from opening, and the next pairing rewrites it.
+    pub fn load_peers(&self, path: PathBuf) {
+        self.peers.load(path);
     }
 
     /// Point the delegation audit at its JSONL file.
@@ -2449,10 +2473,313 @@ impl Core {
             .unwrap_or_default()
     }
 
+    /// Whether this install talks to a relay the operator runs.
+    fn self_hosted(&self) -> bool {
+        self.server_prefs().is_self_hosted()
+    }
+
+    /// This machine's own device id, as a peer pairing presents it.
+    ///
+    /// A self-hosted install with no account file still has an id generated at
+    /// launch; a build that never loaded the account file (tests, a daemon)
+    /// gets a fresh one rather than an empty string the target would reject.
+    fn local_device_id(&self) -> String {
+        self.account
+            .device_id()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+    }
+
+    /// One computer this install may delegate to, as both directory kinds
+    /// describe it.
+    fn peer_directory_self_hosted(&self) -> Vec<PeerTarget> {
+        let origin = self.server_prefs().origin_trimmed().to_string();
+        peer::on_origin(self.peers.list(), &origin)
+            .into_iter()
+            .map(|record| PeerTarget {
+                device_id: record.id,
+                name: record.name,
+                online: true,
+            })
+            .collect()
+    }
+
+    /// The computers this install may delegate to, on whichever server it is on.
+    ///
+    /// Official: the account's desktops, with the relay deciding whether each is
+    /// online. Self-hosted: the local peer list for the configured server, every
+    /// one of them online (the relay room is the route, so the connection is
+    /// what proves liveness). The error type is the `(code, message)` the old
+    /// call sites already returned, so their answers stay byte-identical.
+    async fn peer_directory(&self) -> Result<Vec<PeerTarget>, (String, String)> {
+        if self.self_hosted() {
+            return Ok(self.peer_directory_self_hosted());
+        }
+        match self.account.desktops().await {
+            Ok(desktops) => Ok(desktops
+                .into_iter()
+                .map(|desktop| PeerTarget {
+                    device_id: desktop.device_id,
+                    name: desktop.name,
+                    online: desktop.online,
+                })
+                .collect()),
+            Err(error) => Err((error.code, error.message)),
+        }
+    }
+
+    /// The credentials one peer is dialled with.
+    ///
+    /// Official: the relay brokers a peer token for a same-account desktop.
+    /// Self-hosted: the token obtained with the pairing code is the whole
+    /// credential, so `account_session` is empty and the account id is the
+    /// constant the relay does not check. The token only ever travels inside
+    /// [`agi_peer::Credentials`], never in a response or a log line.
+    async fn connect_peer(
+        &self,
+        peer_id: &str,
+        engine: &str,
+    ) -> Result<agi_peer::Credentials, (String, String)> {
+        if self.self_hosted() {
+            let origin = self.server_prefs().origin_trimmed().to_string();
+            let Some(record) = peer::on_origin(self.peers.list(), &origin)
+                .into_iter()
+                .find(|record| record.id == peer_id)
+            else {
+                return Err((
+                    "REMOTE_PEER_UNKNOWN".to_string(),
+                    "that computer is not in this machine's peer list".to_string(),
+                ));
+            };
+            // The marker and the engine were fixed when the code was typed;
+            // `engine` only picks the agent for the official route.
+            let _ = engine;
+            return Ok(peer::credentials(&record, &self.version));
+        }
+        let connection = match self.account.connect(peer_id, engine).await {
+            Ok(connection) => connection,
+            Err(error) => return Err((error.code, error.message)),
+        };
+        Ok(agi_peer::Credentials {
+            base: connection.base,
+            room: connection.room,
+            account_session: connection.account_session,
+            device_id: connection.device_id,
+            account_id: connection.account_id,
+            peer_token: connection.token,
+            app_version: self.version.clone(),
+        })
+    }
+
+    /// The "not a peer of mine" answer, worded for the server in use.
+    fn peer_unknown_response(&self) -> CommandResponse {
+        if self.self_hosted() {
+            CommandResponse::error(
+                "REMOTE_PEER_UNKNOWN",
+                "that computer is not in this machine's peer list",
+            )
+        } else {
+            CommandResponse::error(
+                "REMOTE_PEER_UNKNOWN",
+                "that computer is not on this account",
+            )
+        }
+    }
+
+    /// The "it is not connected" answer, worded for the server in use.
+    fn peer_offline_response(&self) -> CommandResponse {
+        if self.self_hosted() {
+            CommandResponse::error(
+                "REMOTE_PEER_OFFLINE",
+                "that computer is not connected to your server",
+            )
+        } else {
+            CommandResponse::error(
+                "REMOTE_PEER_OFFLINE",
+                "that computer is not connected to the relay",
+            )
+        }
+    }
+
+    /// The computers online on this install's own relay.
+    ///
+    /// The list is a value with an optional error, not a failed command: the
+    /// window draws the reason next to the (empty) list, and the classification
+    /// is what its copy branches on.
+    async fn selfhost_desktops(&self) -> CommandResponse {
+        if !self.self_hosted() {
+            return CommandResponse::error(
+                "NOT_SELF_HOSTED",
+                "this install talks to the official server; its computers come from the account",
+            );
+        }
+        let server = self.server_prefs();
+        let origin = server.origin_trimmed().to_string();
+        if origin.is_empty() {
+            return CommandResponse::ok(SelfHostDesktopsView {
+                desktops: Vec::new(),
+                error: Some(ApiError {
+                    code: "NO_SERVER".to_string(),
+                    message: "this install has no self-hosted server address".to_string(),
+                }),
+            });
+        }
+        match peer::desktops(&origin, &server.pin).await {
+            Ok(desktops) => CommandResponse::ok(SelfHostDesktopsView {
+                desktops,
+                error: None,
+            }),
+            Err(error) => CommandResponse::ok(SelfHostDesktopsView {
+                desktops: Vec::new(),
+                error: Some(ApiError {
+                    code: error.code,
+                    message: error.message,
+                }),
+            }),
+        }
+    }
+
+    /// Pair with one computer on this install's own relay.
+    async fn peer_pair(&self, room: String, code: String) -> CommandResponse {
+        if !self.self_hosted() {
+            return CommandResponse::error(
+                "NOT_SELF_HOSTED",
+                "pairing by code is for a self-hosted server; the official service pairs through the account",
+            );
+        }
+        let origin = self.server_prefs().origin_trimmed().to_string();
+        if origin.is_empty() {
+            return CommandResponse::error(
+                "NO_SERVER",
+                "this install has no self-hosted server address",
+            );
+        }
+        let device_id = self.local_device_id();
+        match peer::pair(
+            &origin,
+            &room,
+            &code,
+            &agi_platform::host_name(),
+            &device_id,
+        )
+        .await
+        {
+            Ok(record) => {
+                // The view is built before the record moves into the store; it
+                // carries no token, so it is safe to hand to the window.
+                let view: RemotePeerView = record.view();
+                match self.peers.upsert(record) {
+                    Ok(()) => CommandResponse::ok(json!({ "peer": view })),
+                    Err(error) => CommandResponse::error(
+                        "PEER_STORE_FAILED",
+                        format!("the pairing worked, but this machine could not store it: {error}"),
+                    ),
+                }
+            }
+            Err(error) => CommandResponse::error(error.code, error.message),
+        }
+    }
+
+    /// The peers list for a self-hosted install, in the shape the official
+    /// desktop list uses (`deviceId`, `name`, `online`, `routes`), plus the
+    /// fields this route adds (`origin`, `route`).
+    fn remote_peers_self_hosted(&self) -> CommandResponse {
+        let origin = self.server_prefs().origin_trimmed().to_string();
+        let peers: Vec<Value> = peer::on_origin(self.peers.list(), &origin)
+            .into_iter()
+            .map(|record| {
+                json!({
+                    "id": record.id,
+                    "deviceId": record.id,
+                    "name": record.name,
+                    "origin": record.origin,
+                    "room": record.room,
+                    "online": true,
+                    "route": "selfhost",
+                    "routes": ["selfhost"],
+                    "model": "",
+                    "platform": "",
+                })
+            })
+            .collect();
+        CommandResponse::ok(json!({
+            "thisDeviceId": self.local_device_id(),
+            "peers": peers,
+        }))
+    }
+
+    /// The official peer list: the account's desktops plus the LAN beacons.
+    ///
+    /// Kept as its own function so the self-hosted branch can answer from the
+    /// local peer file without duplicating (or drifting from) this one.
+    async fn remote_peers_official(&self) -> CommandResponse {
+        match self.account.desktops().await {
+            Ok(desktops) => {
+                let mut peers = Vec::with_capacity(desktops.len());
+                for desktop in desktops
+                    .into_iter()
+                    .filter(|desktop| !desktop.device_id.is_empty())
+                {
+                    let hello = match (&desktop.room, desktop.online) {
+                        (Some(room), true) => self.account.probe(room).await.ok(),
+                        _ => None,
+                    };
+                    let remote = hello
+                        .as_ref()
+                        .and_then(|value| value.get("remote"))
+                        .cloned()
+                        .unwrap_or_else(|| json!({ "enabled": false }));
+                    peers.push(json!({
+                        "deviceId": desktop.device_id,
+                        "name": desktop.name,
+                        "model": desktop.model,
+                        "platform": desktop.platform,
+                        "online": desktop.online,
+                        "room": desktop.room,
+                        "routes": if desktop.online { vec!["wan"] } else { Vec::<&str>::new() },
+                        "remote": remote,
+                    }));
+                }
+                for lan in self.lan_peers() {
+                    let address = format!("{}:{}", lan.address, lan.port);
+                    if let Some(existing) = peers.iter_mut().find(|peer| {
+                        peer.get("deviceId").and_then(Value::as_str) == Some(lan.device_id.as_str())
+                    }) {
+                        existing["routes"] = json!(["wan", "lan"]);
+                        existing["lanAddress"] = json!(address);
+                        continue;
+                    }
+                    peers.push(json!({
+                        "deviceId": lan.device_id,
+                        "name": lan.name,
+                        "model": "",
+                        "platform": "",
+                        "online": true,
+                        "room": Value::Null,
+                        "lanAddress": address,
+                        "routes": ["lan"],
+                        "remote": {
+                            "enabled": true,
+                            "allowLan": true,
+                            "allowWan": false,
+                            "workspaces": [],
+                        },
+                    }));
+                }
+                CommandResponse::ok(json!({
+                    "thisDeviceId": self.account.device_id(),
+                    "peers": peers,
+                }))
+            }
+            Err(error) => CommandResponse::error(error.code, error.message),
+        }
+    }
+
     /// Ask a peer what it permits before the conversation chooses a workspace
     /// and a permission preset.
     async fn remote_options(&self, peer: String) -> CommandResponse {
-        if self.remote_prefs().allow_lan {
+        // A LAN beacon and the certificate behind it are account facts; on a
+        // self-hosted relay every peer goes through the operator's room.
+        if self.accounts_enabled() && self.remote_prefs().allow_lan {
             if let Some(lan) = self
                 .lan_peers()
                 .into_iter()
@@ -2485,37 +2812,22 @@ impl Core {
             }
         }
 
-        let desktops = match self.account.desktops().await {
-            Ok(desktops) => desktops,
-            Err(error) => return CommandResponse::error(error.code, error.message),
+        let directory = match self.peer_directory().await {
+            Ok(directory) => directory,
+            Err((code, message)) => return CommandResponse::error(code, message),
         };
-        let Some(target) = desktops
+        let Some(target) = directory
             .into_iter()
-            .find(|desktop| desktop.device_id == peer)
+            .find(|candidate| candidate.device_id == peer)
         else {
-            return CommandResponse::error(
-                "REMOTE_PEER_UNKNOWN",
-                "that computer is not on this account",
-            );
+            return self.peer_unknown_response();
         };
         if !target.online {
-            return CommandResponse::error(
-                "REMOTE_PEER_OFFLINE",
-                "that computer is not connected to the relay",
-            );
+            return self.peer_offline_response();
         }
-        let connection = match self.account.connect(&peer, "dsh").await {
-            Ok(connection) => connection,
-            Err(error) => return CommandResponse::error(error.code, error.message),
-        };
-        let credentials = agi_peer::Credentials {
-            base: connection.base,
-            room: connection.room,
-            account_session: connection.account_session,
-            device_id: connection.device_id,
-            account_id: connection.account_id,
-            peer_token: connection.token,
-            app_version: self.version.clone(),
+        let credentials = match self.connect_peer(&peer, "dsh").await {
+            Ok(credentials) => credentials,
+            Err((code, message)) => return CommandResponse::error(code, message),
         };
         let client = match agi_peer::PeerClient::connect(credentials).await {
             Ok(client) => client,
@@ -2596,6 +2908,14 @@ impl Core {
                 // The result carries its own `ok`: a failed check is a fact the
                 // guide draws, not an API error the window has to parse.
                 CommandResponse::ok(result)
+            }
+            Command::SelfHostDesktops => self.selfhost_desktops().await,
+            Command::PeerPair { room, code } => self.peer_pair(room, code).await,
+            Command::PeerForget { id } => {
+                // Local only: the target still holds the token until the
+                // operator removes this machine there.
+                let removed = self.peers.remove(&id);
+                CommandResponse::ok(json!({ "removed": removed }))
             }
             Command::Account => {
                 // A reading from the relay is better than a cached one, but a
@@ -2703,67 +3023,13 @@ impl Core {
                 });
                 CommandResponse::ok(self.remote_prefs())
             }
-            Command::RemotePeers => match self.account.desktops().await {
-                Ok(desktops) => {
-                    let mut peers = Vec::with_capacity(desktops.len());
-                    for desktop in desktops
-                        .into_iter()
-                        .filter(|desktop| !desktop.device_id.is_empty())
-                    {
-                        let hello = match (&desktop.room, desktop.online) {
-                            (Some(room), true) => self.account.probe(room).await.ok(),
-                            _ => None,
-                        };
-                        let remote = hello
-                            .as_ref()
-                            .and_then(|value| value.get("remote"))
-                            .cloned()
-                            .unwrap_or_else(|| json!({ "enabled": false }));
-                        peers.push(json!({
-                            "deviceId": desktop.device_id,
-                            "name": desktop.name,
-                            "model": desktop.model,
-                            "platform": desktop.platform,
-                            "online": desktop.online,
-                            "room": desktop.room,
-                            "routes": if desktop.online { vec!["wan"] } else { Vec::<&str>::new() },
-                            "remote": remote,
-                        }));
-                    }
-                    for lan in self.lan_peers() {
-                        let address = format!("{}:{}", lan.address, lan.port);
-                        if let Some(existing) = peers.iter_mut().find(|peer| {
-                            peer.get("deviceId").and_then(Value::as_str)
-                                == Some(lan.device_id.as_str())
-                        }) {
-                            existing["routes"] = json!(["wan", "lan"]);
-                            existing["lanAddress"] = json!(address);
-                            continue;
-                        }
-                        peers.push(json!({
-                            "deviceId": lan.device_id,
-                            "name": lan.name,
-                            "model": "",
-                            "platform": "",
-                            "online": true,
-                            "room": Value::Null,
-                            "lanAddress": address,
-                            "routes": ["lan"],
-                            "remote": {
-                                "enabled": true,
-                                "allowLan": true,
-                                "allowWan": false,
-                                "workspaces": [],
-                            },
-                        }));
-                    }
-                    CommandResponse::ok(json!({
-                        "thisDeviceId": self.account.device_id(),
-                        "peers": peers,
-                    }))
+            Command::RemotePeers => {
+                if self.self_hosted() {
+                    self.remote_peers_self_hosted()
+                } else {
+                    self.remote_peers_official().await
                 }
-                Err(error) => CommandResponse::error(error.code, error.message),
-            },
+            }
             Command::RemoteOptions { peer } => self.remote_options(peer).await,
             Command::RemoteDelegate {
                 peer,
@@ -2775,8 +3041,9 @@ impl Core {
                 prompt,
             } => {
                 // A beacon seen recently is the free LAN route; use it before
-                // asking the relay for a token.
-                if self.remote_prefs().allow_lan {
+                // asking the relay for a token. A self-hosted install has no
+                // account certificate behind it, so every route is the room.
+                if self.accounts_enabled() && self.remote_prefs().allow_lan {
                     if let Some(lan) = self
                         .lan_peers()
                         .into_iter()
@@ -2821,37 +3088,22 @@ impl Core {
                         }
                     }
                 }
-                let desktops = match self.account.desktops().await {
-                    Ok(desktops) => desktops,
-                    Err(error) => return CommandResponse::error(error.code, error.message),
+                let directory = match self.peer_directory().await {
+                    Ok(directory) => directory,
+                    Err((code, message)) => return CommandResponse::error(code, message),
                 };
-                let Some(target) = desktops
+                let Some(target) = directory
                     .into_iter()
-                    .find(|desktop| desktop.device_id == peer)
+                    .find(|candidate| candidate.device_id == peer)
                 else {
-                    return CommandResponse::error(
-                        "REMOTE_PEER_UNKNOWN",
-                        "that computer is not on this account",
-                    );
+                    return self.peer_unknown_response();
                 };
                 if !target.online {
-                    return CommandResponse::error(
-                        "REMOTE_PEER_OFFLINE",
-                        "that computer is not connected to the relay",
-                    );
+                    return self.peer_offline_response();
                 }
-                let connection = match self.account.connect(&peer, "dsh").await {
-                    Ok(connection) => connection,
-                    Err(error) => return CommandResponse::error(error.code, error.message),
-                };
-                let credentials = agi_peer::Credentials {
-                    base: connection.base,
-                    room: connection.room,
-                    account_session: connection.account_session,
-                    device_id: connection.device_id,
-                    account_id: connection.account_id,
-                    peer_token: connection.token,
-                    app_version: self.version.clone(),
+                let credentials = match self.connect_peer(&peer, "dsh").await {
+                    Ok(credentials) => credentials,
+                    Err((code, message)) => return CommandResponse::error(code, message),
                 };
                 let reference = remote::PeerRef {
                     device_id: target.device_id,
@@ -2937,18 +3189,9 @@ impl Core {
                         "a high-risk approval must be answered on the remote computer",
                     );
                 }
-                let connection = match self.account.connect(&record.peer, "dsh").await {
-                    Ok(connection) => connection,
-                    Err(error) => return CommandResponse::error(error.code, error.message),
-                };
-                let credentials = agi_peer::Credentials {
-                    base: connection.base,
-                    room: connection.room,
-                    account_session: connection.account_session,
-                    device_id: connection.device_id,
-                    account_id: connection.account_id,
-                    peer_token: connection.token,
-                    app_version: self.version.clone(),
+                let credentials = match self.connect_peer(&record.peer, "dsh").await {
+                    Ok(credentials) => credentials,
+                    Err((code, message)) => return CommandResponse::error(code, message),
                 };
                 let client = match agi_peer::PeerClient::connect(credentials).await {
                     Ok(client) => client,
@@ -3000,37 +3243,22 @@ impl Core {
                         session,
                     )
                 } else {
-                    let desktops = match self.account.desktops().await {
-                        Ok(desktops) => desktops,
-                        Err(error) => return CommandResponse::error(error.code, error.message),
+                    let directory = match self.peer_directory().await {
+                        Ok(directory) => directory,
+                        Err((code, message)) => return CommandResponse::error(code, message),
                     };
-                    let Some(target) = desktops
+                    let Some(target) = directory
                         .into_iter()
-                        .find(|desktop| desktop.device_id == record.peer)
+                        .find(|candidate| candidate.device_id == record.peer)
                     else {
-                        return CommandResponse::error(
-                            "REMOTE_PEER_UNKNOWN",
-                            "that computer is not on this account",
-                        );
+                        return self.peer_unknown_response();
                     };
                     if !target.online {
-                        return CommandResponse::error(
-                            "REMOTE_PEER_OFFLINE",
-                            "that computer is not connected to the relay",
-                        );
+                        return self.peer_offline_response();
                     }
-                    let connection = match self.account.connect(&record.peer, "dsh").await {
-                        Ok(connection) => connection,
-                        Err(error) => return CommandResponse::error(error.code, error.message),
-                    };
-                    let credentials = agi_peer::Credentials {
-                        base: connection.base,
-                        room: connection.room,
-                        account_session: connection.account_session,
-                        device_id: connection.device_id,
-                        account_id: connection.account_id,
-                        peer_token: connection.token,
-                        app_version: self.version.clone(),
+                    let credentials = match self.connect_peer(&record.peer, "dsh").await {
+                        Ok(credentials) => credentials,
+                        Err((code, message)) => return CommandResponse::error(code, message),
                     };
                     self.remote
                         .start_with_session(reference, credentials, cwd, message, session)
@@ -3654,6 +3882,114 @@ mod tests {
         let again = Core::new(Vec::new());
         again.load_preferences(path);
         assert_eq!(again.remote_prefs(), core.remote_prefs());
+    }
+
+    /// A self-hosted install has no account to list computers from; the peers
+    /// it paired with are the directory, and the token must never appear in the
+    /// answer the window reads.
+    #[tokio::test]
+    async fn a_self_hosted_install_lists_the_peers_it_paired_with() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = Core::new(Vec::new());
+        core.load_preferences(dir.path().join("preferences.json"));
+        core.set_server_prefs(ServerPrefs {
+            mode: "selfHosted".to_string(),
+            origin: "https://relay.example.com".to_string(),
+            pin: String::new(),
+        })
+        .unwrap();
+
+        let peers_path = dir.path().join("peers.json");
+        std::fs::write(
+            &peers_path,
+            serde_json::to_vec(&serde_json::json!([
+                {
+                    "id": "host-issued",
+                    "name": "Studio Mac",
+                    "origin": "https://relay.example.com",
+                    "room": "ROOM00000001",
+                    "deviceId": "this-device",
+                    "token": "mz_secret",
+                    "pairedAt": 1_700_000_000_000i64
+                },
+                {
+                    "id": "elsewhere",
+                    "name": "Other Mac",
+                    "origin": "https://other.example.com",
+                    "room": "ROOM00000002",
+                    "deviceId": "this-device",
+                    "token": "mz_other",
+                    "pairedAt": 1_700_000_000_001i64
+                }
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        core.load_peers(peers_path);
+        assert_eq!(core.peers.list().len(), 2, "both are on disk");
+
+        let answer = core.dispatch(Command::RemotePeers).await;
+        assert!(answer.ok, "the list failed: {:?}", answer.error);
+        let value = answer.value.unwrap();
+        let peers = value["peers"].as_array().unwrap();
+        assert_eq!(peers.len(), 1, "only this server's peer is listed: {value}");
+        assert_eq!(peers[0]["id"], "host-issued");
+        assert_eq!(peers[0]["deviceId"], "host-issued");
+        assert_eq!(peers[0]["name"], "Studio Mac");
+        assert_eq!(peers[0]["origin"], "https://relay.example.com");
+        assert_eq!(peers[0]["online"], true);
+        assert_eq!(peers[0]["route"], "selfhost");
+        assert_eq!(peers[0]["routes"][0], "selfhost");
+        let wire = serde_json::to_string(&value).unwrap();
+        assert!(!wire.contains("mz_secret"), "the token leaked: {wire}");
+        assert!(!wire.contains("mz_other"));
+        assert!(!value["thisDeviceId"].as_str().unwrap().is_empty());
+
+        // An id from another server is not a peer of this one.
+        let unknown = core
+            .dispatch(Command::RemoteOptions {
+                peer: "elsewhere".to_string(),
+            })
+            .await;
+        assert!(!unknown.ok);
+        assert_eq!(unknown.error.unwrap().code, "REMOTE_PEER_UNKNOWN");
+
+        // Forgetting is local and idempotent.
+        let forgotten = core
+            .dispatch(Command::PeerForget {
+                id: "host-issued".to_string(),
+            })
+            .await;
+        assert_eq!(forgotten.value.unwrap()["removed"], true);
+        let again = core
+            .dispatch(Command::PeerForget {
+                id: "host-issued".to_string(),
+            })
+            .await;
+        assert_eq!(again.value.unwrap()["removed"], false);
+        let empty = core.dispatch(Command::RemotePeers).await;
+        assert_eq!(empty.value.unwrap()["peers"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn the_self_hosted_pairing_commands_refuse_an_official_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = Core::new(Vec::new());
+        core.load_preferences(dir.path().join("preferences.json"));
+        core.load_peers(dir.path().join("peers.json"));
+
+        let list = core.dispatch(Command::SelfHostDesktops).await;
+        assert!(!list.ok);
+        assert_eq!(list.error.unwrap().code, "NOT_SELF_HOSTED");
+
+        let pair = core
+            .dispatch(Command::PeerPair {
+                room: "ROOM00000001".to_string(),
+                code: "K7QP-3M2X".to_string(),
+            })
+            .await;
+        assert!(!pair.ok);
+        assert_eq!(pair.error.unwrap().code, "NOT_SELF_HOSTED");
     }
 
     #[test]

@@ -69,6 +69,65 @@ pub struct ServerView {
     pub pin_required: Option<bool>,
 }
 
+/// One computer the operator's own relay lists as online.
+///
+/// The relay derives `room` from the computer's tunnel secret and reads the
+/// rest from the upgrade headers. `deviceId` is empty on a computer that has no
+/// account (the header is only sent when signed in), which is why pairing keys
+/// on the room and the code rather than on this id.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelfHostDesktop {
+    /// The room to pair through, `/r/<room>`.
+    pub room: String,
+    /// The computer's stable id, when it sent one.
+    #[serde(default)]
+    pub device_id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub platform: String,
+    /// Epoch milliseconds when its tunnel attached.
+    #[serde(default)]
+    pub online_since: i64,
+}
+
+/// The answer to the self-hosted desktop list.
+///
+/// A failure is a value rather than a `CommandResponse` error: the window paints
+/// the list and the reason side by side, and "the PIN is wrong" beside an empty
+/// list is more useful than a thrown command.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelfHostDesktopsView {
+    pub desktops: Vec<SelfHostDesktop>,
+    /// `null` when the list was read; the window tests for null, so a missing
+    /// key would read as "an error with no code".
+    #[serde(default)]
+    pub error: Option<ApiError>,
+}
+
+/// A computer this one paired with on a self-hosted relay, without its token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePeerView {
+    /// The host-issued device id of this machine's token; also the window's id.
+    pub id: String,
+    /// The remote computer's name (`hostName` when it paired).
+    #[serde(default)]
+    pub name: String,
+    /// The relay origin the token belongs to.
+    pub origin: String,
+    /// The remote computer's room, `/r/<room>`.
+    pub room: String,
+    /// This machine's device id, as the host recorded it in the token marker.
+    #[serde(default)]
+    pub device_id: String,
+    /// Epoch milliseconds when this record was written.
+    #[serde(default)]
+    pub paired_at: i64,
+}
+
 /// What this install knows about the DSH helper plugin.
 ///
 /// The plugin is a package inside DSH's profile, not a binary this app owns, so
@@ -490,6 +549,19 @@ pub enum Command {
         #[serde(default)]
         pin: Option<String>,
     },
+    /// The computers online on this install's self-hosted relay.
+    ///
+    /// A self-hosted relay runs no account service, so its directory is the
+    /// discovery half; the code the target shows is still the trust half.
+    #[serde(rename = "selfhost_desktops")]
+    SelfHostDesktops,
+    /// Pair with one computer on that relay, using the code it is showing.
+    PeerPair { room: String, code: String },
+    /// Forget one paired computer on this machine.
+    ///
+    /// Local only: the other computer keeps the device token it issued until it
+    /// is removed there, which is why the window says so.
+    PeerForget { id: String },
     /// The account this window is signed in to, and the devices under it.
     Account,
     /// Sign in to the relay's account service.
@@ -652,6 +724,10 @@ impl Command {
     /// before any network call. Keeping the list next to the enum means a new
     /// account-shaped command cannot quietly start dialling the official
     /// service on a server the operator chose themselves.
+    ///
+    /// The `Remote*` commands are deliberately absent: a self-hosted install
+    /// delegates through peer tokens it obtained with a pairing code, so those
+    /// commands route to the local peer list instead of the account service.
     pub fn needs_account(&self) -> bool {
         matches!(
             self,
@@ -666,11 +742,6 @@ impl Command {
                 | Self::AccountAppleAwait { .. }
                 | Self::AccountGithubAwait { .. }
                 | Self::LanCertificate
-                | Self::RemotePeers
-                | Self::RemoteOptions { .. }
-                | Self::RemoteDelegate { .. }
-                | Self::RemoteSend { .. }
-                | Self::RemoteAnswer { .. }
         )
     }
 
@@ -752,7 +823,7 @@ impl CommandResponse {
 }
 
 /// A failure at the API boundary.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiError {
     pub code: String,
     pub message: String,
@@ -889,6 +960,98 @@ mod tests {
         assert!(wire.get("update_available").is_none());
         assert!(wire.get("last_checked").is_none());
         assert_eq!(wire["minimum"], DSH_PLUGIN_MIN_VERSION);
+    }
+
+    /// The self-hosted pairing commands are the window's, and they must not be
+    /// refused on the server they are for: `needs_account` is what would.
+    #[test]
+    fn the_self_hosted_pairing_commands_parse_and_are_window_only() {
+        let list: Command = serde_json::from_value(serde_json::json!({
+            "op": "selfhost_desktops"
+        }))
+        .unwrap();
+        assert!(matches!(list, Command::SelfHostDesktops));
+
+        let pair: Command = serde_json::from_value(serde_json::json!({
+            "op": "peer_pair", "room": "ROOM00000001", "code": "K7QP-3M2X"
+        }))
+        .unwrap();
+        assert!(matches!(
+            pair,
+            Command::PeerPair { ref room, ref code }
+                if room == "ROOM00000001" && code == "K7QP-3M2X"
+        ));
+
+        let forget: Command = serde_json::from_value(serde_json::json!({
+            "op": "peer_forget", "id": "p1"
+        }))
+        .unwrap();
+        assert!(matches!(forget, Command::PeerForget { ref id } if id == "p1"));
+
+        for command in [list, pair, forget] {
+            assert!(
+                !command.is_remote(),
+                "the tool token must not pair computers"
+            );
+            assert!(
+                !command.needs_account(),
+                "pairing is what a self-hosted install has instead of an account"
+            );
+        }
+
+        // The remote commands themselves are no longer account-gated: a
+        // self-hosted install delegates with the token it paired for.
+        assert!(!Command::RemotePeers.needs_account());
+        assert!(!Command::RemoteOptions { peer: "p".into() }.needs_account());
+        assert!(!Command::RemoteDelegate {
+            peer: "p".into(),
+            cwd: None,
+            permission: None,
+            provider: None,
+            model: None,
+            reasoning_effort: None,
+            prompt: "t".into(),
+        }
+        .needs_account());
+        assert!(Command::AccountDesktops.needs_account());
+    }
+
+    #[test]
+    fn the_self_hosted_views_are_camel_case_and_carry_no_token() {
+        let desktops = serde_json::to_value(SelfHostDesktopsView {
+            desktops: vec![SelfHostDesktop {
+                room: "ROOM00000001".to_string(),
+                device_id: String::new(),
+                name: "Studio Mac".to_string(),
+                platform: "macos".to_string(),
+                online_since: 1_700_000_000_000,
+            }],
+            error: Some(ApiError {
+                code: "PIN_INVALID".to_string(),
+                message: "the server PIN is not correct".to_string(),
+            }),
+        })
+        .unwrap();
+        let desktop = &desktops["desktops"][0];
+        for key in ["room", "deviceId", "name", "platform", "onlineSince"] {
+            assert!(desktop.get(key).is_some(), "missing {key} in {desktop}");
+        }
+        assert!(desktop.get("device_id").is_none());
+        assert_eq!(desktops["error"]["code"], "PIN_INVALID");
+
+        let view = serde_json::to_value(RemotePeerView {
+            id: "issued-device".to_string(),
+            name: "Studio Host".to_string(),
+            origin: "https://relay.example.com".to_string(),
+            room: "ROOM00000001".to_string(),
+            device_id: "this-device".to_string(),
+            paired_at: 1,
+        })
+        .unwrap();
+        for key in ["id", "name", "origin", "room", "deviceId", "pairedAt"] {
+            assert!(view.get(key).is_some(), "missing {key} in {view}");
+        }
+        assert!(view.get("token").is_none());
     }
 
     #[test]

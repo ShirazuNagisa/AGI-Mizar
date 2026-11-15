@@ -218,7 +218,9 @@ export function SettingsPage({
             </>
           ) : null}
 
-          {tab === 'remote' ? <RemoteAgentSettings kernel={kernel} /> : null}
+          {tab === 'remote' ? (
+            <RemoteAgentSettings kernel={kernel} selfHosted={selfHosted} />
+          ) : null}
 
           {tab === 'approval' ? (
             <Section title="审批模型">
