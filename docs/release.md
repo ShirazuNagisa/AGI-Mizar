@@ -39,8 +39,8 @@ tag push v*
    ├─ windows      (needs: macos — the draft exists by then) build NSIS,
    │               sign updater artifact, upload .sig to the workflow
    └─ updater-json (needs: macos + windows, ubuntu-latest, contents: write)
-                   download both signatures → resolve asset URLs from the
-                   release's own asset list → write merged latest.json →
+                   download both signatures → build asset URLs from the tag →
+                   write merged latest.json →
                    gh release upload "$GITHUB_REF_NAME" latest.json --clobber
 ```
 
@@ -62,11 +62,17 @@ Notes on the job graph:
 - **`.sig` files are still uploaded as release assets**: the signature text is
   also embedded in `latest.json`, but the standalone files are the provenance
   record, and the merge job reads them from the workflow artifacts.
-- **Draft releases cannot be fetched by tag.** The REST endpoint
-  `GET /releases/tags/<tag>` is a 404 while the release is a draft (tauri-action
-  lists releases for the same reason; `gh release upload` resolves drafts through
-  GraphQL). The merge job therefore lists releases and picks the entry whose
-  `tag_name` is the tag, then uses each asset's `browser_download_url`.
+- **Draft assets do not live at their final URL.** A draft release's assets are
+  reported as `/releases/download/untagged-<hash>/<name>`; publishing does not
+  rewrite those paths. v0.2.0's first `latest.json` was generated that way and
+  every platform URL 404'd, so the file had to be patched and re-uploaded. The
+  merge job therefore never reads the release's asset list: it builds
+  `https://github.com/<repo>/releases/download/<tag>/<normalised-name>` itself
+  (see `normaliseAssetName` in `scripts/updater-json.mjs`).
+- **Draft releases cannot be fetched by tag.** `GET /releases/tags/<tag>` is a
+  404 while the release is a draft, which is why the old pipeline went through
+  the release list in the first place; nothing in the current pipeline needs
+  that lookup.
 
 ## 3. Secrets
 
@@ -167,11 +173,16 @@ Shape (Tauri v2 static JSON; the platform keys are `OS-ARCH`):
 1. downloads the `updater-macos` / `updater-windows` workflow artifacts (each
    holds the `.sig` file and a small `updater-manifest.json` naming the platform
    keys, the local asset name and a glob for the release asset);
-2. dumps the release list with `gh api repos/$GITHUB_REPOSITORY/releases?per_page=100`;
-3. runs the tool with `--release-json` so every URL is the
-   `browser_download_url` of an asset matched by normalised name
-   (`*.app.tar.gz` for macOS, `*-setup.exe` for Windows);
-4. `gh release upload "$GITHUB_REF_NAME" latest.json --clobber`.
+2. runs the tool with `--version`, `--tag`, `--repo` and the manifests only —
+   the tool builds each URL from the tag and normalises the asset name the same
+   way GitHub does (`AGI Mizar…` → `AGI.Mizar…`, `*.app.tar.gz` and
+   `*-setup.exe`);
+3. `gh release upload "$GITHUB_REF_NAME" latest.json --clobber`.
+
+Do **not** pass `--release-json` in CI: the release is a draft, and its asset
+URLs are the temporary `untagged-<hash>` paths that 404 after publishing. If a
+`latest.json` ever does ship those URLs, publish the release, download the file,
+replace the path segment with the tag, delete the asset and upload it again.
 
 ### Locally
 
