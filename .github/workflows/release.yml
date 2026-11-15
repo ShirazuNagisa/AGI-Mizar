@@ -396,9 +396,12 @@ jobs:
 
   # One latest.json for the whole release. tauri-action writes a per-platform
   # file (and the two jobs would overwrite each other's), so both jobs hand
-  # their signature to this job and it resolves each URL from the draft
-  # release's own asset list — GitHub normalises asset names (spaces become
-  # dots), so the URL must be the one the API reports, not one rebuilt by hand.
+  # their signature to this job. The URL is built from the tag, not read from
+  # the draft release: a draft's assets are reported under
+  # /releases/download/untagged-<hash>/, and those URLs 404 once the release is
+  # published (v0.2.0 shipped exactly that way and needed a manual re-upload).
+  # scripts/updater-json.mjs normalises the asset name the same way GitHub does
+  # (spaces and brackets become dots), so the built URL is the real one.
   updater-json:
     name: merged latest.json
     needs: [macos, windows]
@@ -422,22 +425,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # The normal lookup is the tag endpoint, but while the release is a
-          # draft it is a 404 (`/releases/tags/<tag>` only finds published
-          # releases; tauri-action and gh handle this by listing releases /
-          # GraphQL). Fall back to the release list, which does contain drafts
-          # for a token with push access; scripts/updater-json.mjs then picks
-          # the entry whose tag_name is this tag.
-          if ! gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" > release.json 2>/dev/null; then
-            echo "note: the release is still a draft; selecting it from the release list"
-            gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > release.json
-          fi
           node scripts/updater-json.mjs \
             --version "${GITHUB_REF_NAME#v}" \
             --tag "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --out latest.json \
-            --release-json release.json \
             --manifest updater/updater-macos/updater-manifest.json \
             --manifest updater/updater-windows/updater-manifest.json
           cat latest.json
