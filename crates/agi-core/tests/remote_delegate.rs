@@ -271,6 +271,9 @@ async fn a_remote_delegation_runs_through_the_kernel_commands() {
             "done" => {
                 assert_eq!(result["finalText"], "P1-OK");
                 assert_eq!(result["delegation"]["sessionId"], "dsh:test-session");
+                // Auto-archive is on unless somebody says otherwise, and the
+                // archiving happens over the same peer link the turn used.
+                assert_eq!(result["delegation"]["archived"], true);
                 break;
             }
             "failed" | "cancelled" | "interrupted" => {

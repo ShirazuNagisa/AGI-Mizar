@@ -216,6 +216,15 @@ pub struct DependencyReport {
 /// the whole product, and its pieces (the sidecar, the DSH entry and skill, the
 /// scoped tool token, the account, the two routes) have their own owners. Same
 /// item shape so the window can draw both lists the same way.
+/// The default for switches that are on unless somebody turned them off.
+///
+/// Used by `auto_archive`: an install that predates the switch keeps the
+/// behaviour the new build ships with, which is what "on for existing users
+/// too" means on the wire.
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteHealthReport {
@@ -613,6 +622,10 @@ pub enum Command {
         /// When true, every DSH workspace is available; the list is ignored.
         #[serde(default)]
         allow_all_workspaces: bool,
+        /// Whether a delegated subagent session is archived once its task
+        /// settles. Missing from an old window means on.
+        #[serde(default = "default_true")]
+        auto_archive: bool,
         #[serde(default)]
         workspaces: Vec<String>,
         #[serde(default)]
@@ -654,6 +667,32 @@ pub enum Command {
     },
     /// Send another prompt to the same remote session.
     RemoteSend { id: String, message: String },
+    /// What this computer's own DSH can offer a delegated task: whether it is
+    /// connected, its workspaces, permission presets and model catalog.
+    ///
+    /// The local twin of [`Self::RemoteOptions`], for an agent on this computer
+    /// that wants to hand work to the DSH beside it.
+    LocalOptions,
+    /// Start one subagent task on this computer's DSH. Returns immediately with
+    /// its delegation id.
+    LocalDelegate {
+        #[serde(default)]
+        cwd: Option<String>,
+        /// Permission preset to apply to the new local session.
+        #[serde(default)]
+        permission: Option<String>,
+        /// Model route selected from `local_options.models`.
+        #[serde(default)]
+        provider: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+        /// Reasoning level selected from that model's `efforts`.
+        #[serde(default)]
+        reasoning_effort: Option<String>,
+        prompt: String,
+    },
+    /// Send another prompt to the same local subagent session.
+    LocalSend { id: String, message: String },
     /// Where the browser should go to sign in with GitHub.
     AccountGithubStart,
     /// Spend the handoff code GitHub's done page showed.
@@ -761,6 +800,9 @@ impl Command {
                 | Self::RemoteCancel { .. }
                 | Self::RemoteAnswer { .. }
                 | Self::RemoteSend { .. }
+                | Self::LocalOptions
+                | Self::LocalDelegate { .. }
+                | Self::LocalSend { .. }
         )
     }
 }
@@ -1082,6 +1124,24 @@ mod tests {
             message: "more".into(),
         }
         .is_remote());
+        // The local twin is the same token: one sidecar serves both routes, and
+        // a scoped token that only reached other computers would make "call the
+        // DSH beside me" impossible.
+        assert!(Command::LocalOptions.is_remote());
+        assert!(Command::LocalDelegate {
+            cwd: None,
+            permission: None,
+            provider: None,
+            model: None,
+            reasoning_effort: None,
+            prompt: "t".into(),
+        }
+        .is_remote());
+        assert!(Command::LocalSend {
+            id: "d".into(),
+            message: "more".into(),
+        }
+        .is_remote());
         for command in [
             Command::State,
             Command::AccountDesktops,
@@ -1113,6 +1173,46 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(command, Command::RemoteHealth { repair: true }));
+    }
+
+    /// A window that predates the auto-archive switch, and one that turned it
+    /// off: an absent field must mean "on" so an update does not silently
+    /// change nothing but leave subagent sessions piling up.
+    #[test]
+    fn the_auto_archive_switch_defaults_to_on() {
+        let old: Command = serde_json::from_value(serde_json::json!({
+            "op": "set_remote_target_settings",
+            "enabled": true,
+            "allow_lan": true,
+            "allow_wan": false,
+            "workspaces": [],
+            "blocked": []
+        }))
+        .unwrap();
+        assert!(matches!(
+            old,
+            Command::SetRemoteTargetSettings {
+                auto_archive: true,
+                ..
+            }
+        ));
+        let off: Command = serde_json::from_value(serde_json::json!({
+            "op": "set_remote_target_settings",
+            "enabled": true,
+            "allow_lan": true,
+            "allow_wan": false,
+            "auto_archive": false,
+            "workspaces": [],
+            "blocked": []
+        }))
+        .unwrap();
+        assert!(matches!(
+            off,
+            Command::SetRemoteTargetSettings {
+                auto_archive: false,
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -170,20 +170,28 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
                     None => "A remote approval was withdrawn.".to_string(),
                 }
             } else {
+                // The same notice covers both routes; the wording follows the
+                // record so a local subagent's failure is not reported as a
+                // failure on another computer.
+                let subject = if record.route == agi_core::remote::ROUTE_LOCAL {
+                    "the local subagent"
+                } else {
+                    "the remote turn"
+                };
                 match record.state {
                     agi_core::remote::RemoteState::Done => record
                         .final_text
                         .clone()
-                        .unwrap_or_else(|| "the remote agent finished without text".to_string()),
+                        .unwrap_or_else(|| format!("{subject} finished without text")),
                     agi_core::remote::RemoteState::Failed => record
                         .error
                         .clone()
-                        .unwrap_or_else(|| "the remote turn failed".to_string()),
+                        .unwrap_or_else(|| format!("{subject} failed")),
                     agi_core::remote::RemoteState::Cancelled => {
-                        "the remote turn was cancelled".to_string()
+                        format!("{subject} was cancelled")
                     }
                     agi_core::remote::RemoteState::Interrupted => {
-                        "the remote turn was interrupted".to_string()
+                        format!("{subject} was interrupted")
                     }
                     agi_core::remote::RemoteState::Running => return,
                 }

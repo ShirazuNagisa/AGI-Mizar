@@ -28,6 +28,7 @@ pub mod account;
 pub mod dataset;
 pub mod dependencies;
 pub mod endpoint;
+pub mod local_agent;
 pub mod models;
 pub mod peer;
 pub mod plugin;
@@ -224,6 +225,15 @@ pub struct RemotePrefs {
     /// remote work is enabled. A file that explicitly says `false` is honored.
     #[serde(default = "default_true")]
     pub allow_all_workspaces: bool,
+    /// Whether a subagent session this computer delegated is archived once its
+    /// task settles.
+    ///
+    /// On for a fresh install *and* for a file that predates the switch: the
+    /// point of the option is that nobody has to discover it to stop collecting
+    /// one session per delegated task, and an existing operator who updates
+    /// asked for the same behaviour. A stored `false` is honoured.
+    #[serde(default = "default_true")]
+    pub auto_archive: bool,
     /// Workspace paths a peer may start a session in.
     #[serde(default)]
     pub workspaces: Vec<String>,
@@ -239,6 +249,7 @@ impl Default for RemotePrefs {
             allow_lan: false,
             allow_wan: false,
             allow_all_workspaces: true,
+            auto_archive: true,
             workspaces: Vec::new(),
             blocked: Vec::new(),
         }
@@ -610,7 +621,7 @@ impl Core {
         // this process owns. `phone_attached` installs it, `release_judge_if_idle`
         // lets it go.
         let manifest = layout_from(&model_service);
-        Arc::new(Self {
+        let core = Arc::new(Self {
             engines,
             store: RwLock::new(Store::default()),
             events,
@@ -647,7 +658,13 @@ impl Core {
             dataset: dataset::Dataset::default(),
             dsh_plugin: RwLock::new(plugin::initial_view()),
             plugin_lock: tokio::sync::Mutex::new(()),
-        })
+        });
+        // Agent interconnect's local half: the DSH this kernel hosts, attached
+        // as a delegation target. It resolves the engine per call, so an agent
+        // discovered after launch is picked up without a second registration.
+        core.remote
+            .set_local_agent(local_agent::LocalDsh::new(Arc::downgrade(&core)));
+        core
     }
 
     /// A phone opened a socket: install the judge and hold it.
@@ -877,6 +894,8 @@ impl Core {
             .preferences_path
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(path);
+        self.remote
+            .set_auto_archive(self.remote_prefs().auto_archive);
     }
 
     /// Read the account file and point the service at it.
@@ -1484,6 +1503,10 @@ impl Core {
             preferences.remote = next;
         }
         self.save_preferences();
+        // The delegation manager reads the switch at settlement, so a task that
+        // is already running follows the newest answer.
+        self.remote
+            .set_auto_archive(self.remote_prefs().auto_archive);
         let _ = self.remote_prefs_changed.send(());
     }
 
@@ -2774,6 +2797,81 @@ impl Core {
         }
     }
 
+    /// What this computer's own DSH offers a delegated task.
+    ///
+    /// The local twin of [`Self::remote_options`], answered from the running
+    /// engine instead of a peer frame: the calling agent needs the same three
+    /// lists (workspaces, permission presets, model routes) to make one informed
+    /// choice, and the same shape lets one skill read both.
+    async fn local_options(&self) -> CommandResponse {
+        let Some(engine) = self.engine(EngineId::Dsh) else {
+            return CommandResponse::ok(json!({
+                "agent": EngineId::Dsh.as_str(),
+                "available": false,
+                "reason": "this build has no DSH engine attached",
+                "workspaces": [],
+                "permissions": Value::Null,
+                "models": Value::Null,
+                "autoArchive": self.remote_prefs().auto_archive,
+            }));
+        };
+        let (connected, detail) = engine.status();
+        // A directory the engine cannot list is not a failed answer: the caller
+        // can still start in a path it already knows.
+        let workspaces: Vec<Value> = engine
+            .workspaces()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+            .map(|(index, space)| {
+                let local = if space.id.is_empty() {
+                    index.to_string()
+                } else {
+                    space.id.clone()
+                };
+                let title = space
+                    .name
+                    .filter(|name| !name.is_empty())
+                    .or_else(|| {
+                        space
+                            .path
+                            .rsplit(['/', '\\'])
+                            .find(|part| !part.is_empty())
+                            .map(str::to_string)
+                    })
+                    .unwrap_or_else(|| space.path.clone());
+                json!({
+                    "workspaceId": format!("{}:{local}", EngineId::Dsh.as_str()),
+                    "path": space.path,
+                    "title": title,
+                    "engine": EngineId::Dsh.as_str(),
+                })
+            })
+            .collect();
+        let permissions = engine
+            .permission_catalog()
+            .await
+            .ok()
+            .and_then(|catalog| serde_json::to_value(catalog).ok())
+            .unwrap_or(Value::Null);
+        let models = engine
+            .model_catalog()
+            .await
+            .ok()
+            .and_then(|catalog| serde_json::to_value(catalog).ok())
+            .unwrap_or(Value::Null);
+        CommandResponse::ok(json!({
+            "agent": EngineId::Dsh.as_str(),
+            "available": connected,
+            "reason": detail,
+            "workspaces": workspaces,
+            "permissions": permissions,
+            "models": models,
+            "autoArchive": self.remote_prefs().auto_archive,
+        }))
+    }
+
     /// Ask a peer what it permits before the conversation chooses a workspace
     /// and a permission preset.
     async fn remote_options(&self, peer: String) -> CommandResponse {
@@ -3010,6 +3108,7 @@ impl Core {
                 allow_lan,
                 allow_wan,
                 allow_all_workspaces,
+                auto_archive,
                 workspaces,
                 blocked,
             } => {
@@ -3018,6 +3117,7 @@ impl Core {
                     allow_lan,
                     allow_wan,
                     allow_all_workspaces,
+                    auto_archive,
                     workspaces,
                     blocked,
                 });
@@ -3218,12 +3318,32 @@ impl Core {
                         "that delegation has no remote session yet",
                     );
                 };
+                // A session archived at settle is hidden from its agent's list;
+                // continuing it would run a turn whose answer never comes back.
+                // Refusing is the honest answer, and starting a new delegation is
+                // what the caller should do next.
+                if record.archived {
+                    return CommandResponse::error(
+                        "REMOTE_SESSION_ARCHIVED",
+                        "that delegation's session was archived when its task finished; \
+                         start a new delegation, or turn auto-archive off to keep sessions",
+                    );
+                }
                 let reference = remote::PeerRef {
                     device_id: record.peer.clone(),
                     name: record.peer_name.clone(),
                 };
                 let cwd = record.cwd.clone();
-                let started = if record.route == "lan" {
+                let started = if record.route == remote::ROUTE_LOCAL {
+                    self.remote.start_local(
+                        remote::RemoteLaunch {
+                            cwd,
+                            ..remote::RemoteLaunch::default()
+                        },
+                        message,
+                        Some(session),
+                    )
+                } else if record.route == "lan" {
                     let Some(address) = record.address else {
                         return CommandResponse::error(
                             "REMOTE_NO_SESSION",
@@ -3269,6 +3389,68 @@ impl Core {
                         "continuedFrom": id,
                     })),
                     Err(message) => CommandResponse::error("REMOTE_START_FAILED", message),
+                }
+            }
+            Command::LocalOptions => self.local_options().await,
+            Command::LocalDelegate {
+                cwd,
+                permission,
+                provider,
+                model,
+                reasoning_effort,
+                prompt,
+            } => {
+                let launch = remote::RemoteLaunch {
+                    cwd,
+                    permission,
+                    provider,
+                    model,
+                    reasoning_effort,
+                };
+                match self.remote.start_local(launch, prompt, None) {
+                    Ok(record) => CommandResponse::ok(json!({ "delegation": record })),
+                    Err(message) => CommandResponse::error("LOCAL_START_FAILED", message),
+                }
+            }
+            Command::LocalSend { id, message } => {
+                if message.trim().is_empty() {
+                    return CommandResponse::error("MALFORMED_FRAME", "the follow-up is empty");
+                }
+                let Some(record) = self.remote.get(&id) else {
+                    return CommandResponse::error("REMOTE_UNKNOWN", "no such delegation");
+                };
+                if record.route != remote::ROUTE_LOCAL {
+                    return CommandResponse::error(
+                        "REMOTE_NOT_LOCAL",
+                        "that delegation did not run on this computer",
+                    );
+                }
+                let Some(session) = record.session_id.clone() else {
+                    return CommandResponse::error(
+                        "REMOTE_NO_SESSION",
+                        "that delegation has no local session yet",
+                    );
+                };
+                if record.archived {
+                    return CommandResponse::error(
+                        "REMOTE_SESSION_ARCHIVED",
+                        "that delegation's session was archived when its task finished; \
+                         start a new delegation, or turn auto-archive off to keep sessions",
+                    );
+                }
+                let launch = remote::RemoteLaunch {
+                    cwd: record.cwd.clone(),
+                    permission: record.permission.clone(),
+                    provider: record.provider.clone(),
+                    model: record.model.clone(),
+                    reasoning_effort: record.reasoning_effort.clone(),
+                };
+                match self.remote.start_local(launch, message, Some(session)) {
+                    Ok(next) => CommandResponse::ok(json!({
+                        "delegation": next,
+                        "continuedFrom": id,
+                    })),
+                    Err(message) => CommandResponse::error("LOCAL_START_FAILED", message),
                 }
             }
             Command::AccountLogout => match self.account.logout().await {
@@ -3855,6 +4037,7 @@ mod tests {
             allow_lan: true,
             allow_wan: false,
             allow_all_workspaces: false,
+            auto_archive: true,
             workspaces: vec!["/tmp/remote".to_string()],
             blocked: Vec::new(),
         });
@@ -3865,6 +4048,7 @@ mod tests {
             allow_lan: true,
             allow_wan: false,
             allow_all_workspaces: true,
+            auto_archive: true,
             workspaces: Vec::new(),
             blocked: Vec::new(),
         });
@@ -4295,6 +4479,7 @@ mod tests {
             final_text: None,
             error: None,
             reason: None,
+            archived: false,
             approval: None,
             started_at: 1,
             ended_at: None,
@@ -4649,7 +4834,7 @@ fn turn_records(bucket: &VecDeque<Record>, turn: Option<u32>) -> Vec<Record> {
 /// session stops running; a turn that is still open (a later `turn/start` with no
 /// `turn/end`) must not be judged from the previous turn's text, and the slice
 /// has to start at the matching `turn/start` or the judge sees only the tail.
-fn last_finished_turn(records: &[Record]) -> Option<(u32, Vec<Record>)> {
+pub(crate) fn last_finished_turn(records: &[Record]) -> Option<(u32, Vec<Record>)> {
     let end = records
         .iter()
         .rposition(|record| record.kind == RecordKind::TurnEnd)?;
@@ -4664,7 +4849,7 @@ fn last_finished_turn(records: &[Record]) -> Option<(u32, Vec<Record>)> {
 /// Normalise the engine-specific turn-end text into the vocabulary the model was
 /// trained on. Engines disagree here: DSH writes the provider's reason, Codex
 /// writes its own status, Claude writes nothing.
-fn reason_of(text: Option<&str>) -> &'static str {
+pub(crate) fn reason_of(text: Option<&str>) -> &'static str {
     match text.unwrap_or("completed") {
         "error" | "failed" | "failure" => "error",
         "aborted" | "interrupted" | "cancelled" | "canceled" => "aborted",

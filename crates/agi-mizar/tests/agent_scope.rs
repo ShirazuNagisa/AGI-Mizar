@@ -1104,6 +1104,7 @@ async fn a_peer_only_sees_its_own_sessions_and_allowed_workspaces() {
         allow_lan: true,
         allow_wan: true,
         allow_all_workspaces: false,
+        auto_archive: true,
         workspaces: vec!["/tmp/dsh-project".to_string()],
         blocked: Vec::new(),
     });

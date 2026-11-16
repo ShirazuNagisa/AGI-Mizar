@@ -25,6 +25,8 @@ use crate::Core;
 const SKILL: &str = include_str!("../../agi-remote/skills/agi-mizar-remote/SKILL.md");
 const SKILL_NAME: &str = "agi-mizar-remote";
 const MCP_ENTRY_ID: &str = "mcp-agi-mizar-remote";
+/// The MCP server name Claude Code and Codex register.
+const MCP_SERVER_NAME: &str = "agi_mizar_remote";
 
 /// How much of one audit file the export keeps. The file rotates at five MiB;
 /// pointing a support thread at two megabytes of JSON lines is already a lot.
@@ -37,8 +39,10 @@ pub fn check(core: &Core, repair: bool) -> RemoteHealthReport {
     let mut error = None;
 
     let repairable = items.iter().any(|item| {
-        matches!(item.id.as_str(), "mcp" | "skill")
-            && matches!(item.status.as_str(), "missing" | "outdated")
+        matches!(
+            item.id.as_str(),
+            "mcp" | "skill" | "claude-mcp" | "claude-skill" | "codex-mcp" | "codex-skill"
+        ) && matches!(item.status.as_str(), "missing" | "outdated")
     });
     // The profile item is a hard gate: without one the installer has nowhere to
     // write, and running it would only turn the report into an error message.
@@ -76,9 +80,9 @@ fn report(
     let summary = if !ok {
         format!("{problems} 项依赖需要处理")
     } else if !core.remote_prefs().enabled {
-        "依赖完整；远程使用未开启".to_string()
+        "依赖完整；被远程使用未开启".to_string()
     } else {
-        "远程 Agent 依赖完整".to_string()
+        "Agent 互联依赖完整".to_string()
     };
     RemoteHealthReport {
         ok,
@@ -111,7 +115,7 @@ fn collect(core: &Core) -> Vec<DependencyItem> {
     let prefs = core.remote_prefs();
     let dsh_home = agi_platform::dsh_home();
 
-    vec![
+    let mut items = vec![
         sidecar_item(sidecar.as_deref()),
         profile_item(profile.as_ref(), &dsh_home),
         mcp_item(
@@ -122,11 +126,185 @@ fn collect(core: &Core) -> Vec<DependencyItem> {
             profile.is_ok(),
         ),
         skill_item(&skill_path, skill_text.as_deref(), sidecar.is_some()),
+    ];
+    items.extend(claude_items(sidecar.as_deref()));
+    items.extend(codex_items(sidecar.as_deref()));
+    items.extend([
         token_item(),
         account_item(core),
         policy_item(&prefs),
         relay_item(core, &prefs),
+    ]);
+    items
+}
+
+/// Claude Code's two files, as two rows.
+///
+/// An agent that is not installed is `unknown`, not `missing`: a machine that
+/// never ran Claude Code has no dependency to fix, and marking it red would put
+/// a permanent problem on the page.
+fn claude_items(sidecar: Option<&Path>) -> Vec<DependencyItem> {
+    let home = agi_platform::claude_home();
+    if !home.is_dir() {
+        return vec![
+            item(
+                "claude-mcp",
+                "Claude Code 里的 MCP 条目",
+                "unknown",
+                "这台电脑没有 Claude Code".to_string(),
+                None,
+            ),
+            item(
+                "claude-skill",
+                "Claude Code 里的 agi-mizar-remote skill",
+                "unknown",
+                "这台电脑没有 Claude Code".to_string(),
+                None,
+            ),
+        ];
+    }
+    let config = agi_platform::claude_config();
+    let entry = std::fs::read_to_string(&config)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|root| {
+            root.get("mcpServers")
+                .and_then(|servers| servers.get(MCP_SERVER_NAME))
+                .and_then(|entry| entry.get("command"))
+                .and_then(|command| command.as_str())
+                .map(str::to_string)
+        });
+    vec![
+        agent_mcp_item("claude-mcp", "Claude Code 里的 MCP 条目", config.as_path(), entry.as_deref(), sidecar),
+        agent_skill_item(
+            "claude-skill",
+            "Claude Code 里的 agi-mizar-remote skill",
+            &home.join("skills").join(SKILL_NAME).join("SKILL.md"),
+            sidecar,
+        ),
     ]
+}
+
+/// Codex's two files, as two rows.
+fn codex_items(sidecar: Option<&Path>) -> Vec<DependencyItem> {
+    let home = agi_platform::codex_home();
+    if !home.is_dir() {
+        return vec![
+            item(
+                "codex-mcp",
+                "Codex 里的 MCP 条目",
+                "unknown",
+                "这台电脑没有 Codex".to_string(),
+                None,
+            ),
+            item(
+                "codex-skill",
+                "Codex 里的 agi-mizar-remote skill",
+                "unknown",
+                "这台电脑没有 Codex".to_string(),
+                None,
+            ),
+        ];
+    }
+    let config = home.join("config.toml");
+    let entry = std::fs::read_to_string(&config)
+        .ok()
+        .and_then(|text| toml_command(&text, MCP_SERVER_NAME));
+    vec![
+        agent_mcp_item("codex-mcp", "Codex 里的 MCP 条目", config.as_path(), entry.as_deref(), sidecar),
+        agent_skill_item(
+            "codex-skill",
+            "Codex 里的 agi-mizar-remote skill",
+            &home.join("skills").join(SKILL_NAME).join("SKILL.md"),
+            sidecar,
+        ),
+    ]
+}
+
+/// One "this agent has an MCP entry" row for the two non-DSH agents.
+fn agent_mcp_item(
+    id: &str,
+    label: &str,
+    config: &Path,
+    command: Option<&str>,
+    sidecar: Option<&Path>,
+) -> DependencyItem {
+    let Some(command) = command else {
+        return item(
+            id,
+            label,
+            "missing",
+            format!("{} 里没有 agi_mizar_remote", config.display()),
+            Some("写入 MCP 条目"),
+        );
+    };
+    match sidecar {
+        Some(expected) if !same_path(command, expected) => item(
+            id,
+            label,
+            "outdated",
+            format!("条目指向 {command}，不是这一个安装"),
+            Some("把条目改为指向当前的 agi-remote"),
+        ),
+        None => item(
+            id,
+            label,
+            "unknown",
+            format!("条目指向 {command}；应用旁边没有 agi-remote，无法比对"),
+            Some("重装应用，或用 AGI_REMOTE_BIN 指定 agi-remote"),
+        ),
+        _ => item(id, label, "ok", command.to_string(), None),
+    }
+}
+
+/// One "this agent has our skill" row.
+fn agent_skill_item(
+    id: &str,
+    label: &str,
+    path: &Path,
+    sidecar: Option<&Path>,
+) -> DependencyItem {
+    match std::fs::read_to_string(path) {
+        Ok(text) if text == SKILL => item(id, label, "ok", path.display().to_string(), None),
+        Ok(_) => item(
+            id,
+            label,
+            "outdated",
+            format!("{} 与这个版本附带的不同", path.display()),
+            Some("写入这个版本的 skill"),
+        ),
+        Err(_) => item(
+            id,
+            label,
+            "missing",
+            format!("{} 不存在", path.display()),
+            sidecar.map(|_| "写入 skill"),
+        ),
+    }
+}
+
+/// The `command` a Codex `[mcp_servers.<name>]` table gives, read by lines.
+///
+/// The same reason as [`mcp_command`]: a TOML parser would have to accept every
+/// other table in the operator's file, and one line is all this needs.
+fn toml_command(text: &str, name: &str) -> Option<String> {
+    let header = format!("[mcp_servers.{name}]");
+    let mut inside = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            inside = trimmed == header;
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("command") {
+            let value = value.trim_start().strip_prefix('=')?.trim();
+            return Some(unquote(value));
+        }
+    }
+    None
 }
 
 fn item(id: &str, label: &str, status: &str, detail: String, fix: Option<&str>) -> DependencyItem {
@@ -143,14 +321,14 @@ fn sidecar_item(path: Option<&Path>) -> DependencyItem {
     match path {
         Some(path) => item(
             "sidecar",
-            "远程 Agent 工具",
+            "agi-remote 工具",
             "ok",
             path.display().to_string(),
             None,
         ),
         None => item(
             "sidecar",
-            "远程 Agent 工具",
+            "agi-remote 工具",
             "missing",
             "应用旁边没有 agi-remote；安装包会带上它，也可以设置 AGI_REMOTE_BIN".to_string(),
             None,
@@ -335,7 +513,7 @@ fn policy_item(prefs: &crate::RemotePrefs) -> DependencyItem {
             "被远程使用",
             "unknown",
             "远程使用未开启；其他电脑不能使用这台电脑".to_string(),
-            Some("打开下面的「允许远程 Agent」"),
+            Some("打开下面的「允许其他电脑把任务交给本机」"),
         );
     }
     if !prefs.allow_lan && !prefs.allow_wan {
@@ -542,7 +720,7 @@ pub fn log_text(core: &Core) -> (PathBuf, String) {
     let health = check(core, false);
 
     let mut text = String::new();
-    text.push_str("# AGI Mizar 远程 Agent 日志\n");
+    text.push_str("# AGI Mizar Agent 互联日志\n");
     text.push_str(&format!(
         "# 导出时间：{}\n",
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S %:z")
@@ -643,7 +821,17 @@ fn tail(path: &Path, limit: u64) -> Option<(String, bool)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{mcp_command, unquote};
+    use super::{mcp_command, toml_command, unquote};
+
+    #[test]
+    fn reads_the_command_from_the_codex_table() {
+        let text = "[model]\nname = 'x'\n\n[mcp_servers.agi_mizar_remote]\ncommand = 'C:////Users////me////agi-remote.exe'\nargs = [\"mcp\"]\n\n[mcp_servers.other]\ncommand = 'b'\n";
+        assert_eq!(
+            toml_command(text, "agi_mizar_remote").as_deref(),
+            Some("C:////Users////me////agi-remote.exe")
+        );
+        assert_eq!(toml_command(text, "missing"), None);
+    }
 
     #[test]
     fn reads_the_command_from_our_block() {

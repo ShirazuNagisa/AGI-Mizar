@@ -189,6 +189,7 @@ async fn a_remote_delegate_uses_the_lan_route_end_to_end() {
         allow_lan: true,
         allow_wan: false,
         allow_all_workspaces: false,
+        auto_archive: false,
         workspaces: vec!["/tmp/dsh-project".to_string()],
         blocked: Vec::new(),
     });
@@ -247,6 +248,9 @@ async fn a_remote_delegate_uses_the_lan_route_end_to_end() {
         allow_lan: true,
         allow_wan: false,
         allow_all_workspaces: false,
+        // The follow-up below asserts a live session; auto-archive would close
+        // it as soon as the first turn settles.
+        auto_archive: false,
         workspaces: vec!["/tmp/dsh-project".to_string()],
         blocked: Vec::new(),
     });

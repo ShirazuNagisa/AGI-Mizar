@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -17,6 +18,17 @@ use tokio::sync::watch;
 
 /// How many delegations may be running at once.
 pub const MAX_ACTIVE: usize = 4;
+
+/// The `peer` value a delegation to this computer's own DSH carries.
+///
+/// One namespace for both routes: a caller holds one delegation id and the
+/// result/cancel/send commands do not care which side of the wire it ran on.
+/// The value cannot collide with a device id — those are uuids or host-issued
+/// ids, never the literal word.
+pub const LOCAL_PEER: &str = "local";
+
+/// The `route` a local delegation records, and what the window draws.
+pub const ROUTE_LOCAL: &str = "local";
 
 /// How long one remote turn may take before the manager gives up waiting.
 ///
@@ -79,7 +91,7 @@ pub struct Delegation {
     #[serde(default)]
     pub address: Option<std::net::SocketAddr>,
     pub state: RemoteState,
-    /// `wan` or `lan`; old records default to `wan`.
+    /// `wan`, `lan`, or `local`; old records default to `wan`.
     #[serde(default = "default_route")]
     pub route: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -92,6 +104,12 @@ pub struct Delegation {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Whether the settled session was archived, when auto-archive is on.
+    ///
+    /// A session that settled before the option existed reads `false`; the
+    /// field is presentation, never a promise that the session still exists.
+    #[serde(default)]
+    pub archived: bool,
     /// The pending approval holding this turn, when there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<PendingApproval>,
@@ -143,6 +161,57 @@ pub struct PeerRef {
 /// one). Called outside the record lock.
 pub type NoticeSink = Arc<dyn Fn(&Delegation, &str) + Send + Sync>;
 
+/// What one local turn produced.
+#[derive(Debug, Clone)]
+pub struct LocalTurn {
+    /// `completed`, `error`, `aborted` — the vocabulary the record stores.
+    pub reason: String,
+    pub final_text: Option<String>,
+}
+
+/// This computer's own agent, cut down to what a delegation needs.
+///
+/// The kernel implements this over its engine registry. Keeping it a trait does
+/// two things: `remote.rs` holds one copy of the record/cancel/audit logic for
+/// both routes, and the local route is testable with a fake agent instead of a
+/// live DSH.
+#[async_trait::async_trait]
+pub trait LocalAgent: Send + Sync {
+    /// Whether the agent can take work right now, and why not when it cannot.
+    fn status(&self) -> (bool, Option<String>);
+
+    /// The agent's own name for a new session, in this workspace.
+    async fn create_session(&self, cwd: Option<&str>) -> Result<String, String>;
+
+    /// Choose the model (and reasoning level) for a session.
+    async fn set_model(
+        &self,
+        session: &str,
+        provider: &str,
+        model: &str,
+        reasoning_effort: Option<&str>,
+    ) -> Result<(), String>;
+
+    /// Choose the permission preset for a session.
+    async fn set_permission(&self, session: &str, preset: &str) -> Result<(), String>;
+
+    /// Send one prompt and wait for its turn to settle.
+    ///
+    /// `cancel` is the manager's signal: the implementation stops the turn and
+    /// answers `Err("cancelled")`, which is what turns the record into a
+    /// cancelled delegation rather than a failed one.
+    async fn run_turn(
+        &self,
+        session: &str,
+        prompt: &str,
+        timeout: Duration,
+        cancel: watch::Receiver<bool>,
+    ) -> Result<LocalTurn, String>;
+
+    /// Hide the session from the agent's list.
+    async fn archive(&self, session: &str) -> Result<(), String>;
+}
+
 pub struct RemoteManager {
     path: Mutex<Option<PathBuf>>,
     records: Mutex<BTreeMap<String, Delegation>>,
@@ -150,6 +219,13 @@ pub struct RemoteManager {
     notices: Mutex<Option<NoticeSink>>,
     audit_path: Mutex<Option<PathBuf>>,
     audit: Mutex<std::collections::VecDeque<AuditEvent>>,
+    /// This computer's own DSH, once the kernel has attached it.
+    local: Mutex<Option<Arc<dyn LocalAgent>>>,
+    /// Whether a settled delegation's session is archived.
+    ///
+    /// Read at settlement, not at start: a person who turns the switch off while
+    /// a task runs does not want the session they are watching to disappear.
+    auto_archive: AtomicBool,
 }
 
 impl RemoteManager {
@@ -161,7 +237,37 @@ impl RemoteManager {
             notices: Mutex::new(None),
             audit_path: Mutex::new(None),
             audit: Mutex::new(std::collections::VecDeque::new()),
+            local: Mutex::new(None),
+            // On unless somebody says otherwise: a build that predates the
+            // switch must behave like the one that ships with it.
+            auto_archive: AtomicBool::new(true),
         })
+    }
+
+    /// Attach this computer's own DSH, so `start_local` can drive it.
+    pub fn set_local_agent(&self, agent: Arc<dyn LocalAgent>) {
+        *self
+            .local
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(agent);
+    }
+
+    /// The attached local agent, when this build has one.
+    fn local_agent(&self) -> Option<Arc<dyn LocalAgent>> {
+        self.local
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Whether finished sessions are archived automatically.
+    pub fn auto_archive(&self) -> bool {
+        self.auto_archive.load(Ordering::Acquire)
+    }
+
+    /// Turn the auto-archive switch.
+    pub fn set_auto_archive(&self, enabled: bool) {
+        self.auto_archive.store(enabled, Ordering::Release);
     }
 
     /// Install (or clear) the settlement announcement sink.
@@ -476,28 +582,7 @@ impl RemoteManager {
         prompt: String,
         session: Option<String>,
     ) -> Result<Delegation, String> {
-        let running = self
-            .records
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .values()
-            .filter(|record| record.state.is_active())
-            .count();
-        if running >= MAX_ACTIVE {
-            return Err(format!(
-                "too many remote delegations are already running ({MAX_ACTIVE})"
-            ));
-        }
-        let per_peer = self
-            .records
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .values()
-            .filter(|record| record.state.is_active() && record.peer == peer.device_id)
-            .count();
-        if per_peer >= 2 {
-            return Err("that computer already has two running delegations".to_string());
-        }
+        self.admit(&peer.device_id)?;
         if prompt.trim().is_empty() {
             return Err("the remote task is empty".to_string());
         }
@@ -520,6 +605,7 @@ impl RemoteManager {
             final_text: None,
             error: None,
             reason: None,
+            archived: false,
             approval: None,
             started_at: now_ms(),
             ended_at: None,
@@ -642,28 +728,7 @@ impl RemoteManager {
         prompt: String,
         session: Option<String>,
     ) -> Result<Delegation, String> {
-        let running = self
-            .records
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .values()
-            .filter(|record| record.state.is_active())
-            .count();
-        if running >= MAX_ACTIVE {
-            return Err(format!(
-                "too many remote delegations are already running ({MAX_ACTIVE})"
-            ));
-        }
-        let per_peer = self
-            .records
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .values()
-            .filter(|record| record.state.is_active() && record.peer == peer.device_id)
-            .count();
-        if per_peer >= 2 {
-            return Err("that computer already has two running delegations".to_string());
-        }
+        self.admit(&peer.device_id)?;
         if prompt.trim().is_empty() {
             return Err("the remote task is empty".to_string());
         }
@@ -685,6 +750,7 @@ impl RemoteManager {
             final_text: None,
             error: None,
             reason: None,
+            archived: false,
             approval: None,
             started_at: now_ms(),
             ended_at: None,
@@ -725,6 +791,108 @@ impl RemoteManager {
             manager.finish(&task_id, outcome);
         });
         Ok(record)
+    }
+
+    /// Start one delegation on this computer's own DSH.
+    ///
+    /// The local twin of [`Self::start_with_options`]: same records, same
+    /// cancel and audit trail, one process instead of two. `session` continues
+    /// an earlier subagent session, which is what `local_send` uses.
+    pub fn start_local(
+        self: &Arc<Self>,
+        launch: RemoteLaunch,
+        prompt: String,
+        session: Option<String>,
+    ) -> Result<Delegation, String> {
+        let Some(agent) = self.local_agent() else {
+            return Err("this build has no local DSH attached".to_string());
+        };
+        let (ready, why) = agent.status();
+        if !ready {
+            return Err(why.unwrap_or_else(|| "the local DSH is not connected".to_string()));
+        }
+        self.admit(LOCAL_PEER)?;
+        if prompt.trim().is_empty() {
+            return Err("the subagent task is empty".to_string());
+        }
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let record = Delegation {
+            id: id.clone(),
+            peer: LOCAL_PEER.to_string(),
+            peer_name: "本机 DSH".to_string(),
+            session_id: session.clone(),
+            permission: launch.permission.clone(),
+            provider: launch.provider.clone(),
+            model: launch.model.clone(),
+            reasoning_effort: launch.reasoning_effort.clone(),
+            address: None,
+            state: RemoteState::Running,
+            route: ROUTE_LOCAL.to_string(),
+            cwd: launch.cwd.clone(),
+            prompt_preview: preview(&prompt),
+            final_text: None,
+            error: None,
+            reason: None,
+            archived: false,
+            approval: None,
+            started_at: now_ms(),
+            ended_at: None,
+        };
+        self.records
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id.clone(), record.clone());
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        self.cancels
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id.clone(), cancel_tx);
+        self.prune();
+        self.save();
+        self.record_audit(
+            &id,
+            &record.peer,
+            &record.route,
+            "started",
+            RemoteState::Running,
+            None,
+            record.cwd.clone(),
+        );
+
+        let manager = Arc::clone(self);
+        let task_id = id.clone();
+        tokio::spawn(async move {
+            let outcome =
+                run_local_one(&manager, &task_id, agent, launch, &prompt, session, cancel_rx).await;
+            manager.finish(&task_id, outcome);
+        });
+        Ok(record)
+    }
+
+    /// How many delegations may run at once, for one target.
+    ///
+    /// Shared by all three routes so the local one cannot quietly become the
+    /// only way to start five tasks on one machine.
+    fn admit(&self, peer: &str) -> Result<(), String> {
+        let records = self
+            .records
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let running = records.values().filter(|record| record.state.is_active()).count();
+        if running >= MAX_ACTIVE {
+            return Err(format!(
+                "too many remote delegations are already running ({MAX_ACTIVE})"
+            ));
+        }
+        let per_peer = records
+            .values()
+            .filter(|record| record.state.is_active() && record.peer == peer)
+            .count();
+        if per_peer >= 2 {
+            return Err("that computer already has two running delegations".to_string());
+        }
+        Ok(())
     }
 
     /// Ask the remote turn to stop. Returns whether a live task was signalled.
@@ -793,12 +961,14 @@ impl RemoteManager {
                 record.state = RemoteState::Done;
                 record.reason = Some(turn.reason);
                 record.final_text = turn.final_text.map(cap);
+                record.archived = turn.archived;
                 record.ended_at = Some(now_ms());
             }
             Err(failure) => {
                 record.state = failure.state;
                 record.error = Some(failure.message);
                 record.reason = failure.reason;
+                record.archived = failure.archived;
                 record.ended_at = Some(now_ms());
             }
         }
@@ -895,12 +1065,27 @@ impl RemoteManager {
 struct TurnOutcome {
     reason: String,
     final_text: Option<String>,
+    /// Whether the session was archived after it settled.
+    archived: bool,
 }
 
 struct RunFailure {
     state: RemoteState,
     message: String,
     reason: Option<String>,
+    archived: bool,
+}
+
+impl RunFailure {
+    /// A failure that happened before a session existed, so nothing to archive.
+    fn early(state: RemoteState, message: impl Into<String>, reason: &str) -> Self {
+        Self {
+            state,
+            message: message.into(),
+            reason: Some(reason.to_string()),
+            archived: false,
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -915,20 +1100,14 @@ async fn run_one(
 ) -> Result<TurnOutcome, RunFailure> {
     let client = PeerClient::connect(credentials)
         .await
-        .map_err(|error| RunFailure {
-            state: RemoteState::Failed,
-            message: error.to_string(),
-            reason: Some("connect".to_string()),
-        })?;
+        .map_err(|error| RunFailure::early(RemoteState::Failed, error.to_string(), "connect"))?;
     let session = match existing_session {
         Some(session) => session,
         None => client
             .create_session(launch.cwd.as_deref())
             .await
-            .map_err(|error| RunFailure {
-                state: RemoteState::Failed,
-                message: error.to_string(),
-                reason: Some("session.create".to_string()),
+            .map_err(|error| {
+                RunFailure::early(RemoteState::Failed, error.to_string(), "session.create")
             })?,
     };
     manager.set_session(id, session.clone());
@@ -941,20 +1120,20 @@ async fn run_one(
                 launch.reasoning_effort.as_deref(),
             )
             .await
-            .map_err(|error| RunFailure {
-                state: RemoteState::Failed,
-                message: error.to_string(),
-                reason: Some("session.model.set".to_string()),
+            .map_err(|error| {
+                RunFailure::early(RemoteState::Failed, error.to_string(), "session.model.set")
             })?;
     }
     if let Some(preset) = launch.permission.as_deref() {
         client
             .set_permission(&session, preset)
             .await
-            .map_err(|error| RunFailure {
-                state: RemoteState::Failed,
-                message: error.to_string(),
-                reason: Some("session.permission.set".to_string()),
+            .map_err(|error| {
+                RunFailure::early(
+                    RemoteState::Failed,
+                    error.to_string(),
+                    "session.permission.set",
+                )
             })?;
     }
     let turn = client
@@ -962,20 +1141,27 @@ async fn run_one(
             manager.observe_approval(id, approval);
         })
         .await;
+    // A cancelled session is the operator's to look at, not ours to hide; a
+    // finished one (whether it succeeded or failed) is what the tidy-up is for.
+    let tidy = !matches!(&turn, Err(PeerError::Other(message)) if message == "cancelled");
+    let archived = tidy && manager.auto_archive() && client.archive(&session).await.is_ok();
     match turn {
         Ok(turn) => Ok(TurnOutcome {
             reason: turn.reason,
             final_text: turn.final_text.map(cap),
+            archived,
         }),
         Err(PeerError::Other(message)) if message == "cancelled" => Err(RunFailure {
             state: RemoteState::Cancelled,
             message: "the delegation was cancelled".to_string(),
             reason: Some("cancelled".to_string()),
+            archived,
         }),
         Err(error) => Err(RunFailure {
             state: RemoteState::Failed,
             message: error.to_string(),
             reason: Some("turn".to_string()),
+            archived,
         }),
     }
 }
@@ -993,20 +1179,14 @@ async fn run_lan_one(
 ) -> Result<TurnOutcome, RunFailure> {
     let client = agi_lan::LanMizarClient::connect(address, &credentials)
         .await
-        .map_err(|error| RunFailure {
-            state: RemoteState::Failed,
-            message: error.to_string(),
-            reason: Some("lan.connect".to_string()),
-        })?;
+        .map_err(|error| RunFailure::early(RemoteState::Failed, error.to_string(), "lan.connect"))?;
     let session = match existing_session {
         Some(session) => session,
         None => client
             .create_session(launch.cwd.as_deref())
             .await
-            .map_err(|error| RunFailure {
-                state: RemoteState::Failed,
-                message: error.to_string(),
-                reason: Some("lan.session.create".to_string()),
+            .map_err(|error| {
+                RunFailure::early(RemoteState::Failed, error.to_string(), "lan.session.create")
             })?,
     };
     manager.set_session(id, session.clone());
@@ -1019,20 +1199,24 @@ async fn run_lan_one(
                 launch.reasoning_effort.as_deref(),
             )
             .await
-            .map_err(|error| RunFailure {
-                state: RemoteState::Failed,
-                message: error.to_string(),
-                reason: Some("lan.session.model.set".to_string()),
+            .map_err(|error| {
+                RunFailure::early(
+                    RemoteState::Failed,
+                    error.to_string(),
+                    "lan.session.model.set",
+                )
             })?;
     }
     if let Some(preset) = launch.permission.as_deref() {
         client
             .set_permission(&session, preset)
             .await
-            .map_err(|error| RunFailure {
-                state: RemoteState::Failed,
-                message: error.to_string(),
-                reason: Some("session.permission.set".to_string()),
+            .map_err(|error| {
+                RunFailure::early(
+                    RemoteState::Failed,
+                    error.to_string(),
+                    "session.permission.set",
+                )
             })?;
     }
     let turn = client
@@ -1040,20 +1224,90 @@ async fn run_lan_one(
             manager.observe_approval(id, approval);
         })
         .await;
+    let tidy = !matches!(&turn, Err(agi_lan::LanError::Remote(message)) if message == "cancelled");
+    let archived = tidy && manager.auto_archive() && client.archive(&session).await.is_ok();
     match turn {
         Ok(turn) => Ok(TurnOutcome {
             reason: turn.reason,
             final_text: turn.final_text.map(cap),
+            archived,
         }),
         Err(agi_lan::LanError::Remote(message)) if message == "cancelled" => Err(RunFailure {
             state: RemoteState::Cancelled,
             message: "the delegation was cancelled".to_string(),
             reason: Some("cancelled".to_string()),
+            archived,
         }),
         Err(error) => Err(RunFailure {
             state: RemoteState::Failed,
             message: error.to_string(),
             reason: Some("lan.turn".to_string()),
+            archived,
+        }),
+    }
+}
+
+/// One local turn, start to settlement, on the agent attached at boot.
+#[allow(clippy::too_many_arguments)]
+async fn run_local_one(
+    manager: &RemoteManager,
+    id: &str,
+    agent: Arc<dyn LocalAgent>,
+    launch: RemoteLaunch,
+    prompt: &str,
+    existing_session: Option<String>,
+    cancel: watch::Receiver<bool>,
+) -> Result<TurnOutcome, RunFailure> {
+    let session = match existing_session {
+        Some(session) => session,
+        None => agent
+            .create_session(launch.cwd.as_deref())
+            .await
+            .map_err(|message| {
+                RunFailure::early(RemoteState::Failed, message, "local.session.create")
+            })?,
+    };
+    manager.set_session(id, session.clone());
+    if let (Some(provider), Some(model)) = (launch.provider.as_deref(), launch.model.as_deref()) {
+        agent
+            .set_model(&session, provider, model, launch.reasoning_effort.as_deref())
+            .await
+            .map_err(|message| {
+                RunFailure::early(RemoteState::Failed, message, "local.session.model.set")
+            })?;
+    }
+    if let Some(preset) = launch.permission.as_deref() {
+        agent
+            .set_permission(&session, preset)
+            .await
+            .map_err(|message| {
+                RunFailure::early(
+                    RemoteState::Failed,
+                    message,
+                    "local.session.permission.set",
+                )
+            })?;
+    }
+    let turn = agent.run_turn(&session, prompt, TURN_TIMEOUT, cancel).await;
+    let tidy = !matches!(&turn, Err(message) if message == "cancelled");
+    let archived = tidy && manager.auto_archive() && agent.archive(&session).await.is_ok();
+    match turn {
+        Ok(turn) => Ok(TurnOutcome {
+            reason: turn.reason,
+            final_text: turn.final_text.map(cap),
+            archived,
+        }),
+        Err(message) if message == "cancelled" => Err(RunFailure {
+            state: RemoteState::Cancelled,
+            message: "the delegation was cancelled".to_string(),
+            reason: Some("cancelled".to_string()),
+            archived,
+        }),
+        Err(message) => Err(RunFailure {
+            state: RemoteState::Failed,
+            message,
+            reason: Some("local.turn".to_string()),
+            archived,
         }),
     }
 }
@@ -1125,6 +1379,7 @@ mod tests {
             final_text: None,
             error: None,
             reason: None,
+            archived: false,
             approval: None,
             started_at: 1,
             ended_at: None,
@@ -1218,6 +1473,7 @@ mod tests {
                 final_text: Some("done".to_string()),
                 error: None,
                 reason: Some("completed".to_string()),
+                archived: false,
                 approval: None,
                 started_at: 1,
                 ended_at: Some(2),
@@ -1297,5 +1553,167 @@ mod tests {
             default_path().parent(),
             Some(agi_platform::data_dir().as_path())
         );
+    }
+
+    /// A local agent that records what it was asked and answers at once.
+    struct FakeLocal {
+        session: String,
+        /// What `archive` was called with, in order.
+        archived: Mutex<Vec<String>>,
+        /// The cwd `create_session` was handed; `None` when it was never called.
+        created: Mutex<Option<Option<String>>>,
+    }
+
+    impl FakeLocal {
+        fn new(session: &str) -> Arc<Self> {
+            Arc::new(Self {
+                session: session.to_string(),
+                archived: Mutex::new(Vec::new()),
+                created: Mutex::new(None),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LocalAgent for FakeLocal {
+        fn status(&self) -> (bool, Option<String>) {
+            (true, None)
+        }
+
+        async fn create_session(&self, cwd: Option<&str>) -> Result<String, String> {
+            *self.created.lock().unwrap() = Some(cwd.map(str::to_string));
+            Ok(self.session.clone())
+        }
+
+        async fn set_model(
+            &self,
+            _session: &str,
+            _provider: &str,
+            _model: &str,
+            _effort: Option<&str>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn set_permission(&self, _session: &str, _preset: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn run_turn(
+            &self,
+            _session: &str,
+            _prompt: &str,
+            _timeout: Duration,
+            _cancel: watch::Receiver<bool>,
+        ) -> Result<LocalTurn, String> {
+            Ok(LocalTurn {
+                reason: "completed".to_string(),
+                final_text: Some("local answer".to_string()),
+            })
+        }
+
+        async fn archive(&self, session: &str) -> Result<(), String> {
+            self.archived.lock().unwrap().push(session.to_string());
+            Ok(())
+        }
+    }
+
+    /// The whole local route: a session is created, the turn is recorded as
+    /// done, and the session is archived once because the switch is on.
+    #[tokio::test]
+    async fn a_local_delegation_runs_and_archives_its_session() {
+        let agent = FakeLocal::new("dsh:local-1");
+        let manager = RemoteManager::new();
+        manager.set_local_agent(agent.clone());
+        let record = manager
+            .start_local(
+                RemoteLaunch {
+                    cwd: Some("C:\\work".to_string()),
+                    ..RemoteLaunch::default()
+                },
+                "summarise the repo".to_string(),
+                None,
+            )
+            .expect("the local delegation starts");
+        assert_eq!(record.route, ROUTE_LOCAL);
+        assert_eq!(record.peer, LOCAL_PEER);
+
+        for _ in 0..50 {
+            if !manager.get(&record.id).unwrap().state.is_active() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let settled = manager.get(&record.id).expect("the record survives");
+        assert_eq!(settled.state, RemoteState::Done, "{settled:?}");
+        assert_eq!(settled.final_text.as_deref(), Some("local answer"));
+        assert_eq!(settled.session_id.as_deref(), Some("dsh:local-1"));
+        assert!(settled.archived, "auto-archive is on by default");
+        assert_eq!(
+            *agent.archived.lock().unwrap(),
+            vec!["dsh:local-1".to_string()]
+        );
+        assert_eq!(
+            *agent.created.lock().unwrap(),
+            Some(Some("C:\\work".to_string()))
+        );
+    }
+
+    /// Turning the switch off leaves the session where the operator can read it.
+    #[tokio::test]
+    async fn auto_archive_off_keeps_the_session() {
+        let agent = FakeLocal::new("dsh:local-2");
+        let manager = RemoteManager::new();
+        manager.set_local_agent(agent.clone());
+        manager.set_auto_archive(false);
+        let record = manager
+            .start_local(RemoteLaunch::default(), "do it".to_string(), None)
+            .expect("the local delegation starts");
+        for _ in 0..50 {
+            if !manager.get(&record.id).unwrap().state.is_active() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let settled = manager.get(&record.id).expect("the record survives");
+        assert_eq!(settled.state, RemoteState::Done);
+        assert!(!settled.archived);
+        assert!(agent.archived.lock().unwrap().is_empty());
+    }
+
+    /// A second task on an existing session continues it and does not create
+    /// another one.
+    #[tokio::test]
+    async fn a_local_follow_up_reuses_the_session() {
+        let agent = FakeLocal::new("dsh:local-3");
+        let manager = RemoteManager::new();
+        manager.set_local_agent(agent.clone());
+        manager.set_auto_archive(false);
+        let record = manager
+            .start_local(
+                RemoteLaunch::default(),
+                "step one".to_string(),
+                Some("dsh:local-3".to_string()),
+            )
+            .expect("the follow-up starts");
+        for _ in 0..50 {
+            if !manager.get(&record.id).unwrap().state.is_active() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(manager.get(&record.id).unwrap().state, RemoteState::Done);
+        assert_eq!(*agent.created.lock().unwrap(), None, "no new session");
+    }
+
+    /// Without an attached local agent the command answers instead of pretending
+    /// a task started.
+    #[test]
+    fn a_local_delegation_needs_an_attached_agent() {
+        let manager = RemoteManager::new();
+        let error = manager
+            .start_local(RemoteLaunch::default(), "do it".to_string(), None)
+            .expect_err("nothing is attached");
+        assert!(error.contains("no local DSH"), "{error}");
     }
 }

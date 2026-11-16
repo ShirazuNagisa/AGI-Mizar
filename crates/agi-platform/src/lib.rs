@@ -75,6 +75,41 @@ pub fn dsh_home() -> PathBuf {
     home().join(".dsh")
 }
 
+/// Where Claude Code keeps its configuration: `$CLAUDE_CONFIG_DIR`, or
+/// `~/.claude`.
+///
+/// The override is Claude Code's own, so a user who moved their home keeps
+/// working — and an installer that ignored it would write a skill nobody reads.
+pub fn claude_home() -> PathBuf {
+    if let Some(directory) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        if !directory.is_empty() {
+            return PathBuf::from(directory);
+        }
+    }
+    home().join(".claude")
+}
+
+/// Claude Code's user config file, which holds `mcpServers`.
+///
+/// Beside the directory rather than inside it: `~/.claude/settings.json` is the
+/// hooks file, and MCP servers are registered in `~/.claude.json`.
+pub fn claude_config() -> PathBuf {
+    match std::env::var_os("CLAUDE_CONFIG_DIR") {
+        Some(directory) if !directory.is_empty() => PathBuf::from(directory).join(".claude.json"),
+        _ => home().join(".claude.json"),
+    }
+}
+
+/// Where Codex keeps its configuration: `$CODEX_HOME`, or `~/.codex`.
+pub fn codex_home() -> PathBuf {
+    if let Some(directory) = std::env::var_os("CODEX_HOME") {
+        if !directory.is_empty() {
+            return PathBuf::from(directory);
+        }
+    }
+    home().join(".codex")
+}
+
 /// The machine's name, as a person would recognise it.
 pub fn host_name() -> String {
     #[cfg(windows)]

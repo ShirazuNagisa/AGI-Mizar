@@ -130,6 +130,7 @@ async fn a_lan_peer_gets_a_scoped_token_and_can_create_a_session() {
         allow_lan: true,
         allow_wan: false,
         allow_all_workspaces: false,
+        auto_archive: true,
         workspaces: vec!["/tmp/dsh-project".to_string()],
         blocked: Vec::new(),
     });
@@ -170,6 +171,7 @@ async fn a_lan_peer_gets_a_scoped_token_and_can_create_a_session() {
         allow_lan: true,
         allow_wan: false,
         allow_all_workspaces: false,
+        auto_archive: true,
         workspaces: vec!["/tmp/dsh-project".to_string()],
         blocked: vec!["client".to_string()],
     });
@@ -194,6 +196,7 @@ async fn a_blocked_device_gets_no_lan_token_even_with_a_valid_certificate() {
         allow_lan: true,
         allow_wan: false,
         allow_all_workspaces: false,
+        auto_archive: true,
         workspaces: vec!["/tmp/dsh-project".to_string()],
         blocked: vec!["client".to_string()],
     });

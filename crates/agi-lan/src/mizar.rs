@@ -221,6 +221,15 @@ impl LanMizarClient {
             .await
     }
 
+    /// Hide a session this peer created, after its task settled.
+    pub async fn archive(&self, session: &str) -> Result<Value, LanError> {
+        self.request(
+            "session.archive",
+            json!({ "sessionId": session, "stopActivity": true }),
+        )
+        .await
+    }
+
     /// Run one turn to `turn/end`, optionally observing new approvals.
     pub async fn run_turn<F>(
         &self,

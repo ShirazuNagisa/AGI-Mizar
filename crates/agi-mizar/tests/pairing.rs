@@ -450,6 +450,7 @@ async fn a_self_hosted_peer_pairs_with_a_marker_and_is_gated_by_the_remote_switc
         allow_lan: false,
         allow_wan: true,
         allow_all_workspaces: true,
+        auto_archive: true,
         workspaces: Vec::new(),
         blocked: Vec::new(),
     });
