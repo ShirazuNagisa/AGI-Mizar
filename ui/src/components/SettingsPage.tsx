@@ -281,7 +281,7 @@ const SETTINGS_TABS = [
   { id: 'account', label: '账户' },
   { id: 'server', label: '服务器' },
   { id: 'devices', label: '设备与连接' },
-  { id: 'remote', label: '远程Agent' },
+  { id: 'remote', label: 'Agent互联' },
   { id: 'approval', label: '审批模型' },
   { id: 'appearance', label: '外观' },
   { id: 'startup', label: '启动与窗口' },
@@ -414,7 +414,7 @@ function ServerSection({
       })
       setPin('')
       setProbe(null)
-      setNotice('已保存。正在重新连接服务器；远程 Agent 与手机可能需要重新配对。')
+      setNotice('已保存。正在重新连接服务器；Agent 互联与手机可能需要重新配对。')
       await onChanged()
     } catch (failure) {
       setError(failureMessage(failure, '没有保存服务器设置'))
@@ -520,7 +520,7 @@ function ServerSection({
           <div className="flex items-start justify-between gap-4 px-4 py-2.5">
             <span className="text-[12px] leading-5 text-muted">
               {switching
-                ? '切换服务器会重新连接，远程 Agent 与手机可能需要重新配对。'
+                ? '切换服务器会重新连接，Agent 互联与手机可能需要重新配对。'
                 : selfHosted
                   ? '自建服务器：无需登录，不启用账户、订阅和匿名数据共享。'
                   : '官方服务器：账户、订阅和匿名数据共享按现有方式工作。'}

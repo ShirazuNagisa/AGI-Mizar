@@ -1,9 +1,9 @@
 /**
- * The remote-agent settings surface.
+ * The Agent-interconnect settings surface.
  *
- * One panel, because the page's other half is gone: this computer is the target
- * (who may use it, in which folders), and the setup that makes that possible is
- * a dependency check rather than a list of knobs. The delegation list, the LAN
+ * Two directions on one page: what this computer does with the subagents it
+ * delegates (auto-archive, the dependency check) and what other computers may do
+ * with it (who may use it, in which folders). The delegation list, the LAN
  * certificate and the audit tail live in the agent surfaces and the log export;
  * repeating them here made the page a dashboard instead of a setting.
  */
@@ -54,7 +54,7 @@ export function RemoteAgentSettings({
         setWorkspaces(next.workspaces.join('\n'))
         setBlocked(next.blocked.join('\n'))
       } catch (failure) {
-        if (!cancelled) setError(failureMessage(failure, '读取远程 Agent 设置失败'))
+        if (!cancelled) setError(failureMessage(failure, '读取 Agent 互联设置失败'))
       }
     })()
     // The check is read-only and is the first thing a person would press; run it
@@ -86,6 +86,7 @@ export function RemoteAgentSettings({
         allow_lan: next.allowLan,
         allow_wan: next.allowWan,
         allow_all_workspaces: next.allowAllWorkspaces,
+        auto_archive: next.autoArchive,
         workspaces: next.workspaces,
         blocked: next.blocked,
       })
@@ -101,7 +102,7 @@ export function RemoteAgentSettings({
         setHealthFailed(true)
       }
     } catch (failure) {
-      setError(failureMessage(failure, '没有记住远程 Agent 设置'))
+      setError(failureMessage(failure, '没有记住 Agent 互联设置'))
     } finally {
       setBusy(null)
     }
@@ -156,7 +157,9 @@ export function RemoteAgentSettings({
   return (
     <div className="flex flex-col gap-4">
       <p className="text-[12px] leading-6 text-muted">
-        本功能旨在为多设备间Agent任务指派提供支持。你可以在Agent中使用本功能指定的skill：agi-mizar-remote，然后使你的模型可以指派另一台电脑上的Agent模型作为子代理，从而实现多端的高效任务协同。参考教程：
+        Agent 互联让一个 Agent 把任务交给 DSH 子代理执行：可以在本机，也可以在另一台同账户的电脑上。
+        在 Agent 中使用本功能提供的 skill（agi-mizar-remote）即可，支持 DSH、Claude Code 与 Codex。
+        参考教程：
         <button
           type="button"
           onClick={() =>
@@ -179,7 +182,7 @@ export function RemoteAgentSettings({
               依赖完整性
             </h2>
             <p className="mt-1 text-[12px] leading-5 text-muted">
-              检查 agi-remote 工具、DSH 里的 MCP 条目与 skill、账户和两条线路；能修的部分会一并修好。
+              检查 agi-remote 工具、各 Agent（DSH / Claude Code / Codex）里的 MCP 条目与 skill、账户和两条线路；能修的部分会一并修好。
             </p>
           </div>
           <Button
@@ -199,6 +202,27 @@ export function RemoteAgentSettings({
         </div>
       </section>
 
+      <PanelGroup title="派出的子代理">
+        <div className="flex flex-col gap-3">
+          {prefs === null ? (
+            <p className="text-[12px] text-muted">读取中…</p>
+          ) : (
+            <>
+              <Row
+                label="任务结束后自动归档子代理会话"
+                hint="本机与远程委派都适用：任务完成或失败后把该子代理会话归档，不再堆在 DSH 会话列表里；被取消的任务保留。默认开启。"
+                checked={prefs.autoArchive}
+                onChange={(autoArchive) => void save({ ...prefs, autoArchive })}
+              />
+              <p className="text-[11px] leading-5 text-muted">
+                开启时每个子代理任务是一次性的：任务结束即归档，之后不能再向该会话追加；需要多轮追加就把这里关掉。
+                归档只影响 DSH 的会话列表，不删除内容。
+              </p>
+            </>
+          )}
+        </div>
+      </PanelGroup>
+
       {selfHosted ? <SelfHostedPairing kernel={kernel} /> : null}
 
       {prefs === null ? (
@@ -209,13 +233,13 @@ export function RemoteAgentSettings({
         <PanelGroup title="被远程使用（这台电脑）">
           <div className="flex flex-col gap-3">
             <Row
-              label="允许远程 Agent"
+              label="允许其他电脑把任务交给本机"
               hint="关闭时 19393 不监听，任何 peer token 都不会被签发"
               checked={prefs.enabled}
               onChange={(enabled) => void save({ ...prefs, enabled })}
             />
             <Row
-              label="允许局域网"
+              label="允许局域网直连"
               hint={
                 selfHosted
                   ? '自建服务器暂不支持局域网直连；配对与委派统一经过你自己的服务器'
@@ -299,7 +323,7 @@ export function RemoteAgentSettings({
 
       <div className="mz-border flex items-center justify-between gap-4 px-4 py-2.5">
         <span className="text-[12px] leading-5 text-muted">
-          导出远程 Agent 的全部日志：审计记录、委派记录和当时的依赖状态，不含 prompt 与回复正文。
+          导出 Agent 互联的全部日志：审计记录、委派记录和当时的依赖状态，不含 prompt 与回复正文。
         </span>
         <Button
           size="sm"
@@ -583,7 +607,7 @@ function SelfHostedPairing({ kernel }: { kernel: Kernel }) {
       <PanelGroup title="本机的配对码">
         <div className="flex flex-col gap-2">
           <p className="text-[11px] leading-5 text-muted">
-            在另一台电脑上打开「设置 → 远程 Agent → 配对另一台电脑」，选中这台电脑，再输入下面的码。
+            在另一台电脑上打开「设置 → Agent 互联 → 配对另一台电脑」，选中这台电脑，再输入下面的码。
             码只能用一次。
           </p>
           <div className="flex flex-wrap items-center gap-3">
@@ -705,7 +729,7 @@ function SelfHostedPairing({ kernel }: { kernel: Kernel }) {
             <p className="text-[12px] text-muted">正在读取…</p>
           ) : peers.length === 0 ? (
             <p className="text-[12px] leading-5 text-muted">
-              还没有配对。配对之后，这里的电脑就可以通过远程 Agent 接受任务。
+              还没有配对。配对之后，这里的电脑就可以通过 Agent 互联接受任务。
             </p>
           ) : (
             peers.map((peer) => (

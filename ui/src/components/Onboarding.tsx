@@ -55,7 +55,7 @@ const STEP_TITLES: Record<StepId, string> = {
   login: '登录',
   choose: '选择 Agent',
   model: '下载模型',
-  remote: '远程 Agent',
+  remote: 'Agent 互联',
   preferences: '偏好',
   sharing: '共享会话数据',
   finish: '完成',
@@ -168,7 +168,7 @@ export function Onboarding({
         const next = await kernel.send<RemotePrefs>({ op: 'remote_target_settings' })
         if (!cancelled) setRemote(next)
       } catch (failure) {
-        if (!cancelled) setRemoteError(failureMessage(failure, '读取远程 Agent 设置失败'))
+        if (!cancelled) setRemoteError(failureMessage(failure, '读取 Agent 互联设置失败'))
       } finally {
         if (!cancelled) setRemoteLoading(false)
       }
@@ -184,7 +184,7 @@ export function Onboarding({
     try {
       setRemote(await kernel.send<RemotePrefs>({ op: 'remote_target_settings' }))
     } catch (failure) {
-      setRemoteError(failureMessage(failure, '读取远程 Agent 设置失败'))
+      setRemoteError(failureMessage(failure, '读取 Agent 互联设置失败'))
     } finally {
       setRemoteLoading(false)
     }
@@ -325,12 +325,13 @@ export function Onboarding({
           allow_lan: remote.allowLan,
           allow_wan: remote.allowWan,
           allow_all_workspaces: remote.allowAllWorkspaces,
+          auto_archive: remote.autoArchive,
           workspaces: remote.workspaces,
           blocked: remote.blocked,
         })
         setStep(neighbours('remote').next)
       } catch (failure) {
-        setError(failureMessage(failure, '没有记住远程 Agent 的选择'))
+        setError(failureMessage(failure, '没有记住 Agent 互联的选择'))
       } finally {
         setBusy(false)
       }
@@ -1328,11 +1329,11 @@ function RemoteStep({
 
   return (
     <section>
-      <h2 className="text-[24px] leading-8">远程 Agent</h2>
+      <h2 className="text-[24px] leading-8">Agent 互联</h2>
       <p className="mt-1.5 text-[12px] leading-5 text-muted">
         {selfHosted
-          ? '自建服务器模式下，另一台电脑可以把任务交给这台电脑上的 Agent。这里先决定这台电脑是否接受；之后随时可以在「设置 → 远程Agent」里改。'
-          : '同账户的另一台电脑可以把任务交给这台电脑上的 Agent，反过来也可以。这里先决定这台电脑是否接受；之后随时可以在「设置 → 远程Agent」里改。'}
+          ? 'Agent 互联让一个 Agent 把任务交给 DSH 子代理：本机可以，另一台电脑也可以。这里先决定这台电脑是否接受别人的任务、以及委派出去的会话怎么收尾；之后随时可以在「设置 → Agent 互联」里改。'
+          : 'Agent 互联让一个 Agent 把任务交给 DSH 子代理：本机可以，同账户的另一台电脑也可以。这里先决定这台电脑是否接受别人的任务、以及委派出去的会话怎么收尾；之后随时可以在「设置 → Agent 互联」里改。'}
       </p>
 
       {loading ? (
@@ -1351,7 +1352,7 @@ function RemoteStep({
         <div className="mt-4 mz-border">
           <div className="flex flex-col gap-3 px-4 py-3">
             <RemoteRow
-              label="允许远程 Agent"
+              label="允许其他电脑把任务交给本机"
               hint="总开关。关着时这台电脑不接受任何其他电脑的任务。"
               checked={prefs.enabled}
               onChange={(enabled) => onChange({ ...prefs, enabled })}
@@ -1381,6 +1382,12 @@ function RemoteStep({
               disabled={!prefs.enabled}
               onChange={(allowAllWorkspaces) => onChange({ ...prefs, allowAllWorkspaces })}
             />
+            <RemoteRow
+              label="任务结束后自动归档子代理会话"
+              hint="本机与远程委派都适用：任务完成或失败后归档该子代理会话（之后不能再向它追加），取消的任务保留。默认开启。"
+              checked={prefs.autoArchive}
+              onChange={(autoArchive) => onChange({ ...prefs, autoArchive })}
+            />
           </div>
           <p className="mz-divide-t px-4 py-2 text-[12px] leading-5 text-muted">
             打开总开关后再选允许的线路；全部关着也能继续，之后在设置里改。
@@ -1392,7 +1399,7 @@ function RemoteStep({
         <div className="mt-4 mz-border px-4 py-3">
           <div className="text-[12px] text-fg">这台电脑的配对码</div>
           <p className="mt-0.5 text-[12px] leading-5 text-muted">
-            在另一台电脑上打开「设置 → 远程 Agent → 配对另一台电脑」，选中这台电脑，再输入下面的码。
+            在另一台电脑上打开「设置 → Agent 互联 → 配对另一台电脑」，选中这台电脑，再输入下面的码。
             已配对的电脑和完整的配对入口都在那个页面里，这里只把两边的第一句话对上。
           </p>
           <div className="mt-2 flex flex-wrap items-center gap-3">
@@ -1589,7 +1596,9 @@ function DoneStep({
             remote.allowWan ? '跨网' : null,
           ]
             .filter(Boolean)
-            .join('、') || '没有线路'}${remote.allowAllWorkspaces ? ' · 全部工作区' : ''}）`
+            .join('、') || '没有线路'}${remote.allowAllWorkspaces ? ' · 全部工作区' : ''}${
+            remote.autoArchive ? ' · 自动归档' : ''
+          }）`
 
   const preferenceText =
     shell.settings === null
@@ -1618,7 +1627,7 @@ function DoneStep({
         />
         <DoneRow label="模型" value={active === null ? '未下载' : `Mizarllm ${active.version}`} />
         <DoneRow label="偏好" value={preferenceText} />
-        <DoneRow label="远程 Agent" value={remoteText} />
+        <DoneRow label="Agent 互联" value={remoteText} />
         {selfHosted ? null : (
           <DoneRow label="会话数据" value={sharing ? '匿名共享中' : '仅保留在本机'} />
         )}
