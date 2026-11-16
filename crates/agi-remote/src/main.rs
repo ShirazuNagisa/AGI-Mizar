@@ -16,9 +16,18 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 
+mod install;
+
 const SKILL: &str = include_str!("../skills/agi-mizar-remote/SKILL.md");
 const MCP_ENTRY_ID: &str = "mcp-agi-mizar-remote";
 const SKILL_NAME: &str = "agi-mizar-remote";
+/// The agents an MCP entry and a skill can be written for, in the order the
+/// report lists them.
+const AGENTS: [(&str, &str); 3] = [
+    ("dsh", "DSH"),
+    ("claude", "Claude Code"),
+    ("codex", "Codex"),
+];
 
 fn main() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new().context("a Tokio runtime")?;
@@ -29,6 +38,8 @@ fn main() -> Result<()> {
         "agents" => runtime.block_on(cli_agents()),
         "options" => runtime.block_on(cli_options(&args[1..])),
         "delegate" => runtime.block_on(cli_delegate(&args[1..])),
+        "local-options" => runtime.block_on(cli_local_options()),
+        "local-delegate" => runtime.block_on(cli_local_delegate(&args[1..])),
         "result" | "status" => runtime.block_on(cli_result(&args[1..])),
         "wait" => runtime.block_on(cli_wait(&args[1..])),
         "cancel" => runtime.block_on(cli_cancel(&args[1..])),
@@ -51,6 +62,9 @@ fn usage() {
   agi-remote options --peer <id>\n\
   agi-remote delegate --peer <id> [--workspace <path>] [--permission <preset>] \\\n\
       [--provider <id> --model <id> [--reasoning-effort <id>]] --prompt <text>\n\
+  agi-remote local-options\n\
+  agi-remote local-delegate [--workspace <path>] [--permission <preset>] \\\n\
+      [--provider <id> --model <id> [--reasoning-effort <id>]] --prompt <text>\n\
   agi-remote result <delegationId>\n\
   agi-remote wait <delegationId> [--timeout-ms <ms>]\n\
   agi-remote cancel <delegationId>\n\
@@ -60,7 +74,9 @@ fn usage() {
   agi-remote uninstall [--profile <name>] [--dry-run]\n\
 \n\
 The tool token is read from agent-tool.json beside the other Mizar state.\n\
-Install writes the DSH MCP entry and the agi-mizar-remote skill; restart DSH\n\
+Install writes the MCP entry and the agi-mizar-remote skill into every agent\n\
+found here (DSH, Claude Code, Codex); restart the agent afterwards.\n\
+`local-*` drives this computer's DSH, the rest drives another computer.\n\
 after installing."
     );
 }
@@ -197,6 +213,37 @@ async fn cli_delegate(args: &[String]) -> Result<()> {
         "provider": provider,
         "model": model,
         "reasoning_effort": reasoning_effort,
+        "prompt": prompt,
+    }))
+    .await?;
+    let id = value
+        .get("delegation")
+        .and_then(|delegation| delegation.get("id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("the kernel returned no delegation id"))?;
+    banner(&format!("AGI_MIZAR_DELEGATION {id}"));
+    banner(&serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
+async fn cli_local_options() -> Result<()> {
+    let value = command(json!({ "op": "local_options" })).await?;
+    banner(&serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
+async fn cli_local_delegate(args: &[String]) -> Result<()> {
+    let prompt = flag(args, "--prompt")
+        .or_else(|| flag(args, "-p"))
+        .ok_or_else(|| anyhow!("--prompt is required"))?;
+    let cwd = flag(args, "--workspace").or_else(|| flag(args, "--cwd"));
+    let value = command(json!({
+        "op": "local_delegate",
+        "cwd": cwd,
+        "permission": flag(args, "--permission"),
+        "provider": flag(args, "--provider"),
+        "model": flag(args, "--model"),
+        "reasoning_effort": flag(args, "--reasoning-effort").or_else(|| flag(args, "--effort")),
         "prompt": prompt,
     }))
     .await?;
@@ -458,7 +505,43 @@ fn tools() -> Value {
         },
         {
             "name": "remote_send",
-            "description": "Send a follow-up to a delegation. P4.",
+            "description": "Send a follow-up to a delegation. Works for local and remote delegations; the session keeps its context.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "delegationId": { "type": "string" },
+                    "message": { "type": "string" }
+                },
+                "required": ["delegationId", "message"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "local_options",
+            "description": "Ask this computer's own DSH what it offers: whether it is connected, its workspaces, permission presets and model catalog. Call before local_delegate.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        },
+        {
+            "name": "local_delegate",
+            "description": "Start a self-contained task on this computer's DSH as a subagent. Returns immediately with a delegation id whose marker is AGI_MIZAR_DELEGATION <id>; read it with remote_result and continue it with remote_send.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workspace": { "type": "string", "description": "absolute path from local_options.workspaces; omit for the DSH default" },
+                    "permission": { "type": "string", "description": "permission preset value returned by local_options.permissions" },
+                    "provider": { "type": "string", "description": "provider id from local_options.models" },
+                    "model": { "type": "string", "description": "model id from local_options.models" },
+                    "reasoningEffort": { "type": "string", "description": "one of the selected model's efforts; omit for the model default" },
+                    "description": { "type": "string", "description": "a short human-readable label" },
+                    "prompt": { "type": "string", "description": "self-contained goal, inputs, constraints, deliverable and acceptance checks" }
+                },
+                "required": ["prompt"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "local_send",
+            "description": "Send a follow-up to a local delegation, keeping its DSH session. Prefer this over a second local_delegate in the same conversation.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -575,8 +658,54 @@ async fn call_tool(name: &str, arguments: &Value) -> Result<String> {
             .await?;
             Ok(serde_json::to_string_pretty(&value)?)
         }
+        "local_options" => {
+            let value = command(json!({ "op": "local_options" })).await?;
+            Ok(serde_json::to_string_pretty(&value)?)
+        }
+        "local_delegate" => {
+            let prompt = required(arguments, "prompt")?;
+            let value = command(json!({
+                "op": "local_delegate",
+                "cwd": optional(arguments, "workspace"),
+                "permission": optional(arguments, "permission"),
+                "provider": optional(arguments, "provider"),
+                "model": optional(arguments, "model"),
+                "reasoning_effort": optional(arguments, "reasoningEffort"),
+                "prompt": prompt,
+            }))
+            .await?;
+            let id = value
+                .get("delegation")
+                .and_then(|delegation| delegation.get("id"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("the kernel returned no delegation id"))?;
+            Ok(format!(
+                "AGI_MIZAR_DELEGATION {id}\n{}",
+                serde_json::to_string_pretty(&value)?
+            ))
+        }
+        "local_send" => {
+            let id = required(arguments, "delegationId")?;
+            let message = required(arguments, "message")?;
+            let value = command(json!({
+                "op": "local_send",
+                "id": id,
+                "message": message,
+            }))
+            .await?;
+            Ok(serde_json::to_string_pretty(&value)?)
+        }
         other => bail!("unknown tool {other}"),
     }
+}
+
+/// A string argument that may be missing; an empty one is the same as missing.
+fn optional(arguments: &Value, name: &str) -> Option<String> {
+    arguments
+        .get(name)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn required(arguments: &Value, name: &str) -> Result<String> {
@@ -643,13 +772,92 @@ fn profile_dir(args: &[String]) -> Result<PathBuf> {
     }
 }
 
+/// Which agents to write into: `--agents` when given, else every one that is
+/// installed here.
+///
+/// Explicit names are not filtered by detection: somebody who typed
+/// `--agents claude` wants the entry written even if the directory was made by
+/// hand, and the file edit is the same either way.
+fn requested_agents(args: &[String]) -> Result<Vec<&'static str>> {
+    if let Some(value) = flag(args, "--agents") {
+        let mut picked = Vec::new();
+        for name in value.split(',').map(str::trim).filter(|name| !name.is_empty()) {
+            let Some((id, _)) = AGENTS.iter().find(|(id, _)| *id == name) else {
+                bail!("unknown agent {name}; expected one of dsh, claude, codex");
+            };
+            if !picked.contains(id) {
+                picked.push(*id);
+            }
+        }
+        if picked.is_empty() {
+            bail!("--agents names no agent");
+        }
+        return Ok(picked);
+    }
+    Ok(AGENTS
+        .iter()
+        .filter(|(id, _)| install::present(id))
+        .map(|(id, _)| *id)
+        .collect())
+}
+
 fn install(args: &[String]) -> Result<()> {
     let dry = args.iter().any(|arg| arg == "--dry-run");
-    let profile = profile_dir(args)?;
+    let explicit = flag(args, "--agents").is_some();
+    let executable = std::env::current_exe().context("the agi-remote executable path")?;
+    let agents = requested_agents(args)?;
+    if agents.is_empty() {
+        bail!(
+            "no supported agent found on this machine (looked for DSH, Claude Code and Codex); \
+             pass --agents dsh,claude,codex to write anyway"
+        );
+    }
+    let mut done: Vec<&str> = Vec::new();
+    for agent in &agents {
+        match *agent {
+            "dsh" => match profile_dir(args) {
+                Ok(profile) => {
+                    install_dsh(&profile, &executable, dry)?;
+                    done.push("DSH");
+                }
+                // A detected-but-empty DSH is a machine that never finished
+                // setting DSH up; refusing the whole install over it would take
+                // Claude Code and Codex down with it.
+                Err(error) if !explicit => println!("dsh: skipped — {error}"),
+                Err(error) => return Err(error),
+            },
+            "claude" => {
+                install::claude_install(&executable, dry)?;
+                let dir = install::claude_home().join("skills").join(SKILL_NAME);
+                install::write_skill(&dir, SKILL, dry)?;
+                done.push("Claude Code");
+            }
+            "codex" => {
+                install::codex_install(&executable, dry)?;
+                let dir = install::codex_home().join("skills").join(SKILL_NAME);
+                install::write_skill(&dir, SKILL, dry)?;
+                done.push("Codex");
+            }
+            other => bail!("unknown agent {other}"),
+        }
+    }
+    if dry {
+        println!("dry run; nothing written");
+        return Ok(());
+    }
+    println!(
+        "installed for {}. Restart {} so the MCP client loads the new entry.",
+        done.join(", "),
+        done.join(" and ")
+    );
+    Ok(())
+}
+
+/// The DSH half: one `- insert:` block in the profile patch plus the skill.
+fn install_dsh(profile: &std::path::Path, executable: &std::path::Path, dry: bool) -> Result<()> {
     let patch_path = profile.join("cordis.patch.yml");
     let before = std::fs::read_to_string(&patch_path)
         .with_context(|| format!("reading {}", patch_path.display()))?;
-    let executable = std::env::current_exe().context("the agi-remote executable path")?;
     let block = format!(
         "- insert:\n    - id: {MCP_ENTRY_ID}\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: agi_mizar_remote\n        transport: stdio\n        command: {}\n        args: ['mcp']\n        toolCallTimeoutMs: 60000\n",
         yaml_single_quoted(&executable.to_string_lossy())
@@ -682,9 +890,8 @@ fn install(args: &[String]) -> Result<()> {
         }
     }
     let skill_dir = dsh_home().join("skills").join(SKILL_NAME);
-    let skill_path = skill_dir.join("SKILL.md");
-    println!("skill: {}", skill_path.display());
     if dry {
+        println!("skill: {}", skill_dir.join("SKILL.md").display());
         println!("dry run; nothing written");
         return Ok(());
     }
@@ -698,15 +905,57 @@ fn install(args: &[String]) -> Result<()> {
     }
     std::fs::create_dir_all(&skill_dir)
         .with_context(|| format!("creating {}", skill_dir.display()))?;
-    std::fs::write(&skill_path, SKILL)
-        .with_context(|| format!("writing {}", skill_path.display()))?;
-    println!("installed. Restart DSH so the mcp client loads the new entry.");
+    std::fs::write(skill_dir.join("SKILL.md"), SKILL)
+        .with_context(|| format!("writing {}", skill_dir.join("SKILL.md").display()))?;
+    println!("skill: {}", skill_dir.join("SKILL.md").display());
     Ok(())
 }
 
 fn uninstall(args: &[String]) -> Result<()> {
     let dry = args.iter().any(|arg| arg == "--dry-run");
-    let profile = profile_dir(args)?;
+    let agents = requested_agents(args)?;
+    let mut removed: Vec<&str> = Vec::new();
+    for agent in &agents {
+        match *agent {
+            "dsh" => {
+                if let Ok(profile) = profile_dir(args) {
+                    uninstall_dsh(&profile, dry)?;
+                    removed.push("DSH");
+                }
+            }
+            "claude" => {
+                install::claude_remove(dry)?;
+                let dir = install::claude_home().join("skills").join(SKILL_NAME);
+                install::remove_skill(&dir, dry)?;
+                removed.push("Claude Code");
+            }
+            "codex" => {
+                install::codex_remove(dry)?;
+                let dir = install::codex_home().join("skills").join(SKILL_NAME);
+                install::remove_skill(&dir, dry)?;
+                removed.push("Codex");
+            }
+            other => bail!("unknown agent {other}"),
+        }
+    }
+    if dry {
+        println!("dry run; nothing removed");
+        return Ok(());
+    }
+    if removed.is_empty() {
+        println!("nothing to remove");
+    } else {
+        println!(
+            "uninstalled from {}. Restart {} to drop the MCP client.",
+            removed.join(", "),
+            removed.join(" and ")
+        );
+    }
+    Ok(())
+}
+
+/// The DSH half of an uninstall.
+fn uninstall_dsh(profile: &std::path::Path, dry: bool) -> Result<()> {
     let patch_path = profile.join("cordis.patch.yml");
     let before = std::fs::read_to_string(&patch_path)
         .with_context(|| format!("reading {}", patch_path.display()))?;
@@ -724,9 +973,8 @@ fn uninstall(args: &[String]) -> Result<()> {
         println!("MCP entry: not present");
     }
     let skill_dir = dsh_home().join("skills").join(SKILL_NAME);
-    println!("skill: {}", skill_dir.display());
     if dry {
-        println!("dry run; nothing removed");
+        println!("skill: {}", skill_dir.display());
         return Ok(());
     }
     if after != before {
@@ -740,7 +988,6 @@ fn uninstall(args: &[String]) -> Result<()> {
             .with_context(|| format!("removing {}", skill_dir.display()))?;
         println!("removed skill");
     }
-    println!("uninstalled. Restart DSH to drop the mcp client.");
     Ok(())
 }
 

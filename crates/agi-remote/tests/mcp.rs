@@ -132,7 +132,7 @@ async fn the_mcp_face_lists_eight_tools_and_calls_the_kernel() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names.len(), 8, "{names:?}");
+    assert_eq!(names.len(), 11, "{names:?}");
     for expected in [
         "remote_agents",
         "remote_options",
@@ -142,6 +142,9 @@ async fn the_mcp_face_lists_eight_tools_and_calls_the_kernel() {
         "remote_cancel",
         "remote_answer",
         "remote_send",
+        "local_options",
+        "local_delegate",
+        "local_send",
     ] {
         assert!(names.contains(&expected), "missing {expected}");
     }
@@ -202,6 +205,22 @@ async fn the_mcp_face_lists_eight_tools_and_calls_the_kernel() {
     server.abort();
 }
 
+/// The sidecar, pointed at one temporary home.
+///
+/// `HOME` and `USERPROFILE` both move, because an installer that resolved the
+/// real profile would edit this machine's Claude Code and Codex configs while a
+/// test claimed to be hermetic.
+fn hermetic(home: &std::path::Path) -> std::process::Command {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_agi-remote"));
+    command
+        .env("DSH_HOME", home.join(".dsh"))
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CODEX_HOME");
+    command
+}
+
 #[tokio::test]
 async fn dry_run_does_not_touch_the_dsh_profile() {
     let dir = tempfile::tempdir().unwrap();
@@ -211,10 +230,8 @@ async fn dry_run_does_not_touch_the_dsh_profile() {
     let patch = profile.join("cordis.patch.yml");
     std::fs::write(&patch, "# user comments stay\n- id: keep-me\n").unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_agi-remote"))
+    let output = hermetic(home.path())
         .args(["install", "--profile", "desktop", "--dry-run"])
-        .env("DSH_HOME", home.path().join(".dsh"))
-        .env_remove("HOME")
         .output()
         .unwrap();
     assert!(
@@ -244,14 +261,7 @@ async fn install_is_idempotent_and_uninstall_keeps_user_entries() {
     let original = "# user comments stay\n- id: keep-me\n  name: '@example/keep'\n";
     std::fs::write(&patch, original).unwrap();
 
-    let run = |args: &[&str]| {
-        std::process::Command::new(env!("CARGO_BIN_EXE_agi-remote"))
-            .args(args)
-            .env("DSH_HOME", home.path().join(".dsh"))
-            .env_remove("HOME")
-            .output()
-            .unwrap()
-    };
+    let run = |args: &[&str]| hermetic(home.path()).args(args).output().unwrap();
     let first = run(&["install", "--profile", "desktop"]);
     assert!(
         first.status.success(),
