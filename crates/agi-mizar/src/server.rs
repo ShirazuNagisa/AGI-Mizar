@@ -24,7 +24,7 @@
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -77,6 +77,7 @@ pub struct MizarServer {
     code: Mutex<Option<ActiveCode>>,
     attempts: Mutex<VecDeque<Instant>>,
     port: AtomicU16,
+    activity_revision: AtomicU64,
     /// The tunnel, when one is configured.
     relay: Mutex<Option<Arc<RelayClient>>>,
     /// Notices every connected phone receives: today, that the tunnel moved.
@@ -112,6 +113,7 @@ pub struct MizarServer {
     peer_sessions: Mutex<std::collections::HashMap<String, std::collections::BTreeSet<String>>>,
     /// Where the peer ownership map is kept, once boot points us at it.
     peer_sessions_path: Mutex<Option<std::path::PathBuf>>,
+    activity_clocks: Mutex<std::collections::HashMap<String, (u32, i64)>>,
 }
 
 /// Where the direct path listens, and the name a phone dials it by.
@@ -374,6 +376,7 @@ impl MizarServer {
             code: Mutex::new(None),
             attempts: Mutex::new(VecDeque::new()),
             port: AtomicU16::new(0),
+            activity_revision: AtomicU64::new(0),
             relay: Mutex::new(None),
             notices: broadcast::channel(16).0,
             foreground: Mutex::new(std::collections::HashSet::new()),
@@ -387,6 +390,7 @@ impl MizarServer {
             direct: Mutex::new(None),
             peer_sessions: Mutex::new(std::collections::HashMap::new()),
             peer_sessions_path: Mutex::new(None),
+            activity_clocks: Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -942,35 +946,60 @@ impl MizarServer {
                 let mut retry = true;
                 let mut reconcile = tokio::time::interval(std::time::Duration::from_secs(10));
                 reconcile.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let mut registrations = tokio::time::interval(std::time::Duration::from_secs(60));
+                registrations.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let mut previous_audience: Vec<(String, Option<String>)> = Vec::new();
                 loop {
                     tokio::select! {
+                        _ = registrations.tick() => {
+                            for body in server.store.push_registrations() {
+                                if let Ok(answer) = server.relay_post("/push/v1/register", body).await {
+                                    if activity_snapshot_needed(&answer) {
+                                        retry = true;
+                                    }
+                                }
+                            }
+                        }
                         _ = reconcile.tick() => {
+                            let mut audience: Vec<_> = server.store.devices().into_iter().filter(|device| device.is_live()).map(|device| (device.id, device.model)).collect();
+                            audience.sort();
+                            if audience != previous_audience { retry = true; previous_audience = audience; }
                             // A safety net for an approval event the broadcast
                             // missed: the snapshot is the authority, and a
                             // change there is worth one push. Rows are not
                             // compared here because `running_since` moves with
                             // every session update; a row change has its own
                             // event.
-                            if let Some(card) = server.current_card() {
-                                let known = tracker.card().approvals;
-                                // Compare as a set: the snapshot's interaction
-                                // order and the tracker's request-id order are
-                                // not the same, and two approvals must not look
-                                // like a change on every tick.
-                                let changed = card.approvals.len() != known.len()
-                                    || card
-                                        .approvals
-                                        .iter()
-                                        .any(|approval| !known.contains(approval));
-                                if retry || changed {
-                                    tracker.reconcile(&card);
-                                    retry = !server.publish_card(&card).await;
-                                }
+                            let card = server.current_card().unwrap_or_default();
+                            let known = tracker.card();
+                                // `updated_at` can move during one turn, so
+                                // compare the stable row identity and status,
+                                // plus pending requests, while preserving the
+                                // tracker's original runningSince.
+                                let changed = card.rows.len() != known.rows.len()
+                                    || card.rows.iter().zip(&known.rows).any(|(next, old)| {
+                                        next.session_id != old.session_id
+                                            || next.title != old.title
+                                            || next.status != old.status
+                                            || next.running_since != old.running_since
+                                    })
+                                    || card.approvals != known.approvals
+                                    || card.pending != known.pending;
+                            if retry || changed {
+                                tracker.reconcile_authoritative(&card);
+                                retry = !server.publish_card(&tracker.card()).await;
                             }
                         }
                         event = events.recv() => match event {
                             Ok(agi_protocol::api::ApiEvent::SessionUpdated { session }) => {
                                 if !session.running {
+                                    if let Some(card) = server.current_card() {
+                                        if card.rows.iter().any(|row| row.session_id == session.key.to_string()) {
+                                            tracker.reconcile_authoritative(&card);
+                                            retry = !server.publish_card(&tracker.card()).await;
+                                            continue;
+                                        }
+                                    }
                                     // Do not rely only on the state machine's terminal
                                     // frame to finish the card. A missed terminal frame
                                     // used to leave the island up until the app was
@@ -979,8 +1008,12 @@ impl MizarServer {
                                     server.finish_card(&mut tracker, &session.key, true).await;
                                     continue;
                                 }
-                                if let Some(card) = tracker.running(&session, activity_now()) {
-                                    retry = !server.publish_card(&card).await;
+                                if let Some(card) = server.current_card() {
+                                    let previous = tracker.card();
+                                    tracker.reconcile_authoritative(&card);
+                                    if tracker.card() != previous {
+                                        retry = !server.publish_card(&tracker.card()).await;
+                                    }
                                 }
                             }
                             Ok(agi_protocol::api::ApiEvent::SessionRemoved { session }) => {
@@ -989,31 +1022,17 @@ impl MizarServer {
                                 // nobody made.
                                 server.finish_card(&mut tracker, &session, false).await;
                             }
-                            Ok(agi_protocol::api::ApiEvent::InteractionRequested { interaction }) => {
-                                if let Some(card) = tracker.approval_requested(&interaction) {
-                                    retry = !server.publish_card(&card).await;
+                            Ok(agi_protocol::api::ApiEvent::InteractionRequested { interaction: _ }) => {
+                                if let Some(card) = server.current_card() {
+                                    tracker.reconcile_authoritative(&card);
+                                    retry = !server.publish_card(&tracker.card()).await;
                                 }
                             }
                             Ok(agi_protocol::api::ApiEvent::InteractionResolved { id }) => {
-                                if let Some(card) = tracker.approval_resolved(&id) {
-                                    // An empty card means the approval was the
-                                    // only thing on it; `publish_turn_end` owns
-                                    // ending an activity with no rows, and this
-                                    // loop has no session to name in that end
-                                    // push.
-                                    if !card.is_empty() {
-                                        retry = !server.publish_card(&card).await;
-                                    }
-                                } else if let Some(card) = server.current_card() {
-                                    // The tracker started after this approval was
-                                    // already pending, so it never saw the
-                                    // request and has no card to send. Re-read
-                                    // the snapshot: the approval is gone from it,
-                                    // and reconciling stops the same gap on the
-                                    // next resolve.
-                                    tracker.reconcile(&card);
-                                    retry = !server.publish_card(&card).await;
-                                }
+                                let _ = tracker.approval_resolved(&id);
+                                let card = server.current_card().unwrap_or_default();
+                                tracker.reconcile_authoritative(&card);
+                                retry = !server.publish_card(&tracker.card()).await;
                             }
                             Ok(_) => {}
                             Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -1212,6 +1231,7 @@ impl MizarServer {
                 // read per reader is the price of "refresh" being true.
                 self.core.refresh_sessions(EngineId::Dsh).await;
                 let snapshot = self.core.snapshot();
+                let activity = self.current_card().unwrap_or_default();
                 let items: Vec<SessionRow> = snapshot
                     .sessions
                     .iter()
@@ -1221,6 +1241,11 @@ impl MizarServer {
                     .map(|session| SessionRow {
                         session_id: session.key.to_string(),
                         updated_at: session.updated_at,
+                        turn_started_at: activity
+                            .rows
+                            .iter()
+                            .find(|row| row.session_id == session.key.to_string())
+                            .map(|row| row.running_since),
                         running: session.running,
                         blank: session.title.is_none() && session.turns == 0,
                         agent_available: true,
@@ -2647,24 +2672,10 @@ impl MizarServer {
                         "push.register needs a token",
                     );
                 };
-                let mut body = json!({
-                    "deviceId": device.id,
-                    "token": token,
-                    "platform": frame.payload.get("platform").and_then(Value::as_str).unwrap_or("ios"),
-                });
+                let body = push_registration_body(&device.id, &frame.payload, token);
                 if let Some(locale) = frame.payload.get("locale").and_then(Value::as_str) {
                     if let Err(error) = self.store.set_locale(&device.id, locale) {
                         tracing::warn!("mizar: could not record the phone's language: {error}");
-                    }
-                }
-                for field in [
-                    "environment",
-                    "locale",
-                    "liveActivityToken",
-                    "liveActivityStartToken",
-                ] {
-                    if let Some(value) = frame.payload.get(field) {
-                        body[field] = value.clone();
                     }
                 }
                 // The roster's second kind of reachable: a phone with a
@@ -2679,10 +2690,14 @@ impl MizarServer {
                         tracing::warn!("mizar: could not record live activity: {error}");
                     }
                 }
-                match self.relay_post("/push/v1/register", body).await {
+                match self.relay_post("/push/v1/register", body.clone()).await {
                     Ok(answer) => {
                         let registered = answer.get("ok").and_then(Value::as_bool).unwrap_or(false);
                         if registered {
+                            if let Err(error) = self.store.cache_push_registration(&device.id, body)
+                            {
+                                tracing::warn!("mizar: could not cache push registration: {error}");
+                            }
                             // The phone may have registered after a session
                             // started. A start that was sent before this token
                             // existed is gone; publish the current card now so
@@ -2699,6 +2714,7 @@ impl MizarServer {
             }
 
             "push.unregister" => {
+                let _ = self.store.forget_push_registration(&device.id);
                 if let Err(error) = self.store.set_live_activity(&device.id, false) {
                     tracing::warn!("mizar: could not clear live activity: {error}");
                 }
@@ -3014,36 +3030,27 @@ impl MizarServer {
     /// reconciliation could never publish (or remove) one.
     fn current_card(&self) -> Option<crate::activity::Card> {
         let snapshot = self.core.snapshot();
-        let mut rows: Vec<crate::activity::Row> = snapshot
-            .sessions
-            .iter()
-            .filter(|session| session.running)
-            .map(|session| crate::activity::Row {
-                session_id: session.key.to_string(),
-                title: session.title.clone().unwrap_or_default(),
-                running_since: session.updated_at,
-            })
-            .collect();
-        rows.sort_by_key(|row| row.running_since);
-        rows.truncate(crate::activity::MAX_ROWS);
-        let approvals = snapshot
-            .interactions
-            .iter()
-            .filter(|interaction| {
-                interaction.kind == agi_protocol::domain::InteractionKind::Approval
-            })
-            .map(|interaction| crate::activity::Approval {
-                request_id: interaction.id.clone(),
-                session_id: interaction
-                    .session
-                    .as_ref()
-                    .map(|key| key.to_string())
-                    .unwrap_or_default(),
-                tool: interaction.title.clone(),
-                detail: interaction.detail.clone().unwrap_or_default(),
-            })
-            .collect();
-        let card = crate::activity::Card { rows, approvals };
+        let mut card = crate::activity::snapshot_card(&snapshot.sessions, &snapshot.interactions);
+        let mut clocks = self
+            .activity_clocks
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        clocks.retain(|id, _| card.rows.iter().any(|row| row.session_id == *id));
+        for row in &mut card.rows {
+            let turns = snapshot
+                .sessions
+                .iter()
+                .find(|session| session.key.to_string() == row.session_id)
+                .map(|session| session.turns)
+                .unwrap_or(0);
+            let clock = clocks
+                .entry(row.session_id.clone())
+                .or_insert((turns, row.running_since));
+            if clock.0 != turns {
+                *clock = (turns, row.running_since);
+            }
+            row.running_since = clock.1;
+        }
         (!card.is_empty()).then_some(card)
     }
 
@@ -3051,13 +3058,12 @@ impl MizarServer {
     ///
     /// The resynchronisation path for a phone that registered its push address
     /// after a session had already started, and for the activity loop's first
-    /// tick. The snapshot is read once; an empty card is `false`, because ending
-    /// an activity is `publish_turn_end`'s job rather than an update with
-    /// nothing in it.
+    /// tick. The snapshot is read once; an empty card is still published so the
+    /// relay can reconcile this host with snapshots from the other computers.
     async fn publish_current_card(&self) -> bool {
         match self.current_card() {
             Some(card) => self.publish_card(&card).await,
-            None => false,
+            None => self.publish_card(&crate::activity::Card::default()).await,
         }
     }
 
@@ -3068,24 +3074,55 @@ impl MizarServer {
     /// which phones are showing one -- the relay already knows, because a card
     /// reports its own token.
     async fn publish_card(&self, card: &crate::activity::Card) -> bool {
-        // An empty card is not "a card with no rows": it is the end of the
-        // activity, and `publish_turn_end` is the call that ends it.
-        if card.is_empty() {
-            return false;
-        }
+        // Empty is an authoritative snapshot of this host. The relay ends
+        // the unified activity only after all registered hosts are empty.
         // Do not exclude a device just because presence says it is on screen.
         // That report is asynchronous and can be stale after the app is
         // suspended; excluding it is how a session started on the desktop never
         // gets a card on the phone. The relay turns a start into an update when
         // the phone has already reported its own card, so including every device
         // is also what prevents a second card rather than what causes one.
-        let body = crate::activity::activity_body(card, &[]);
+        let mut body = crate::activity::activity_body(
+            card,
+            &[],
+            &self.store.host_id(),
+            &self.store.host_name(),
+            activity_now(),
+        );
+        // Push must obey the same token scope and peer ownership as reads.
+        // A UI-selected engine is not an authorization boundary; the stored
+        // token marker is. The relay filters this audience per room/device.
+        body["revision"] = json!(self.activity_revision.fetch_add(1, Ordering::Relaxed));
+        let devices = self.store.devices();
+        for field in ["rows", "approvals"] {
+            if let Some(items) = body.get_mut(field).and_then(Value::as_array_mut) {
+                for item in items {
+                    let key = item
+                        .get("sessionId")
+                        .and_then(Value::as_str)
+                        .and_then(|id| id.parse::<SessionKey>().ok());
+                    let audience: Vec<String> = devices
+                        .iter()
+                        .filter(|device| {
+                            device.is_live()
+                                && key.as_ref().is_some_and(|key| {
+                                    Self::in_scope(Self::engine_scope(device), key)
+                                        && self.peer_owns(device, key)
+                                })
+                        })
+                        .map(|device| device.id.clone())
+                        .collect();
+                    item["allowedDeviceIds"] = json!(audience);
+                }
+            }
+        }
         match self.relay_post("/push/v1/activity", body).await {
             Ok(answer) => {
                 // `sent` is the relay's APNs tally. A start whose transport
                 // failed is not a card; keep it eligible for the activity
                 // loop's periodic retry rather than waiting for the next turn.
                 answer.get("sent").and_then(Value::as_u64).unwrap_or(0) > 0
+                    || answer.get("failed").and_then(Value::as_u64) == Some(0)
             }
             Err(error) => {
                 // A phone that cannot be reached is a worse app, not a broken host.
@@ -3116,6 +3153,7 @@ impl MizarServer {
             return;
         };
         if card.is_empty() {
+            self.publish_card(&card).await;
             if tell {
                 self.publish_turn_end(session, &title, true).await;
             }
@@ -3140,13 +3178,18 @@ impl MizarServer {
         } else {
             self.foreground_devices()
         };
-        let body = crate::activity::turn_end_body(
+        let mut body = crate::activity::turn_end_body(
             title,
             session,
             end,
             &except,
             self.store.prefers_chinese(),
+            &self.store.host_id(),
+            &self.store.host_name(),
         );
+        body["snapshotVersion"] = json!(2);
+        body["sentAt"] = json!(activity_now());
+        body["revision"] = json!(self.activity_revision.fetch_add(1, Ordering::Relaxed));
         if let Err(error) = self.relay_post("/push/v1/notify", body).await {
             tracing::debug!("mizar: no turn-end notification — {error}");
         }
@@ -4502,6 +4545,34 @@ fn activity_now() -> i64 {
         .unwrap_or_default()
 }
 
+fn push_registration_body(device_id: &str, payload: &Value, token: &str) -> Value {
+    let mut body = json!({
+        "deviceId": device_id,
+        "token": token,
+        "platform": payload.get("platform").and_then(Value::as_str).unwrap_or("ios"),
+    });
+    for field in [
+        "environment",
+        "locale",
+        "liveActivityToken",
+        "liveActivityStartToken",
+        "liveActivityVersion",
+        "liveActivityTokenObservedAt",
+    ] {
+        if let Some(value) = payload.get(field) {
+            body[field] = value.clone();
+        }
+    }
+    body
+}
+
+fn activity_snapshot_needed(answer: &Value) -> bool {
+    answer
+        .get("activitySnapshotNeeded")
+        .and_then(Value::as_bool)
+        == Some(true)
+}
+
 /// The OS name the phone displays.
 fn os_name() -> &'static str {
     if cfg!(target_os = "macos") {
@@ -4559,6 +4630,35 @@ mod tests {
             currency: currency.to_string(),
             amount: amount.to_string(),
         }
+    }
+
+    #[test]
+    fn push_registration_forwards_v2_and_leaves_legacy_version_absent() {
+        let legacy = push_registration_body("phone", &json!({ "token": "apns" }), "apns");
+        assert!(legacy.get("liveActivityVersion").is_none());
+        assert_eq!(legacy["platform"], "ios");
+
+        let v2 = push_registration_body(
+            "phone",
+            &json!({ "token": "apns", "liveActivityVersion": 2 }),
+            "apns",
+        );
+        assert_eq!(v2["liveActivityVersion"], 2);
+    }
+
+    #[test]
+    fn registration_replay_requests_a_snapshot_only_when_relay_says_so() {
+        assert!(activity_snapshot_needed(
+            &json!({ "ok": true, "activitySnapshotNeeded": true })
+        ));
+        assert!(!activity_snapshot_needed(
+            &json!({ "ok": true, "activitySnapshotNeeded": false })
+        ));
+        assert!(!activity_snapshot_needed(&json!({ "ok": true })));
+        assert!(!activity_snapshot_needed(&json!({
+            "ok": true,
+            "activitySnapshotNeeded": "true"
+        })));
     }
 
     #[test]

@@ -105,20 +105,33 @@ fn card() -> activity::Card {
             session_id: "dsh:s-1".to_string(),
             title: "Refactor the parser".to_string(),
             running_since: 1_700_000_000_000,
+            waiting_since: None,
+            status: activity::RowStatus::Running,
         }],
         approvals: vec![],
+        pending: vec![],
     }
 }
 
 #[tokio::test]
 async fn a_running_session_becomes_a_card_the_relay_can_start() {
-    let (server, _store, _dir) = start().await;
+    let (server, store, _dir) = start().await;
     let (base, seen) = fake_relay().await;
     server.attach_relay(RelayClient::new(base, "a-tunnel-token", 1));
 
     server.publish_card_for_tests(&card()).await;
 
-    let requests = seen.lock().unwrap().clone();
+    let requests: Vec<_> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| {
+            request.body["rows"]
+                .as_array()
+                .is_some_and(|rows| !rows.is_empty())
+        })
+        .cloned()
+        .collect();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].path, "/push/v1/activity");
     let body = &requests[0].body;
@@ -127,6 +140,11 @@ async fn a_running_session_becomes_a_card_the_relay_can_start() {
     assert_eq!(body["phase"], "start");
     assert_eq!(body["rows"][0]["sessionId"], "dsh:s-1");
     assert_eq!(body["rows"][0]["runningSince"], 1_700_000_000_000i64);
+    assert_eq!(body["rows"][0]["status"], "running");
+    assert_eq!(body["hostId"], store.host_id());
+    assert_eq!(body["hostName"], "test-host");
+    assert_eq!(body["snapshotVersion"], 2);
+    assert!(body["sentAt"].as_i64().is_some_and(|sent_at| sent_at > 0));
     assert!(body["approvals"].as_array().unwrap().is_empty());
     // A stale foreground report must not suppress the start: the card is the
     // only thing that can appear when the phone was never opened for this turn.
@@ -172,7 +190,7 @@ async fn an_approval_rides_on_the_card_with_the_id_an_answer_will_name() {
 
 #[tokio::test]
 async fn a_finished_turn_ends_the_card_and_says_which_session() {
-    let (server, _store, _dir) = start().await;
+    let (server, store, _dir) = start().await;
     let (base, seen) = fake_relay().await;
     server.attach_relay(RelayClient::new(base, "a-tunnel-token", 1));
 
@@ -189,6 +207,8 @@ async fn a_finished_turn_ends_the_card_and_says_which_session() {
     // The last row finished, so the same request brings the island down: one
     // call, because the two facts are only true together.
     assert_eq!(body["endLiveActivity"], true);
+    assert_eq!(body["hostId"], store.host_id());
+    assert_eq!(body["hostName"], "test-host");
     assert_eq!(body["body"], "Refactor the parser is done");
     // An end push must reach even a device the host still believes is on
     // screen: a stale presence report must not leave the card counting.
@@ -251,7 +271,13 @@ async fn a_question_reaches_a_device_the_host_still_believes_is_on_screen() {
 
     server.notify_interaction_for_tests(&question_batch()).await;
 
-    let requests = seen.lock().unwrap().clone();
+    let requests: Vec<_> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.path == "/push/v1/notify")
+        .cloned()
+        .collect();
     assert_eq!(requests.len(), 1, "one wake-up per interaction");
     assert_eq!(requests[0].path, "/push/v1/notify");
     assert!(

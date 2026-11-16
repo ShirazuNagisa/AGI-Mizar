@@ -81,6 +81,12 @@ struct FileContents {
     host_name: String,
     #[serde(default)]
     devices: Vec<Device>,
+    #[serde(
+        rename = "pushRegistrations",
+        default,
+        skip_serializing_if = "std::collections::BTreeMap::is_empty"
+    )]
+    push_registrations: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 /// The roster.
@@ -114,6 +120,7 @@ impl DeviceStore {
                 host_id: uuid::Uuid::new_v4().to_string(),
                 host_name: host_name.into(),
                 devices: Vec::new(),
+                push_registrations: Default::default(),
             },
         };
 
@@ -219,6 +226,7 @@ impl DeviceStore {
             }
         };
         if revoked {
+            self.state().push_registrations.remove(id);
             self.save()?;
         }
         Ok(revoked)
@@ -316,6 +324,46 @@ impl DeviceStore {
             return desktop_prefers_chinese();
         }
         false
+    }
+
+    /// APNs addresses are replayed after a relay restart while the phone sleeps.
+    /// They are stored in the existing 0600 roster, never in source or logs.
+    pub fn cache_push_registration(&self, id: &str, body: serde_json::Value) -> io::Result<()> {
+        {
+            let mut state = self.state();
+            if !state
+                .devices
+                .iter()
+                .any(|device| device.id == id && device.is_live())
+            {
+                return Ok(());
+            }
+            if state.push_registrations.get(id) == Some(&body) {
+                return Ok(());
+            }
+            state.push_registrations.insert(id.to_string(), body);
+        }
+        self.save()
+    }
+
+    pub fn forget_push_registration(&self, id: &str) -> io::Result<()> {
+        self.state().push_registrations.remove(id);
+        self.save()
+    }
+
+    pub fn push_registrations(&self) -> Vec<serde_json::Value> {
+        let state = self.state();
+        state
+            .push_registrations
+            .iter()
+            .filter(|(id, _)| {
+                state
+                    .devices
+                    .iter()
+                    .any(|device| device.id == **id && device.is_live())
+            })
+            .map(|(_, body)| body.clone())
+            .collect()
     }
 
     /// Every device, revoked ones included.
@@ -671,5 +719,18 @@ mod tests {
         for name in ["en0", "以太网", "ethernet"] {
             assert!(!is_tunnel(name), "{name} is not a tunnel");
         }
+    }
+    #[test]
+    fn cached_push_registration_survives_reopen_and_revocation_removes_it() {
+        let (store, dir) = store();
+        let issued = store.issue("Phone", None).unwrap();
+        let body = serde_json::json!({"deviceId": issued.device.id, "token": "test-apns-address", "liveActivityVersion": 2, "liveActivityTokenObservedAt": 100});
+        store
+            .cache_push_registration(&issued.device.id, body.clone())
+            .unwrap();
+        let reopened = DeviceStore::open(dir.path().join("devices.json"), "test-host").unwrap();
+        assert_eq!(reopened.push_registrations(), vec![body]);
+        reopened.revoke(&issued.device.id).unwrap();
+        assert!(reopened.push_registrations().is_empty());
     }
 }
