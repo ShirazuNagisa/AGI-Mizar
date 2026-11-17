@@ -20,7 +20,9 @@ jobs:
       - name: Build the headless kernel and package it
         run: |
           chmod +x scripts/package-linux.sh
-          ./scripts/package-linux.sh --skip-ui --out dist
+          # Absolute: the script `cd`s into its staging dirs before writing the
+          # deb members, so a relative --out lands in the wrong place.
+          ./scripts/package-linux.sh --skip-ui --out "$PWD/dist"
       - name: Show what was built
         run: ls -la dist && cat dist/SHA256SUMS
       - uses: actions/upload-artifact@v4
