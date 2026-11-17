@@ -40,6 +40,15 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+# The packaging steps `cd` into staging directories before writing the deb
+# members, so a relative --out would land next to the staging dir instead of in
+# it. Resolve it once, here, while the caller's working directory still holds.
+case "$OUT_DIR" in
+  /*) ;;
+  *) OUT_DIR="$REPO_ROOT/$OUT_DIR" ;;
+esac
+mkdir -p "$OUT_DIR"
+
 RELEASE_VERSION="${VERSION}-beta.${BETA}"
 DEB_VERSION="${VERSION}~beta.${BETA}"
 COMMIT="${AGI_MIZAR_COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)}"
