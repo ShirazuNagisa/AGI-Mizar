@@ -1141,15 +1141,27 @@ impl Core {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             preferences.server.origin_trimmed() != normalized.origin_trimmed()
         };
-        {
+        let unchanged = {
             let mut preferences = self
                 .preferences
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if preferences.server == normalized {
-                return Ok(self.server_view());
+                true
+            } else {
+                preferences.server = normalized;
+                false
             }
-            preferences.server = normalized;
+        };
+        // The view is read back only after the guard is gone. Calling
+        // `server_view()` inside the block above — as 0.2.0 did — takes the read
+        // lock from the thread that already holds the write lock, and a
+        // `std::sync::RwLock` does not hand it back: the launch stopped between
+        // "core configured" and the first engine, with no log, no panic and no
+        // window. Every fresh install took that path, because a missing
+        // `preferences.json` compares equal to the default the caller passes in.
+        if unchanged {
+            return Ok(self.server_view());
         }
         // A different server knows nothing about the old PIN requirement; the
         // same server's answer stays until a new check replaces it.
@@ -1844,6 +1856,7 @@ impl Core {
 
         for engine in &self.engines {
             let id = engine.id();
+            tracing::debug!("{id}: listing sessions");
 
             match engine.sessions().await {
                 Ok(sessions) => {
@@ -3809,6 +3822,30 @@ mod tests {
     use agi_protocol::api::{ModelUsage, UsageDay};
     use agi_protocol::engine::Capabilities;
     use async_trait::async_trait;
+
+    /// An unchanged server choice has to come back, not hang.
+    ///
+    /// The window reads `preferences.json` before boot and passes the result
+    /// into the kernel, so a machine that has never run this build sends the
+    /// default — which compares equal to the default the kernel loaded. That
+    /// branch used to answer `server_view()` from inside the write guard, and
+    /// `server_view` reads the same lock: one thread waiting on itself, no
+    /// panic, no log, no window. It is the first launch of every install.
+    #[test]
+    fn an_unchanged_server_choice_returns_instead_of_deadlocking() {
+        let core = Core::new(Vec::new());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let answer = core
+                .set_server_prefs(ServerPrefs::default())
+                .map(|view| view.mode);
+            let _ = sender.send(answer);
+        });
+        let answer = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("set_server_prefs deadlocked on an unchanged choice");
+        assert_eq!(answer.expect("the default choice is valid"), "official");
+    }
 
     /// An adapter that answers from memory, so the kernel's own logic is what
     /// these tests exercise.

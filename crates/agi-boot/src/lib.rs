@@ -147,6 +147,7 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
     let (hosted, missing) = discover_local(&[EngineId::Dsh, EngineId::Claude]);
     engines.extend(hosted);
 
+    tracing::debug!("boot: engines built");
     let core = Core::new(engines);
     {
         let dsh_for_notice = Arc::clone(&dsh);
@@ -229,6 +230,8 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
         }
     }
 
+    tracing::debug!("boot: core configured");
+
     // The caller may have read the preference file before boot (the window does,
     // so the tunnel target is decided before the kernel exists). Adopt it here so
     // the in-memory choice, the snapshot and the file all agree.
@@ -238,6 +241,7 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
         }
     }
     core.start().await;
+    tracing::debug!("boot: engines started");
 
     // Claude has no socket that pushes a desktop Code tab's new transcript. A
     // ten-second disk refresh is the fallback: it reads files that are already
@@ -272,6 +276,7 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
                 .to_string()
         });
 
+    tracing::debug!("boot: binding the api");
     let (api_port, _api) = server::bind(
         Arc::clone(&core),
         dsh,
@@ -287,6 +292,8 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
     )
     .await?;
 
+    tracing::debug!("boot: api on {api_port}");
+
     // Published only after the listener is up: a plugin that dials a port nobody
     // answers retries with backoff and looks broken.
     endpoint::write_endpoint_file(&endpoint_file, api_port, &plugin_token)?;
@@ -301,6 +308,7 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
 
     // The phone's server: every interface, because a phone on the same network
     // has to reach it, unlike the local API.
+    tracing::debug!("boot: opening the device roster");
     let roster = DeviceStore::open(
         agi_mizar::store::default_store_path(),
         agi_mizar::store::host_name(),

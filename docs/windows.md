@@ -646,3 +646,40 @@ macOS 侧又推进 29 个提交（remote_health 依赖检查+日志导出、remo
   （00:04:22），于是重新拉取 + 变基、重建 UI（`index-CObeeIqP.css` / `index-DK0ysHUZ.js`，与提交逐字节
   一致）并重打安装包、重装复验；上面的哈希是最终这一版。
 - 证据：`docs/evidence/agi-mizar-windows-2026-11-11/`；词条 `desktop.windows-window-resize-collapse`。
+
+---
+
+## 12. 启动失败怎么查（0.2.1 起）
+
+安装版双击图标没有窗口时，先看 **`%USERPROFILE%\.agi-mizar\launcher.log`**（1 MiB 轮转到
+`launcher.log.1`）。这是启动器自己的日志，内核还没起来时它已经在写：
+
+```
+launch 0.2.1 (windows) arguments []
+webview2 157.0.4341.46
+window: created
+boot: starting the kernel
+boot: kernel up in 739 ms at port 54255
+boot: pairing code XXXX-XXXX (mizar://pair?...)
+window: kernel page loaded
+```
+
+| 最后一行 | 含义 | 下一步 |
+|---|---|---|
+| 只有 `launch` | 进程刚起就退出 | 再跑一次带 `RUST_LOG=info` 的 `agi-mizar.exe`，或看 `FATAL`/`panic` 行 |
+| `webview2 not found` | 没有 WebView2 运行时，窗口建不出来（会先弹窗） | 装 WebView2 运行时；0.2.1 起安装包自带引导器 |
+| `window: created` 之后没有 `boot: kernel up` | 内核侧卡住 | `RUST_LOG=agi_boot=debug` 看到 `core configured` 之后的阶段 |
+| `boot: kernel up` 之后没有 `window: kernel page loaded` | 导航/网页失败 | 看弹窗内容；必要时删 `%LOCALAPPDATA%\me.shirazu.agimizar\EBWebView` 让 WebView2 重建配置 |
+| `FATAL ...` | 启动器主动放弃，弹窗里有同一条 | 按日志原文排查（端口、目录权限、WebView2） |
+
+几条边界：
+
+- **0.2.0 的安装包是坏的**：`Core::set_server_prefs` 持写锁回调 `server_view()` 造成同线程死锁，
+  任何全新安装的第一次启动都会停在 `core configured`，没有窗口也没有日志。只能升级到 0.2.1，
+  没有配置可以绕过。排查细节见工作区 `docs/session-notes/2026-11-17-windows-first-launch-deadlock.md`。
+- **`--background` 是开机自启用的**：窗口建好但隐藏。手动再点一次图标会把已有窗口抬起来
+  （单实例回调 `tray::show_window`）；0.2.1 之前窗口要等内核起来才创建，内核卡住时点击会被
+  单实例吞掉，什么都看不到。
+- 开发机上直接 `cargo build -p agi-app` 出来的 exe 与安装版**共用单实例锁**，安装版在跑时新 exe
+  会立刻退出。要并行调试用
+  `TAURI_CONFIG='{"identifier":"me.shirazu.agimizar.probe"}' cargo build -p agi-app`。

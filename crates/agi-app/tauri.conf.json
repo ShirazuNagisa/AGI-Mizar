@@ -34,7 +34,7 @@
     },
     "windows": {
       "webviewInstallMode": {
-        "type": "downloadBootstrapper"
+        "type": "embedBootstrapper"
       }
     },
     "createUpdaterArtifacts": true

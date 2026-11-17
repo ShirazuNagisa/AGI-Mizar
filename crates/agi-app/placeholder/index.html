@@ -1,1 +1,103 @@
-<!doctype html><meta charset="utf-8"><title>AGI Mizar</title><p>Loading…</p>
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>AGI Mizar</title>
+<!--
+  The page the window opens before the kernel exists.
+
+  It is served from the bundle, not from the kernel, so it is the one thing that
+  can be drawn while the kernel is still opening its ports — and the one thing a
+  person sees when it never gets there. Keep it dependency-free: no fonts to
+  fetch, no scripts to wait for, nothing that can fail on a machine that is
+  already having a bad time.
+-->
+<style>
+  :root {
+    --paper: #ffffff;
+    --ink: #111111;
+    --muted: #6b6b6b;
+    --rule: #e3e3e3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #000000;
+      --ink: #f2f2f2;
+      --muted: #8f8f8f;
+      --rule: #262626;
+    }
+  }
+  html, body {
+    height: 100%;
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font: 13px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    -webkit-user-select: none;
+    user-select: none;
+    cursor: default;
+  }
+  body {
+    display: grid;
+    place-items: center;
+  }
+  main {
+    display: grid;
+    justify-items: center;
+    gap: 18px;
+    padding: 24px;
+  }
+  .mark {
+    width: 44px;
+    height: 44px;
+    border: 1.5px solid var(--ink);
+    display: grid;
+    place-items: center;
+    font: 600 15px/1 ui-monospace, "Cascadia Mono", monospace;
+    letter-spacing: 0.02em;
+  }
+  .name {
+    font-weight: 600;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .bar {
+    width: 168px;
+    height: 3px;
+    background: var(--rule);
+    overflow: hidden;
+    position: relative;
+  }
+  .bar::after {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 40%;
+    background: var(--ink);
+    animation: sweep 1.15s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+  }
+  @keyframes sweep {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(250%); }
+  }
+  .hint {
+    color: var(--muted);
+    font-size: 12px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .bar::after { animation: none; width: 100%; }
+  }
+</style>
+</head>
+<body>
+  <main>
+    <div class="mark">MZ</div>
+    <div class="name">AGI Mizar</div>
+    <div class="bar" role="progressbar" aria-label="正在启动内核"></div>
+    <div class="hint" id="hint">正在启动内核…</div>
+  </main>
+</body>
+</html>

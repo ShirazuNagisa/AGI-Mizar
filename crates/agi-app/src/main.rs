@@ -1,25 +1,34 @@
 //! The window.
 //!
 //! A Tauri shell around the same kernel the daemon runs. It does three things:
-//! start the kernel, open one window pointed at the kernel's own page, and stay
-//! out of the way.
+//! open the window, start the kernel behind it, and stay out of the way.
 //!
-//! ### Why the window loads a URL instead of bundled assets
+//! ### Why the window loads the kernel's URL
 //!
 //! Because the front end talks to the kernel over loopback HTTP, not over Tauri's
 //! IPC. Loading `http://127.0.0.1:<port>/?token=…` means the same page runs in a
 //! browser during development and in the window afterwards, with no second
-//! transport and no second build. When the React app lands it will be served from
-//! that same route.
+//! transport and no second build.
 //!
-//! ### Why the kernel boots inside `setup`
+//! The window is built before that URL exists. Its first page is the bundle's
+//! placeholder — "starting the kernel" — and [`attach_kernel`] navigates it to the
+//! kernel once boot returns. Skipping that step is what made 0.2.0 look broken on
+//! machines this was not developed on: a launch that could not finish booting had
+//! no window either, so the only symptom anyone could report was "nothing
+//! happens".
+//!
+//! ### Why the kernel still boots from `setup`
 //!
 //! A second launch is a person asking for the window they already have, not a
 //! request for a second computer. The single-instance plugin ends the new process
 //! while the Tauri builder is still being constructed — before any of `setup`
-//! runs — so booting here is what keeps that second process from binding a second
-//! set of ports and rewriting the endpoint files the hooks and the DSH plugin
-//! read. One process, one kernel, one set of files.
+//! runs — so booting from here is what keeps that second process from binding a
+//! second set of ports and rewriting the endpoint files the hooks and the DSH
+//! plugin read. One process, one kernel, one set of files.
+//!
+//! It runs on its own thread rather than inline: the event loop has to be turning
+//! for the window to draw, for the tray to answer, and for a second launch's
+//! "show me the window" message to be delivered at all.
 //!
 //! ### Why the runtime is leaked
 //!
@@ -34,6 +43,7 @@ mod ipc;
 mod kernel;
 mod login_item;
 mod shell;
+mod startup;
 mod tray;
 mod updates;
 
@@ -203,7 +213,147 @@ fn compensate_window_frame(window: &tauri::WebviewWindow) {
     )));
 }
 
+/// Build the one window this app has, pointed at the bundle's starting page.
+///
+/// Until 0.2.0 the window was built after the kernel, which meant a launch that
+/// could not finish booting had nothing on screen and no way to say so. The page
+/// this one opens is the placeholder in `placeholder/` — a few lines that say the
+/// kernel is starting — and [`attach_kernel`] replaces it with the real one.
+fn build_main_window(app: &tauri::App, background: bool) -> tauri::Result<tauri::WebviewWindow> {
+    // 802 logical pixels is the height the dashboard and the guide were drawn
+    // for, but it is a preference: a 1080p laptop at 150% scaling has about 672
+    // logical pixels of work area, and a first screen whose footer is off the
+    // bottom is broken before it is used. Ask the monitor, keep 80 logical
+    // pixels of breathing room, and never go below the 480 floor or above the
+    // design height.
+    let height = app
+        .handle()
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map(|monitor| {
+            let area = monitor.work_area();
+            let logical = area.size.height as f64 / monitor.scale_factor();
+            (logical - 80.0).clamp(WINDOW_MIN_HEIGHT, 802.0)
+        })
+        .unwrap_or(802.0);
+
+    let builder =
+        tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
+            .title("AGI Mizar")
+            .inner_size(WINDOW_WIDTH, height)
+            // The dashboard's year of squares is the widest thing the window ever
+            // draws; at any narrower size the last weeks are cut off. The width is
+            // therefore not a preference — the height still is, and keeps its own floor.
+            .min_inner_size(WINDOW_WIDTH, WINDOW_MIN_HEIGHT)
+            .max_inner_size(WINDOW_WIDTH, WINDOW_MAX_HEIGHT)
+            .visible(!background);
+
+    // The window draws its own chrome: on macOS the page reserves a strip for
+    // the traffic lights and the system overlays them; on Windows the page draws
+    // the same strip and its own traffic lights, because the system title bar is
+    // removed below. Linux keeps the system title bar (and its own window menu).
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .traffic_light_position(tauri::LogicalPosition::new(18.0, 20.0));
+
+    // Borderless on Windows: no caption, but `shadow(true)` gives the DWM drop
+    // shadow and frame insets back, and tao still resizes the window from its
+    // edges and keeps a maximized window off the taskbar (WM_NCCALCSIZE uses the
+    // monitor work area).
+    #[cfg(windows)]
+    let builder = builder.decorations(false).shadow(true);
+
+    let window = builder.build()?;
+
+    // Windows reads the constraints off the outer window, tao wrote them from
+    // the inner one: add the frame back before the person can grab an edge.
+    #[cfg(windows)]
+    compensate_window_frame(&window);
+
+    Ok(window)
+}
+
+/// Point the window at the kernel, and add the tray page that needs its URL.
+///
+/// Runs on the main thread once the kernel is up. The placeholder is replaced by
+/// the kernel's own page, which is also the thing that draws the window's chrome
+/// — so until this call the window has a title bar's worth of nothing and must
+/// not be presented as finished.
+fn attach_kernel(
+    app: &tauri::AppHandle,
+    kernel_url: &str,
+    core: &Arc<agi_core::Core>,
+) -> Result<(), String> {
+    use tauri::Manager;
+
+    // The platform rides in the URL so the page can lay itself out for this
+    // machine on its very first paint, before the snapshot (which also carries
+    // it) has been fetched.
+    let url = format!("{kernel_url}&platform={}", agi_platform::platform());
+
+    let window = app
+        .get_webview_window("main")
+        .ok_or("the main window is gone before the kernel answered")?;
+    let parsed: tauri::Url = url.parse().map_err(|error| format!("{error}"))?;
+    window.navigate(parsed).map_err(|error| error.to_string())?;
+    startup::note("window: kernel page loaded");
+
+    // The tray page: a borderless window that lives under the tray icon.
+    // A native menu cannot put an icon left of a label, pin a lamp to the
+    // right, or hug the text's width — all three are the spec.
+    let panel_url = format!("{url}&panel=tray");
+    let panel_parsed: tauri::Url = panel_url.parse().map_err(|error| format!("{error}"))?;
+    let panel = tauri::WebviewWindowBuilder::new(
+        app,
+        "tray-panel",
+        tauri::WebviewUrl::External(panel_parsed),
+    )
+    .title("AGI Mizar")
+    .inner_size(tray::PANEL_WIDTH, 300.0)
+    .decorations(false)
+    .resizable(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .visible(false)
+    .build()
+    .map_err(|error| error.to_string())?;
+    panel.hide().map_err(|error| error.to_string())?;
+    // Looking at the tray page without a click is the only way to check
+    // it on a machine that cannot script the tray.
+    if std::env::var("MIZAR_SHOW_PANEL").is_ok() {
+        let _ = panel.show();
+    }
+
+    // macOS draws the bundle's one icon; the window's theme (which can
+    // differ from the system's) picks which of the two this is.
+    #[cfg(target_os = "macos")]
+    {
+        dock_icon::follow(&core.theme());
+        let handle = app.clone();
+        let core = Arc::clone(core);
+        tauri::async_runtime::spawn(async move {
+            loop {
+                let theme = core.theme();
+                let handle = handle.clone();
+                let _ = handle.run_on_main_thread(move || dock_icon::follow(&theme));
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = core;
+
+    Ok(())
+}
+
 fn main() {
+    // Before anything that can fail, and before anything that can panic: the
+    // banner is the first line of every report from a machine we cannot see.
+    startup::init();
+
     // Start at login is also a thing an operator scripts: an MDM image, a
     // headless setup, a test. The tray checkbox and these flags are the same
     // call, so there is only one answer to what "enabled" means. It runs before
@@ -256,9 +406,56 @@ fn main() {
             ipc::tray_panel_open_settings,
         ])
         .setup(move |app| {
-            // The kernel boots here, before the windows exist: see the module
-            // docs for why it cannot happen before the builder.
-            let runtime: &'static mut tokio::runtime::Runtime = Box::leak(Box::new(runtime));
+            // Windows cannot draw a window without WebView2, and this build has
+            // no console to say so: ask before the builder returns an error
+            // nobody can read.
+            if let Err(message) = startup::require_webview2() {
+                startup::fail("AGI Mizar 无法启动", &message);
+                std::process::exit(1);
+            }
+
+            let background = std::env::args().any(|argument| argument == "--background");
+
+            // The window first, the kernel second.
+            //
+            // It used to be the other way round, and every delay below the
+            // window — a first disk scan, a blocked proxy, an engine that never
+            // answers — looked identical from the outside: an icon that does
+            // nothing, and no way to tell why. A window that says "starting"
+            // costs a frame and turns that into a sentence. It is also what
+            // makes a second launch land: the single-instance plugin can only
+            // raise a window that exists, so a click during boot used to be
+            // swallowed by a process that had nothing to raise.
+            let window = match build_main_window(app, background) {
+                Ok(window) => window,
+                Err(error) => {
+                    startup::fail(
+                        "AGI Mizar 无法打开窗口",
+                        &format!("窗口创建失败 / the window could not be created: {error}"),
+                    );
+                    std::process::exit(1);
+                }
+            };
+            startup::note("window: created");
+
+            // A tray icon that failed is a degraded app, not a dead one: the
+            // window is the product, and it is already on screen. Taking the
+            // launch down over it is what turned one broken shell API into
+            // "the app does not start".
+            if let Err(error) = tray::install(app.handle(), &window) {
+                startup::note(&format!("tray: install failed — {error}"));
+            }
+            updates::watch(app.handle().clone());
+
+            // The three process switches, as stored. Applied after the window
+            // exists so the Dock icon is present for the first frame and then
+            // removed, which is less jarring than a window with no Dock icon
+            // that appears late.
+            let settings = shell::current();
+            if let Err(error) = shell::apply(app.handle(), &settings) {
+                tracing::warn!("shell settings: {error}");
+            }
+
             // Read the stored server choice before boot, so the tunnel target is
             // decided from the preference file rather than from a constant in
             // this binary. Boot reads the same file again; passing the value
@@ -284,188 +481,93 @@ fn main() {
                         .unwrap_or_else(|| agi_core::account::OFFICIAL_ACCOUNT_URL.to_string()),
                 )
             };
-            let booted = runtime
-                .block_on(boot(BootConfig {
-                    endpoint_file: None,
-                    // The hooks are how an approval reaches this window at all:
-                    // without them Claude Code runs tools unobserved. The
-                    // installer is additive, backed up and reversible, so the app
-                    // installs them by default and an operator who wants to
-                    // manage the file themselves passes
-                    // `--no-install-claude-hooks`.
-                    // Installed by the guide, where the person can see it happen.
-                    // A launch that silently rewrites ~/.claude/settings.json is
-                    // a surprise, not a feature; `--install-claude-hooks` is the
-                    // escape hatch for a scripted setup.
-                    install_claude_hooks: std::env::args()
-                        .any(|argument| argument == "--install-claude-hooks"),
-                    relay_url,
-                    relay_token: Some(
-                        std::env::var("AGI_RELAY_TOKEN")
-                            .ok()
-                            .filter(|token| !token.trim().is_empty())
-                            .unwrap_or_else(stable_relay_token),
-                    ),
-                    server: Some(server),
-                }))
-                .expect("the kernel failed to start");
+            let config = BootConfig {
+                endpoint_file: None,
+                // The hooks are how an approval reaches this window at all:
+                // without them Claude Code runs tools unobserved. The installer
+                // is additive, backed up and reversible, so the app installs
+                // them by default and an operator who wants to manage the file
+                // themselves passes `--no-install-claude-hooks`. Installed by the
+                // guide, where the person can see it happen — a launch that
+                // silently rewrites ~/.claude/settings.json is a surprise, not a
+                // feature; `--install-claude-hooks` is the escape hatch for a
+                // scripted setup.
+                install_claude_hooks: std::env::args()
+                    .any(|argument| argument == "--install-claude-hooks"),
+                relay_url,
+                relay_token: Some(
+                    std::env::var("AGI_RELAY_TOKEN")
+                        .ok()
+                        .filter(|token| !token.trim().is_empty())
+                        .unwrap_or_else(stable_relay_token),
+                ),
+                server: Some(server),
+            };
 
-            kernel::remember(booted.api_port, booted.api_token.clone());
-            let _ = KERNEL.set(Arc::clone(&booted.core));
+            // The kernel's servers live on a Tokio runtime. The event loop below
+            // blocks for the life of the window, so a runtime owned by this
+            // closure's stack would be dropped the moment it returned — and
+            // every server with it. Leaking it is the honest expression of
+            // "this lives as long as the process".
+            let runtime: &'static tokio::runtime::Runtime = Box::leak(Box::new(runtime));
 
-            // `kill` and Ctrl-C are how a development machine ends this app;
-            // neither runs the exit event, and both would leave the model
-            // runner behind.
-            #[cfg(unix)]
-            {
-                let core = Arc::clone(&booted.core);
-                tauri::async_runtime::spawn(async move {
-                    use tokio::signal::unix::{signal, SignalKind};
-                    let Ok(mut terminate) = signal(SignalKind::terminate()) else {
+            startup::watch_boot(20_000);
+            startup::note("boot: starting the kernel");
+
+            // The kernel does not get to decide whether a window exists. It runs
+            // on its own thread; the event loop keeps drawing, keeps the tray
+            // answering and keeps a second launch able to raise the window.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let started = std::time::Instant::now();
+                let booted = match runtime.block_on(boot(config)) {
+                    Ok(booted) => booted,
+                    Err(error) => {
+                        startup::fail(
+                            "AGI Mizar 的内核无法启动",
+                            &format!(
+                                "内核启动失败 / the kernel failed to start:\n{error:#}\n\n\
+                                 端口被占用、目录不可写、代理或防火墙拒绝连接都可能造成这一行。\n\
+                                 把这份日志发给开发者即可定位。"
+                            ),
+                        );
+                        handle.exit(1);
                         return;
-                    };
-                    tokio::select! {
-                        _ = terminate.recv() => {}
-                        _ = tokio::signal::ctrl_c() => {}
                     }
-                    core.models().shutdown().await;
-                    std::process::exit(0);
-                });
-            }
+                };
+                startup::note(&format!(
+                    "boot: kernel up in {} ms at port {}",
+                    started.elapsed().as_millis(),
+                    booted.api_port
+                ));
+                startup::note(&format!(
+                    "boot: pairing code {} ({})",
+                    booted.pairing_code.display, booted.pairing_uri
+                ));
+                startup::boot_finished();
 
-            // Started by the login item: the point is the kernel behind the
-            // window, so the window waits in the tray instead of stealing focus
-            // at login.
-            let background = std::env::args().any(|argument| argument == "--background");
-
-            let url = booted.window_url();
-            println!("AGI Mizar — window at {url}");
-            println!(
-                "  pairing code {} ({})",
-                booted.pairing_code.display, booted.pairing_uri
-            );
-            // The platform rides in the URL so the page can lay itself out for
-            // this machine on its very first paint, before the snapshot (which
-            // also carries it) has been fetched.
-            let url = format!("{url}&platform={}", agi_platform::platform());
-
-            let parsed: tauri::Url = url.parse().expect("the kernel URL is not a URL");
-            // 802 logical pixels is the height the dashboard and the guide were
-            // drawn for, but it is a preference: a 1080p laptop at 150% scaling
-            // has about 672 logical pixels of work area, and a first screen
-            // whose footer is off the bottom is broken before it is used. Ask
-            // the monitor, keep 80 logical pixels of breathing room, and never
-            // go below the 480 floor or above the design height.
-            let height = app
-                .handle()
-                .primary_monitor()
-                .ok()
-                .flatten()
-                .map(|monitor| {
-                    let area = monitor.work_area();
-                    let logical = area.size.height as f64 / monitor.scale_factor();
-                    (logical - 80.0).clamp(WINDOW_MIN_HEIGHT, 802.0)
-                })
-                .unwrap_or(802.0);
-            let builder =
-                tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::External(parsed))
-                    .title("AGI Mizar")
-                    .inner_size(WINDOW_WIDTH, height)
-                    // The dashboard's year of squares is the widest thing the
-                    // window ever draws; at any narrower size the last weeks are
-                    // cut off. The width is therefore not a preference — the
-                    // height still is, and keeps its own floor.
-                    .min_inner_size(WINDOW_WIDTH, WINDOW_MIN_HEIGHT)
-                    .max_inner_size(WINDOW_WIDTH, WINDOW_MAX_HEIGHT)
-                    .visible(!background);
-
-            // The window draws its own chrome: on macOS the page reserves a
-            // strip for the traffic lights and the system overlays them; on
-            // Windows the page draws the same strip and its own traffic lights,
-            // because the system title bar is removed below. Linux keeps the
-            // system title bar (and its own window menu).
-            #[cfg(target_os = "macos")]
-            let builder = builder
-                .title_bar_style(tauri::TitleBarStyle::Overlay)
-                .hidden_title(true)
-                .traffic_light_position(tauri::LogicalPosition::new(18.0, 20.0));
-
-            // Borderless on Windows: no caption, but `shadow(true)` gives the
-            // DWM drop shadow and frame insets back, and tao still resizes the
-            // window from its edges and keeps a maximized window off the
-            // taskbar (WM_NCCALCSIZE uses the monitor work area).
-            #[cfg(windows)]
-            let builder = builder.decorations(false).shadow(true);
-
-            let window = builder.build()?;
-
-            // Windows reads the constraints off the outer window, tao wrote
-            // them from the inner one: add the frame back before the person can
-            // grab an edge.
-            #[cfg(windows)]
-            compensate_window_frame(&window);
-
-            // The tray page: a borderless window that lives under the tray icon.
-            // A native menu cannot put an icon left of a label, pin a lamp to the
-            // right, or hug the text's width — all three are the spec.
-            let panel_url = format!("{url}&panel=tray");
-            let panel_parsed: tauri::Url = panel_url.parse().expect("the panel URL is not a URL");
-            let panel = tauri::WebviewWindowBuilder::new(
-                app,
-                "tray-panel",
-                tauri::WebviewUrl::External(panel_parsed),
-            )
-            .title("AGI Mizar")
-            .inner_size(tray::PANEL_WIDTH, 300.0)
-            .decorations(false)
-            .resizable(false)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .visible(false)
-            .build()?;
-            panel.hide()?;
-            // Looking at the tray page without a click is the only way to check
-            // it on a machine that cannot script the tray.
-            if std::env::var("MIZAR_SHOW_PANEL").is_ok() {
-                let _ = panel.show();
-            }
-
-            // The three process switches, as stored. Applied after the window
-            // exists so the Dock icon is present for the first frame and then
-            // removed, which is less jarring than a window with no Dock icon
-            // that appears late.
-            let settings = shell::current();
-            if let Err(error) = shell::apply(app.handle(), &settings) {
-                tracing::warn!("shell settings: {error}");
-            }
-
-            // The window is the product; the tray icon is what keeps it
-            // reachable after it is closed, and on Windows it is also the only
-            // way back from `--background`.
-            tray::install(app.handle(), &window)?;
-            updates::watch(app.handle().clone());
-
-            // macOS draws the bundle's one icon; the window's theme (which can
-            // differ from the system's) picks which of the two this is.
-            #[cfg(target_os = "macos")]
-            {
+                kernel::remember(booted.api_port, booted.api_token.clone());
                 let core = Arc::clone(&booted.core);
-                dock_icon::follow(&core.theme());
-                let handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    loop {
-                        let theme = core.theme();
-                        let handle = handle.clone();
-                        let _ = handle.run_on_main_thread(move || dock_icon::follow(&theme));
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let url = booted.window_url();
+                let _ = KERNEL.set(Arc::clone(&core));
+                // The kernel lives as long as the process: dropping it when this
+                // thread returns would take the servers down with it.
+                Box::leak(Box::new(booted));
+
+                let app = handle.clone();
+                let _ = handle.run_on_main_thread(move || {
+                    if let Err(error) = attach_kernel(&app, &url, &core) {
+                        startup::fail(
+                            "AGI Mizar 无法打开界面",
+                            &format!(
+                                "内核已启动，但窗口无法载入界面 / \
+                                 the kernel is up but the window could not load it: {error}"
+                            ),
+                        );
                     }
                 });
-            }
+            });
 
-            // The kernel lives as long as the process: the run loop serves the
-            // window, and dropping it at the end of `setup` would take the
-            // servers down with it.
-            let _kernel = Box::leak(Box::new(booted));
             Ok(())
         });
 
@@ -515,38 +617,47 @@ fn main() {
             }
         });
 
-    builder
-        .build(tauri::generate_context!())
-        .expect("the window failed to start")
-        .run(move |_app, event| {
-            // `kill_on_drop` does not run when the process exits, so a quit has
-            // to stop the model runner explicitly or it stays resident with a
-            // gigabyte of weights loaded.
-            if let tauri::RunEvent::ExitRequested { .. } = event {
-                // The quit animation is drawn from the icon the app last set.
-                // Repaint it for the theme we actually have before the process
-                // goes away, so leaving does not flash the other tile.
-                #[cfg(target_os = "macos")]
-                {
-                    if let Some(core) = KERNEL.get() {
-                        dock_icon::follow(&core.theme());
-                    }
+    let app = match builder.build(tauri::generate_context!()) {
+        Ok(app) => app,
+        Err(error) => {
+            // Not `expect`: a GUI build unwinds into a console nobody has, and
+            // the person is left with an icon that did nothing — the exact
+            // report this whole module exists to replace.
+            startup::fail(
+                "AGI Mizar 无法启动",
+                &format!("应用初始化失败 / the app could not start: {error}"),
+            );
+            std::process::exit(1);
+        }
+    };
+
+    app.run(move |_app, event| {
+        // `kill_on_drop` does not run when the process exits, so a quit has
+        // to stop the model runner explicitly or it stays resident with a
+        // gigabyte of weights loaded.
+        if let tauri::RunEvent::ExitRequested { .. } = event {
+            // The quit animation is drawn from the icon the app last set.
+            // Repaint it for the theme we actually have before the process
+            // goes away, so leaving does not flash the other tile.
+            #[cfg(target_os = "macos")]
+            {
+                if let Some(core) = KERNEL.get() {
+                    dock_icon::follow(&core.theme());
                 }
-                tauri::async_runtime::block_on(async {
-                    if let Some(core) = KERNEL.get() {
-                        core.models().shutdown().await;
-                    }
-                });
-                // The endpoint files name the port other processes should dial.
-                // Leaving them behind points the Claude hooks and the DSH plugin
-                // at a port this process no longer listens on.
-                agi_core::endpoint::remove_endpoint_file(
-                    &agi_core::endpoint::default_endpoint_path(),
-                );
-                agi_core::endpoint::remove_hook_file(&agi_core::endpoint::default_hook_path());
-                agi_core::endpoint::remove_tool_file(&agi_core::endpoint::default_tool_path());
             }
-        });
+            tauri::async_runtime::block_on(async {
+                if let Some(core) = KERNEL.get() {
+                    core.models().shutdown().await;
+                }
+            });
+            // The endpoint files name the port other processes should dial.
+            // Leaving them behind points the Claude hooks and the DSH plugin
+            // at a port this process no longer listens on.
+            agi_core::endpoint::remove_endpoint_file(&agi_core::endpoint::default_endpoint_path());
+            agi_core::endpoint::remove_hook_file(&agi_core::endpoint::default_hook_path());
+            agi_core::endpoint::remove_tool_file(&agi_core::endpoint::default_tool_path());
+        }
+    });
 }
 
 #[cfg(test)]
