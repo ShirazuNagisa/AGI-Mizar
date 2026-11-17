@@ -243,6 +243,25 @@ pub async fn boot(config: BootConfig) -> anyhow::Result<Booted> {
     core.start().await;
     tracing::debug!("boot: engines started");
 
+    // Agent interconnect's MCP entries and skill live in files this app writes,
+    // and a stale one breaks delegation silently: an entry written before the
+    // sidecar learnt `--host` makes a Codex turn end before its subagent does,
+    // and the answer lands in a session nobody reads. Repair what is *outdated*
+    // at launch; an entry somebody deliberately removed stays removed, and the
+    // settings page is where a missing one comes back.
+    {
+        let core = Arc::clone(&core);
+        tokio::spawn(async move {
+            let Some(repaired) = agi_core::remote_health::repair_stale(&core) else {
+                return;
+            };
+            tracing::info!("interconnect: repaired {:?}", repaired.changed);
+            if let Some(error) = repaired.error {
+                tracing::warn!("interconnect: repair failed — {error}");
+            }
+        });
+    }
+
     // Claude has no socket that pushes a desktop Code tab's new transcript. A
     // ten-second disk refresh is the fallback: it reads files that are already
     // the source of truth and emits only rows whose title/state changed.

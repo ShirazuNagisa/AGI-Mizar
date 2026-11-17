@@ -389,6 +389,7 @@ pub(crate) fn run_remote_installer(
     uninstall: bool,
     profile: Option<&str>,
     dry_run: bool,
+    agents: Option<&str>,
 ) -> CommandResponse {
     let path = std::env::var("AGI_REMOTE_BIN")
         .ok()
@@ -414,6 +415,11 @@ pub(crate) fn run_remote_installer(
     command.arg(if uninstall { "uninstall" } else { "install" });
     if let Some(profile) = profile {
         command.arg("--profile").arg(profile);
+    }
+    // Narrowing the run matters for the automatic repair: it must fix the
+    // agent whose entry went stale, not re-create one somebody removed.
+    if let Some(agents) = agents {
+        command.arg("--agents").arg(agents);
     }
     if dry_run {
         command.arg("--dry-run");
@@ -3248,10 +3254,10 @@ impl Core {
                 CommandResponse::ok(json!({ "path": path, "text": text }))
             }
             Command::RemoteInstall { profile, dry_run } => {
-                run_remote_installer(false, profile.as_deref(), dry_run)
+                run_remote_installer(false, profile.as_deref(), dry_run, None)
             }
             Command::RemoteUninstall { profile, dry_run } => {
-                run_remote_installer(true, profile.as_deref(), dry_run)
+                run_remote_installer(true, profile.as_deref(), dry_run, None)
             }
             Command::RemoteDelegations => {
                 CommandResponse::ok(json!({ "delegations": self.remote.list() }))

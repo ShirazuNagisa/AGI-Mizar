@@ -32,30 +32,62 @@ const MCP_SERVER_NAME: &str = "agi_mizar_remote";
 /// pointing a support thread at two megabytes of JSON lines is already a lot.
 const LOG_TAIL_BYTES: u64 = 2 * 1024 * 1024;
 
+/// Which stale entries a run is allowed to rewrite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Repair {
+    /// Read only.
+    None,
+    /// The settings page's button: fix everything that is missing or out of date.
+    Problems,
+    /// At launch: fix what is out of date, never re-create an entry somebody
+    /// removed on purpose.
+    Stale,
+}
+
 /// Check the feature, and optionally rewrite the one part this app owns.
 pub fn check(core: &Core, repair: bool) -> RemoteHealthReport {
+    run(
+        core,
+        if repair {
+            Repair::Problems
+        } else {
+            Repair::None
+        },
+    )
+}
+
+/// Repair the entries that went out of date, at launch.
+///
+/// Returns the report when it actually repaired something, so the caller can
+/// log it. An app update moves the sidecar and adds flags to the MCP entries;
+/// leaving those stale is how a caller ends up with a subagent whose answer is
+/// never delivered, and nobody presses a button for that.
+pub fn repair_stale(core: &Core) -> Option<RemoteHealthReport> {
+    let report = run(core, Repair::Stale);
+    (!report.changed.is_empty()).then_some(report)
+}
+
+fn run(core: &Core, mode: Repair) -> RemoteHealthReport {
     let mut items = collect(core);
     let mut changed = Vec::new();
     let mut error = None;
 
-    let repairable = items.iter().any(|item| {
-        matches!(
-            item.id.as_str(),
-            "mcp" | "skill" | "claude-mcp" | "claude-skill" | "codex-mcp" | "codex-skill"
-        ) && matches!(item.status.as_str(), "missing" | "outdated")
-    });
-    // The profile item is a hard gate: without one the installer has nowhere to
-    // write, and running it would only turn the report into an error message.
+    let targets = agents_to_repair(&items, mode);
+    // The DSH profile is a hard gate for that one agent: without it the
+    // installer has nowhere to write, so asking would only turn the report into
+    // an error message. The other two have no such prerequisite.
     let profile_ok = items
         .iter()
         .any(|item| item.id == "profile" && item.status == "ok");
-    if repair && repairable && profile_ok {
+    let wanted = !targets.is_empty() && (profile_ok || !targets.iter().any(|id| id == "dsh"));
+    if wanted {
         if sidecar().is_none() {
-            error = Some("agi-remote 不在应用旁边，无法重写 DSH 配置".to_string());
+            error = Some("agi-remote 不在应用旁边，无法重写 Agent 配置".to_string());
         } else {
-            let answer = crate::run_remote_installer(false, None, false);
+            let agents = targets.join(",");
+            let answer = crate::run_remote_installer(false, None, false, Some(&agents));
             if answer.ok {
-                changed.push("已重写 DSH MCP 条目与 agi-mizar-remote skill".to_string());
+                changed.push(format!("已重写 {agents} 的 MCP 条目与 agi-mizar-remote skill"));
             } else {
                 error = answer.error.map(|failure| failure.message);
             }
@@ -64,6 +96,31 @@ pub fn check(core: &Core, repair: bool) -> RemoteHealthReport {
     }
 
     report(core, items, changed, error)
+}
+
+/// The agent ids whose MCP entry or skill this run should rewrite.
+fn agents_to_repair(items: &[DependencyItem], mode: Repair) -> Vec<String> {
+    let wanted = match mode {
+        Repair::None => return Vec::new(),
+        Repair::Problems => ["missing", "outdated"],
+        Repair::Stale => ["outdated", "outdated"],
+    };
+    let mut agents: Vec<String> = items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.id.as_str(),
+                "mcp" | "skill" | "claude-mcp" | "claude-skill" | "codex-mcp" | "codex-skill"
+            ) && wanted.contains(&item.status.as_str())
+        })
+        .map(|item| match item.id.split_once('-') {
+            Some((agent, _)) if matches!(agent, "claude" | "codex") => agent.to_string(),
+            _ => "dsh".to_string(),
+        })
+        .collect();
+    agents.sort();
+    agents.dedup();
+    agents
 }
 
 fn report(
@@ -170,12 +227,19 @@ fn claude_items(sidecar: Option<&Path>) -> Vec<DependencyItem> {
         .and_then(|root| {
             root.get("mcpServers")
                 .and_then(|servers| servers.get(MCP_SERVER_NAME))
-                .and_then(|entry| entry.get("command"))
-                .and_then(|command| command.as_str())
-                .map(str::to_string)
+                .cloned()
         });
+    let command = entry
+        .as_ref()
+        .and_then(|entry| entry.get("command"))
+        .and_then(|command| command.as_str());
+    let host_ok = entry
+        .as_ref()
+        .and_then(|entry| entry.get("args"))
+        .and_then(|args| args.as_array())
+        .is_some_and(|args| host_arg(args.iter().filter_map(|arg| arg.as_str()), "claude"));
     vec![
-        agent_mcp_item("claude-mcp", "Claude Code 里的 MCP 条目", config.as_path(), entry.as_deref(), sidecar),
+        agent_mcp_item("claude-mcp", "Claude Code 里的 MCP 条目", config.as_path(), command, host_ok, "claude", sidecar),
         agent_skill_item(
             "claude-skill",
             "Claude Code 里的 agi-mizar-remote skill",
@@ -207,11 +271,16 @@ fn codex_items(sidecar: Option<&Path>) -> Vec<DependencyItem> {
         ];
     }
     let config = home.join("config.toml");
-    let entry = std::fs::read_to_string(&config)
-        .ok()
-        .and_then(|text| toml_command(&text, MCP_SERVER_NAME));
+    let text = std::fs::read_to_string(&config).ok();
+    let entry = text
+        .as_deref()
+        .and_then(|text| toml_command(text, MCP_SERVER_NAME));
+    let host_ok = text
+        .as_deref()
+        .and_then(|text| toml_args(text, MCP_SERVER_NAME))
+        .is_some_and(|args| host_arg(args.split_whitespace(), "codex"));
     vec![
-        agent_mcp_item("codex-mcp", "Codex 里的 MCP 条目", config.as_path(), entry.as_deref(), sidecar),
+        agent_mcp_item("codex-mcp", "Codex 里的 MCP 条目", config.as_path(), entry.as_deref(), host_ok, "codex", sidecar),
         agent_skill_item(
             "codex-skill",
             "Codex 里的 agi-mizar-remote skill",
@@ -222,11 +291,14 @@ fn codex_items(sidecar: Option<&Path>) -> Vec<DependencyItem> {
 }
 
 /// One "this agent has an MCP entry" row for the two non-DSH agents.
+#[allow(clippy::too_many_arguments)]
 fn agent_mcp_item(
     id: &str,
     label: &str,
     config: &Path,
     command: Option<&str>,
+    host_ok: bool,
+    host: &str,
     sidecar: Option<&Path>,
 ) -> DependencyItem {
     let Some(command) = command else {
@@ -238,6 +310,18 @@ fn agent_mcp_item(
             Some("写入 MCP 条目"),
         );
     };
+    // Without the flag the sidecar cannot tell who launched it, assumes DSH,
+    // and returns before the subagent finishes — which is exactly the silent
+    // "it never came back" this flag exists to prevent.
+    if !host_ok {
+        return item(
+            id,
+            label,
+            "outdated",
+            format!("条目没有 --host {host}；委派完成后结果送不回 {host}"),
+            Some(&format!("把条目改成带 --host {host}")),
+        );
+    }
     match sidecar {
         Some(expected) if !same_path(command, expected) => item(
             id,
@@ -255,6 +339,39 @@ fn agent_mcp_item(
         ),
         _ => item(id, label, "ok", command.to_string(), None),
     }
+}
+
+/// Whether `args` carries `--host <host>`.
+fn host_arg<'a>(args: impl Iterator<Item = &'a str>, host: &str) -> bool {
+    let mut args = args;
+    while let Some(arg) = args.next() {
+        if arg.trim_matches(|c| c == '"' || c == '\'' || c == ',') == "--host" {
+            return args
+                .next()
+                .map(|value| value.trim_matches(|c| c == '"' || c == '\'' || c == ',' || c == ']') == host)
+                .unwrap_or(false);
+        }
+    }
+    false
+}
+
+/// The raw `args = [...]` line of one Codex table.
+fn toml_args(text: &str, name: &str) -> Option<String> {
+    let header = format!("[mcp_servers.{name}]");
+    let mut inside = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            inside = trimmed == header;
+            continue;
+        }
+        if inside {
+            if let Some(value) = trimmed.strip_prefix("args") {
+                return Some(value.trim_start().trim_start_matches('=').trim().to_string());
+            }
+        }
+    }
+    None
 }
 
 /// One "this agent has our skill" row.
@@ -821,7 +938,58 @@ fn tail(path: &Path, limit: u64) -> Option<(String, bool)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{mcp_command, toml_command, unquote};
+    use super::{host_arg, mcp_command, toml_args, toml_command, unquote};
+
+    /// The flag that keeps a Codex/Claude delegation from returning before its
+    /// subagent finished. An entry written before it existed must read as
+    /// stale, or the report says "ok" and the caller is never woken.
+    /// The launch repair must touch only what went stale: a removed entry is
+    /// the operator's decision, a stale one silently breaks delegation.
+    #[test]
+    fn only_the_agents_with_problems_are_rewritten() {
+        use agi_protocol::api::DependencyItem;
+        let row = |id: &str, status: &str| DependencyItem {
+            id: id.to_string(),
+            label: id.to_string(),
+            status: status.to_string(),
+            detail: String::new(),
+            fix: None,
+        };
+        let items = vec![
+            row("mcp", "outdated"),
+            row("skill", "ok"),
+            row("claude-mcp", "missing"),
+            row("codex-mcp", "outdated"),
+            row("policy", "missing"),
+        ];
+        assert_eq!(
+            super::agents_to_repair(&items, super::Repair::Stale),
+            vec!["codex".to_string(), "dsh".to_string()],
+            "the launch repair fixes stale entries only"
+        );
+        assert_eq!(
+            super::agents_to_repair(&items, super::Repair::Problems),
+            vec!["claude".to_string(), "codex".to_string(), "dsh".to_string()],
+            "the button also fills an entry that was never written"
+        );
+        assert!(super::agents_to_repair(&items, super::Repair::None).is_empty());
+    }
+
+    #[test]
+    fn the_host_flag_is_read_from_codex_and_claude_args() {
+        let toml = "[mcp_servers.agi_mizar_remote]\ncommand = 'x'\nargs = [\"mcp\", \"--host\", \"codex\"]\n";
+        let args = toml_args(toml, "agi_mizar_remote").expect("args line");
+        assert!(host_arg(args.split_whitespace(), "codex"));
+        assert!(!host_arg(args.split_whitespace(), "claude"));
+
+        let old = "[mcp_servers.agi_mizar_remote]\ncommand = 'x'\nargs = [\"mcp\"]\n";
+        let args = toml_args(old, "agi_mizar_remote").expect("args line");
+        assert!(!host_arg(args.split_whitespace(), "codex"));
+
+        let claude = ["mcp", "--host", "claude"];
+        assert!(host_arg(claude.into_iter(), "claude"));
+        assert!(!host_arg(["mcp"].into_iter(), "claude"));
+    }
 
     #[test]
     fn reads_the_command_from_the_codex_table() {
