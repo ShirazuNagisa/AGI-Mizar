@@ -29,12 +29,63 @@ const AGENTS: [(&str, &str); 3] = [
     ("codex", "Codex"),
 ];
 
+/// Which agent launched this MCP server.
+///
+/// The installer writes `--host <id>` into each agent's MCP entry because the
+/// three products differ in one way that matters here: only DSH has a
+/// settlement-notice bridge in AGI Mizar, so only DSH can be woken after its
+/// turn ends. A delegate tool that returned immediately to Claude Code or
+/// Codex left the caller with nobody to tell it the subagent had finished —
+/// the work completed, the session was archived, and the turn was already over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Host {
+    Dsh,
+    Claude,
+    Codex,
+}
+
+impl Host {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "dsh" => Some(Self::Dsh),
+            "claude" => Some(Self::Claude),
+            "codex" => Some(Self::Codex),
+            _ => None,
+        }
+    }
+
+    /// The `--host` value this installer writes for the agent.
+    fn id(self) -> &'static str {
+        match self {
+            Self::Dsh => "dsh",
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+
+    /// Whether a settled delegation can wake this host's turn by itself.
+    ///
+    /// True for DSH only: `dsh-mizar` maps the `AGI_MIZAR_DELEGATION` marker
+    /// back to the parent session and injects the settlement follow-up. The
+    /// other two have no such channel, so the tool waits instead.
+    fn wakes_on_notice(self) -> bool {
+        matches!(self, Self::Dsh)
+    }
+}
+
+/// How long a delegate call waits for settlement when the host cannot be woken.
+///
+/// Under the 60-second MCP tool timeout every one of these clients applies by
+/// default, so the call answers "still running" instead of being killed. The
+/// skill then keeps the caller in a `remote_wait` loop until the task settles.
+const DELEGATE_WAIT_MS: u64 = 50_000;
+
 fn main() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new().context("a Tokio runtime")?;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = args.first().map(String::as_str).unwrap_or("help");
     match command {
-        "mcp" => mcp(&runtime),
+        "mcp" => mcp(&runtime, mcp_host(&args[1..])?),
         "agents" => runtime.block_on(cli_agents()),
         "options" => runtime.block_on(cli_options(&args[1..])),
         "delegate" => runtime.block_on(cli_delegate(&args[1..])),
@@ -51,6 +102,19 @@ fn main() -> Result<()> {
             Ok(())
         }
         other => bail!("unknown command {other}; run `agi-remote help`"),
+    }
+}
+
+/// The host an MCP launch declares.
+///
+/// An entry written before `--host` existed is a DSH entry: that was the only
+/// agent this installer served. Guessing "DSH" keeps those installs working as
+/// they did, and `agi-remote install` rewrites the entry with the flag.
+fn mcp_host(args: &[String]) -> Result<Host> {
+    match flag(args, "--host") {
+        None => Ok(Host::Dsh),
+        Some(value) => Host::parse(&value)
+            .ok_or_else(|| anyhow!("--host {value} is not one of dsh, claude, codex")),
     }
 }
 
@@ -335,7 +399,7 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 
 // -------------------------------------------------------------------- MCP
 
-fn mcp(runtime: &tokio::runtime::Runtime) -> Result<()> {
+fn mcp(runtime: &tokio::runtime::Runtime, host: Host) -> Result<()> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     for line in stdin.lock().lines() {
@@ -391,7 +455,7 @@ fn mcp(runtime: &tokio::runtime::Runtime) -> Result<()> {
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
-                match runtime.block_on(call_tool(name, &arguments)) {
+                match runtime.block_on(call_tool(name, &arguments, host)) {
                     Ok(text) => json!({
                         "jsonrpc": "2.0", "id": id,
                         "result": { "content": [{ "type": "text", "text": text }], "isError": false }
@@ -437,7 +501,7 @@ fn tools() -> Value {
         },
         {
             "name": "remote_delegate",
-            "description": "Start a self-contained task on a same-account peer. Returns immediately with a delegation id whose marker is AGI_MIZAR_DELEGATION <id>. The remote agent cannot see this conversation.",
+            "description": "Start a self-contained task on a same-account peer. The remote agent cannot see this conversation. On DSH this returns immediately with a delegation id (marker AGI_MIZAR_DELEGATION <id>) and a settlement notice wakes you. On Claude Code and Codex it waits up to ~50 s and returns the answer; if it says STILL RUNNING, call remote_wait with the same delegationId until the task settles — do not end your turn.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -468,7 +532,7 @@ fn tools() -> Value {
         },
         {
             "name": "remote_wait",
-            "description": "Wait up to timeoutMs for a delegation to settle. Fallback for hosts without the notice bridge.",
+            "description": "Wait up to timeoutMs (max 55 s) for a delegation to settle and return its state, final text and archived flag. This is the loop for hosts without a settlement notice: call it again with the same delegationId until state is done, failed or cancelled.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -523,7 +587,7 @@ fn tools() -> Value {
         },
         {
             "name": "local_delegate",
-            "description": "Start a self-contained task on this computer's DSH as a subagent. Returns immediately with a delegation id whose marker is AGI_MIZAR_DELEGATION <id>; read it with remote_result and continue it with remote_send.",
+            "description": "Start a self-contained task on this computer's DSH as a subagent. On DSH this returns immediately with a delegation id (marker AGI_MIZAR_DELEGATION <id>) and a settlement notice wakes you. On Claude Code and Codex it waits up to ~50 s and returns the answer; if it says STILL RUNNING, call remote_wait with the same delegationId until the task settles — do not end your turn.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -555,7 +619,7 @@ fn tools() -> Value {
     ])
 }
 
-async fn call_tool(name: &str, arguments: &Value) -> Result<String> {
+async fn call_tool(name: &str, arguments: &Value, host: Host) -> Result<String> {
     match name {
         "remote_agents" => {
             let value = command(json!({ "op": "remote_peers" })).await?;
@@ -608,11 +672,9 @@ async fn call_tool(name: &str, arguments: &Value) -> Result<String> {
                 .get("delegation")
                 .and_then(|delegation| delegation.get("id"))
                 .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("the kernel returned no delegation id"))?;
-            Ok(format!(
-                "AGI_MIZAR_DELEGATION {id}\n{}",
-                serde_json::to_string_pretty(&value)?
-            ))
+                .ok_or_else(|| anyhow!("the kernel returned no delegation id"))?
+                .to_string();
+            delegate_answer(host, value, &id).await
         }
         "remote_result" => {
             let id = required(arguments, "delegationId")?;
@@ -678,11 +740,9 @@ async fn call_tool(name: &str, arguments: &Value) -> Result<String> {
                 .get("delegation")
                 .and_then(|delegation| delegation.get("id"))
                 .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("the kernel returned no delegation id"))?;
-            Ok(format!(
-                "AGI_MIZAR_DELEGATION {id}\n{}",
-                serde_json::to_string_pretty(&value)?
-            ))
+                .ok_or_else(|| anyhow!("the kernel returned no delegation id"))?
+                .to_string();
+            delegate_answer(host, value, &id).await
         }
         "local_send" => {
             let id = required(arguments, "delegationId")?;
@@ -697,6 +757,43 @@ async fn call_tool(name: &str, arguments: &Value) -> Result<String> {
         }
         other => bail!("unknown tool {other}"),
     }
+}
+
+/// What a delegate tool answers.
+///
+/// A host that can be woken gets the delegation id and nothing else: its turn
+/// ends and the settlement notice starts a new one, which is what keeps DSH
+/// free to do other work. Every other host gets the answer itself, because
+/// nothing will wake it once its turn ends — the subagent finished, the session
+/// was archived, and the caller had already stopped.
+async fn delegate_answer(host: Host, started: Value, id: &str) -> Result<String> {
+    if host.wakes_on_notice() {
+        return Ok(format!(
+            "AGI_MIZAR_DELEGATION {id}\n{}",
+            serde_json::to_string_pretty(&started)?
+        ));
+    }
+    let settled = wait_for(id, DELEGATE_WAIT_MS).await?;
+    let state = settled
+        .get("delegation")
+        .and_then(|delegation| delegation.get("state"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    // The sentence a model reads first when the task outlives one tool call.
+    let note = if state == "running" {
+        format!(
+            "STILL RUNNING — the subagent has not finished. Call remote_wait with \
+             delegationId {id} again (each call waits up to 55 s) until state is done, \
+             failed or cancelled, then continue your own work. Do not end your turn.
+"
+        )
+    } else {
+        String::new()
+    };
+    Ok(format!(
+        "AGI_MIZAR_DELEGATION {id}\n{note}{}",
+        serde_json::to_string_pretty(&settled)?
+    ))
 }
 
 /// A string argument that may be missing; an empty one is the same as missing.
@@ -827,7 +924,7 @@ fn install(args: &[String]) -> Result<()> {
                 Err(error) => return Err(error),
             },
             "claude" => {
-                install::claude_install(&executable, dry)?;
+                install::claude_install(&executable, Host::Claude.id(), dry)?;
                 let dir = install::claude_home().join("skills").join(SKILL_NAME);
                 install::write_skill(&dir, SKILL, dry)?;
                 done.push("Claude Code");
@@ -859,7 +956,7 @@ fn install_dsh(profile: &std::path::Path, executable: &std::path::Path, dry: boo
     let before = std::fs::read_to_string(&patch_path)
         .with_context(|| format!("reading {}", patch_path.display()))?;
     let block = format!(
-        "- insert:\n    - id: {MCP_ENTRY_ID}\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: agi_mizar_remote\n        transport: stdio\n        command: {}\n        args: ['mcp']\n        toolCallTimeoutMs: 60000\n",
+        "- insert:\n    - id: {MCP_ENTRY_ID}\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: agi_mizar_remote\n        transport: stdio\n        command: {}\n        args: ['mcp', '--host', 'dsh']\n        toolCallTimeoutMs: 60000\n",
         yaml_single_quoted(&executable.to_string_lossy())
     );
     let has_entry = before.contains(&format!("id: {MCP_ENTRY_ID}"));

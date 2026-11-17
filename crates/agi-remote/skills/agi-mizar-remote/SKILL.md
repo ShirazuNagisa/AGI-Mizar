@@ -128,9 +128,18 @@ operator; if the previous one was archived, say so in one line ("上一个子代
    The subagent starts with none of your conversation. A brief that says
    "continue what we discussed" is useless unless you are using `local_send` /
    `remote_send` on the same session.
-2. The call returns immediately with a delegation id. End your turn after
-   reporting that the work started. Do **not** poll. When the host bridge is
-   available, a settlement notice will wake you in a new turn.
+2. What the call returns depends on who you are:
+   - **The result itself**, when your host has no settlement notice (Claude Code
+     and Codex): the tool waits for the subagent (about 50 s per call) and brings
+     back its state and final text.
+   - **A delegation id**, immediately, on DSH: end your turn after reporting that
+     the work started, and a settlement notice will wake you in a new turn.
+   - **`STILL RUNNING`** in either case: the task outlived one tool call. Call
+     `remote_wait` with the same `delegationId` again, and keep calling it until
+     `state` is `done`, `failed` or `cancelled`, then do your own work. **Do not
+     end your turn while a delegation you started is running** — on Claude Code
+     and Codex nothing will wake you, the subagent will finish into a session
+     nobody reads, and the task looks abandoned.
 3. If a notice gives you an approval, read its risk (remote only):
    - low: you may decide with `remote_answer`;
    - high or unknown: do not decide. Return `HUMAN_REQUIRED` and let the
@@ -157,7 +166,8 @@ operator; if the previous one was archived, say so in one line ("上一个子代
   `permissions`, `models`, `autoArchive`.
 - `local_delegate` — start a local subagent; accepts `workspace`, `permission`,
   `provider`, `model`, `reasoningEffort`, `prompt`; returns
-  `AGI_MIZAR_DELEGATION <id>` on the first line.
+  `AGI_MIZAR_DELEGATION <id>` on the first line, and on Claude Code / Codex it
+  also waits for the task and brings its answer back.
 - `local_send` — continue the same local session (only while it is not
   archived); returns a new delegation id whose `continuedFrom` points at the
   previous one.
@@ -165,13 +175,14 @@ operator; if the previous one was archived, say so in one line ("上一个子代
   workspaces are open (`allowAllWorkspaces`).
 - `remote_options` — a peer's workspaces, permission catalog, and model catalog;
   call once per eligible peer before the single intake message.
-- `remote_delegate` — start a new remote session; same arguments as
-  `local_delegate` plus `peer`.
+- `remote_delegate` — start a new remote session; same arguments and the same
+  return shape as `local_delegate`, plus `peer`.
 - `remote_send` — continue the same remote session (only while it is not
   archived).
 - `remote_result` — state, final text, `archived`; works for both routes.
-- `remote_wait` — bounded wait for environments without notices; prefer ending
-  the turn and waiting for the notice.
+- `remote_wait` — wait up to 55 s for a delegation to settle. The loop for
+  hosts without a notice bridge: call it again with the same id until `state`
+  is `done` / `failed` / `cancelled`.
 - `remote_cancel` — cancel the running turn (both routes).
 - `remote_answer` — answer a low-risk remote approval.
 

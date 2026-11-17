@@ -12,7 +12,12 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 
 #[derive(Clone, Default)]
-struct Seen(Arc<Mutex<Vec<String>>>);
+struct Seen {
+    ops: Arc<Mutex<Vec<String>>>,
+    /// How many times `remote_result` has been asked. The first answer says
+    /// "running", which is what a task that outlives one tool call looks like.
+    results: Arc<Mutex<u32>>,
+}
 
 async fn command(
     State(seen): State<Seen>,
@@ -24,10 +29,17 @@ async fn command(
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    seen.0.lock().await.push(format!(
-        "{} {auth}",
-        body["op"].as_str().unwrap_or_default()
-    ));
+    let op = body["op"].as_str().unwrap_or_default().to_string();
+    seen.ops.lock().await.push(format!("{op} {auth}"));
+    if op == "remote_result" {
+        let mut results = seen.results.lock().await;
+        *results += 1;
+        if *results == 1 {
+            return Json(json!({ "ok": true, "value": {
+                "delegation": { "id": "d1", "state": "running" }
+            }}));
+        }
+    }
     if auth != "Bearer tool-token" {
         return Json(json!({ "ok": false, "error": { "code": "UNAUTHORIZED", "message": "no" } }));
     }
@@ -44,7 +56,7 @@ async fn command(
             "permissions": { "defaultPreset": "default",
                              "options": [{ "value": "default", "name": "Default" }] }
         }),
-        "remote_delegate" => json!({
+        "remote_delegate" | "local_delegate" => json!({
             "delegation": { "id": "d1", "state": "running", "peer": "b" }
         }),
         "remote_result" => json!({
@@ -83,9 +95,13 @@ async fn send(stdin: &mut ChildStdin, stdout: &mut BufReader<ChildStdout>, value
     serde_json::from_str(&line).unwrap()
 }
 
-fn spawn(dir: &std::path::Path) -> (Child, ChildStdin, BufReader<ChildStdout>) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_agi-remote"))
-        .arg("mcp")
+fn spawn(dir: &std::path::Path, host: Option<&str>) -> (Child, ChildStdin, BufReader<ChildStdout>) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agi-remote"));
+    child.arg("mcp");
+    if let Some(host) = host {
+        child.args(["--host", host]);
+    }
+    let mut child = child
         .env("MIZAR_DATA_DIR", dir)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -106,7 +122,7 @@ async fn the_mcp_face_lists_eight_tools_and_calls_the_kernel() {
         json!({ "port": port, "token": "tool-token" }).to_string(),
     )
     .unwrap();
-    let (mut child, mut stdin, mut stdout) = spawn(dir.path());
+    let (mut child, mut stdin, mut stdout) = spawn(dir.path(), None);
 
     let init = send(
         &mut stdin,
@@ -192,7 +208,7 @@ async fn the_mcp_face_lists_eight_tools_and_calls_the_kernel() {
     let text = delegate["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.starts_with("AGI_MIZAR_DELEGATION d1"), "{text}");
     assert_eq!(
-        *seen.0.lock().await,
+        *seen.ops.lock().await,
         vec![
             "remote_peers Bearer tool-token",
             "remote_options Bearer tool-token",
@@ -219,6 +235,105 @@ fn hermetic(home: &std::path::Path) -> std::process::Command {
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("CODEX_HOME");
     command
+}
+
+/// A host with no settlement notice must get the answer, not a delegation id:
+/// the subagent finishes into a session nobody reads otherwise, and the
+/// session is archived by the time the caller thinks to look.
+#[tokio::test]
+async fn a_codex_delegate_waits_and_returns_the_answer() {
+    let (port, seen, server) = fake_api().await;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("agent-tool.json"),
+        json!({ "port": port, "token": "tool-token" }).to_string(),
+    )
+    .unwrap();
+    let (mut child, mut stdin, mut stdout) = spawn(dir.path(), Some("codex"));
+
+    let _ = send(
+        &mut stdin,
+        &mut stdout,
+        json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "protocolVersion": "2024-11-05" }
+        }),
+    )
+    .await;
+
+    let delegate = send(
+        &mut stdin,
+        &mut stdout,
+        json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": { "name": "local_delegate",
+                        "arguments": { "prompt": "answer DONE" } }
+        }),
+    )
+    .await;
+    let text = delegate["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("AGI_MIZAR_DELEGATION d1"), "{text}");
+    assert!(
+        text.contains("\"finalText\": \"DONE\""),
+        "the answer must come back in the tool result: {text}"
+    );
+    assert!(
+        !text.contains("STILL RUNNING"),
+        "it settled, so nothing is left to wait for: {text}"
+    );
+    // It waited: the first answer was "running", the second settled it.
+    let results = *seen.results.lock().await;
+    assert_eq!(results, 2, "one poll for running, one for the answer");
+
+    drop(stdin);
+    let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+    server.abort();
+}
+
+/// DSH keeps the async contract: its settlement notice starts a new turn, so
+/// the tool returns the delegation id without polling.
+#[tokio::test]
+async fn a_dsh_delegate_returns_without_waiting() {
+    let (port, seen, server) = fake_api().await;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("agent-tool.json"),
+        json!({ "port": port, "token": "tool-token" }).to_string(),
+    )
+    .unwrap();
+    let (mut child, mut stdin, mut stdout) = spawn(dir.path(), Some("dsh"));
+
+    let _ = send(
+        &mut stdin,
+        &mut stdout,
+        json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "protocolVersion": "2024-11-05" }
+        }),
+    )
+    .await;
+
+    let delegate = send(
+        &mut stdin,
+        &mut stdout,
+        json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": { "name": "local_delegate",
+                        "arguments": { "prompt": "answer DONE" } }
+        }),
+    )
+    .await;
+    let text = delegate["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("AGI_MIZAR_DELEGATION d1"), "{text}");
+    assert_eq!(
+        *seen.results.lock().await,
+        0,
+        "a host with notices must not poll: {text}"
+    );
+
+    drop(stdin);
+    let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+    server.abort();
 }
 
 #[tokio::test]

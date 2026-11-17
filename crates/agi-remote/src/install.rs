@@ -28,6 +28,16 @@ use serde_json::{json, Map, Value};
 /// and one skill can name the tools once.
 pub const MCP_SERVER_NAME: &str = "agi_mizar_remote";
 
+/// The argv every MCP entry runs the sidecar with.
+///
+/// `--host` is what tells the sidecar whether a settled delegation can wake
+/// its caller: DSH can, Claude Code and Codex cannot, and a tool that returned
+/// immediately to the latter two left a finished subagent with nobody to report
+/// to.
+pub fn mcp_args(host: &str) -> Vec<String> {
+    vec!["mcp".to_string(), "--host".to_string(), host.to_string()]
+}
+
 /// Claude Code's configuration directory and user config file.
 ///
 /// Resolved by [`agi_platform`] so the installer and the dependency check cannot
@@ -92,7 +102,7 @@ pub fn remove_skill(dir: &Path, dry: bool) -> Result<bool> {
 // ------------------------------------------------------------------ Claude
 
 /// Register the MCP server in `~/.claude.json`, preserving every other key.
-pub fn claude_install(exe: &Path, dry: bool) -> Result<bool> {
+pub fn claude_install(exe: &Path, host: &str, dry: bool) -> Result<bool> {
     let path = claude_config();
     let mut root = match std::fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str::<Value>(&text)
@@ -117,7 +127,7 @@ pub fn claude_install(exe: &Path, dry: bool) -> Result<bool> {
     let desired = json!({
         "type": "stdio",
         "command": exe.to_string_lossy(),
-        "args": ["mcp"],
+        "args": mcp_args(host),
     });
     if servers.get(MCP_SERVER_NAME) == Some(&desired) {
         println!("claude: {} (unchanged)", path.display());
@@ -170,8 +180,13 @@ pub fn codex_install(exe: &Path, dry: bool) -> Result<bool> {
     let path = codex_home().join("config.toml");
     let before = std::fs::read_to_string(&path).unwrap_or_default();
     let block = format!(
-        "[mcp_servers.{MCP_SERVER_NAME}]\ncommand = {}\nargs = [\"mcp\"]\n",
-        toml_literal(&exe.to_string_lossy())
+        "[mcp_servers.{MCP_SERVER_NAME}]\ncommand = {}\nargs = [{}]\n",
+        toml_literal(&exe.to_string_lossy()),
+        mcp_args("codex")
+            .iter()
+            .map(|arg| format!("\"{arg}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     // A repair replaces the table instead of adding a second one: two tables
     // with one name is a parse error, not a merge.
