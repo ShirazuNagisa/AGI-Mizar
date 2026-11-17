@@ -166,7 +166,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=%h/.config/agi-mizar/web.env
+EnvironmentFile=-%h/.config/agi-mizar/web.env
 ExecStart=/usr/lib/agi-mizar/agi-daemon
 WorkingDirectory=%h
 Restart=on-failure

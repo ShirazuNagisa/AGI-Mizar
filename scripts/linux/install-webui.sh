@@ -193,7 +193,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=$ENV_FILE
+EnvironmentFile=-$ENV_FILE
 ExecStart=$INSTALL_DIR/bin/agi-daemon
 WorkingDirectory=$HOME
 Restart=on-failure
