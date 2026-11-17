@@ -484,6 +484,9 @@ fn write_file(path: &Path, peers: &[RemotePeer]) -> io::Result<()> {
     let bytes = serde_json::to_vec_pretty(peers).map_err(io::Error::other)?;
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
+            // Only the unix branch below cares, so the binding is scoped there:
+            // on Windows it would be an unused variable warning.
+            #[cfg(unix)]
             let existed = parent.exists();
             std::fs::create_dir_all(parent)?;
             #[cfg(unix)]
