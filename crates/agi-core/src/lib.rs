@@ -36,6 +36,7 @@ pub mod relay_probe;
 pub mod remote;
 pub mod remote_health;
 pub mod server;
+pub mod tools;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -117,6 +118,9 @@ pub struct Preferences {
     /// operator's own. Missing from an old file means the official service.
     #[serde(default)]
     pub server: ServerPrefs,
+    /// Switches for the built-in tools the toolbox lists.
+    #[serde(default)]
+    pub tools: tools::ToolPrefs,
 }
 
 /// The guide revision this build ships.
@@ -352,6 +356,7 @@ impl Default for Preferences {
             dataset: DatasetPrefs::default(),
             remote: RemotePrefs::default(),
             server: ServerPrefs::default(),
+            tools: tools::ToolPrefs::default(),
         }
     }
 }
@@ -1502,6 +1507,15 @@ impl Core {
             .clone()
     }
 
+    /// The built-in tools' switches.
+    pub fn preferences_tool_prefs(&self) -> tools::ToolPrefs {
+        self.preferences
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .tools
+            .clone()
+    }
+
     /// Replace the remote-peer policy; no-op when nothing changed.
     pub fn set_remote_prefs(&self, next: RemotePrefs) {
         {
@@ -2429,6 +2443,7 @@ impl Core {
             dataset: dataset::view(self),
             server: self.server_view(),
             dsh_plugin: self.dsh_plugin_view(),
+            tools: tools::views(self),
         }
     }
 
@@ -3647,6 +3662,17 @@ impl Core {
             Command::DependenciesRepair { engine } => {
                 CommandResponse::ok(dependencies::repair(self, engine).await)
             }
+            Command::Tools => CommandResponse::ok(tools::views(self)),
+            Command::SetToolEnabled { tool, enabled } => {
+                match tools::set_enabled(self, &tool, enabled) {
+                    Ok(rows) => CommandResponse::ok(rows),
+                    Err(error) => CommandResponse::error("TOOL_NOT_SET", error),
+                }
+            }
+            Command::ToolDependencies { tool } => match tools::check(self, &tool) {
+                Ok(report) => CommandResponse::ok(report),
+                Err(error) => CommandResponse::error("TOOL_UNKNOWN", error),
+            },
             Command::DshPluginCheck => CommandResponse::ok(self.refresh_dsh_plugin(true).await),
             Command::DshPluginUpdate => match self.install_dsh_plugin(None).await {
                 Ok(view) => CommandResponse::ok(view),

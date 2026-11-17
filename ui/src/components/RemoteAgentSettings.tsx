@@ -607,7 +607,7 @@ function SelfHostedPairing({ kernel }: { kernel: Kernel }) {
       <PanelGroup title="本机的配对码">
         <div className="flex flex-col gap-2">
           <p className="text-[11px] leading-5 text-muted">
-            在另一台电脑上打开「设置 → Agent 互联 → 配对另一台电脑」，选中这台电脑，再输入下面的码。
+            在另一台电脑上打开「工具箱 → Agent 互联 → 配对另一台电脑」，选中这台电脑，再输入下面的码。
             码只能用一次。
           </p>
           <div className="flex flex-wrap items-center gap-3">

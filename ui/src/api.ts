@@ -423,6 +423,31 @@ export interface StateSnapshot {
   server: ServerView
   /** The DSH helper plugin's version, and whether npm has a newer one. */
   dshPlugin: DshPluginView
+  /** The built-in tools the toolbox lists. */
+  tools: ToolView[]
+}
+
+/** One row in the toolbox. */
+export interface ToolView {
+  /** Stable id; the window routes on it and sends it back when toggling. */
+  id: string
+  name: string
+  summary: string
+  /** Whether the operator has it on. */
+  enabled: boolean
+  /** Whether this build can run it here. */
+  available: boolean
+  /** Why it is unavailable, or a short status when it is. */
+  detail: string
+}
+
+/** What one tool needs on this computer, checked on demand. */
+export interface ToolDependencyReport {
+  tool: string
+  ok: boolean
+  summary: string
+  items: DependencyItem[]
+  hint: string | null
 }
 
 /** The operator's answer about anonymous session sharing. */
@@ -577,6 +602,9 @@ export type Command =
   | { op: 'engine_configure'; engine: EngineId; enabled: boolean }
   | { op: 'dependencies'; engine: EngineId }
   | { op: 'dependencies_repair'; engine: EngineId }
+  | { op: 'tools' }
+  | { op: 'set_tool_enabled'; tool: string; enabled: boolean }
+  | { op: 'tool_dependencies'; tool: string }
   | { op: 'dsh_plugin_check' }
   | { op: 'dsh_plugin_update' }
   | { op: 'onboarding_complete' }

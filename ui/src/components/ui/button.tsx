@@ -42,7 +42,7 @@ const classic = cva(
   {
     variants: {
       variant: {
-        primary: 'bg-accent text-[#08161c] hover:opacity-90',
+        primary: 'bg-accent text-on-accent hover:opacity-90',
         outline: 'border border-border bg-transparent text-fg hover:bg-surface-2',
         subtle: 'bg-surface-2 text-fg hover:bg-border/60',
         ghost: 'text-fg hover:bg-surface-2',
