@@ -74,6 +74,27 @@ Notes on the job graph:
   the release list in the first place; nothing in the current pipeline needs
   that lookup.
 
+## 2.1 Linux artifacts
+
+The workflow above builds macOS and Windows only. Linux is packaged separately
+by `scripts/package-linux.sh` (portable tarball + `.deb` of the headless
+kernel), because it is the *daemon* that ships there, not the desktop bundle.
+
+**Do not run that build on a relay host.** It was done that way for v0.2.0 and
+v0.2.1; on the 3.6 GB box the release build swapped until sshd and the relay it
+also serves stopped answering, taking the free relay down with it. Options, in
+order of preference:
+
+1. a GitHub Actions runner (v0.2.1 used a one-off `linux-package.yml` on
+   `ubuntu-22.04`; the binary needs glibc ≥ 2.35 there), or
+2. a dedicated build machine, or
+3. the relay host only with an added swap file and `CARGO_BUILD_JOBS=1`, off
+   peak hours.
+
+`scripts/package-linux.sh --out` accepts an absolute or relative path now; the
+packaging steps `cd` into staging directories, so a relative path used to fail
+with `tar: dist/control.tar.gz: No such file` (fixed in `a84b9f4`).
+
 ## 3. Secrets
 
 Configured in the repository's **Settings → Secrets and variables → Actions**.
