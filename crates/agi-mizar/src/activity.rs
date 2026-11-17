@@ -8,12 +8,11 @@
 //!
 //! ### One card, several rows
 //!
-//! The island is one activity with up to two rows, not one activity per session.
-//! That is Apple's shape (an app may hold a handful of activities, and the lock
-//! screen shows them as cards, not as a list) and the phone's: the app draws the
-//! same `rows` array from its own state. So "a session finished while two were
-//! running" is an update carrying the remaining row, and "the last one finished"
-//! is the end of the card.
+//! The host reports one complete snapshot, bounded by [`MAX_ROWS`], not one
+//! activity per session. The relay merges snapshots from multiple computers and
+//! applies the smaller limit used by the Lock Screen. So "a session finished
+//! while others were running" is an update carrying the remaining rows, and the
+//! relay ends the shared activity only after every host reports an empty snapshot.
 //!
 //! ### Why a turn's end is a state frame and not `running == false`
 //!
@@ -26,9 +25,10 @@
 //!
 //! A blocked turn is the one moment the operator must act, and making them open
 //! the app to see *what* is blocked defeats the island. The card therefore
-//! carries the pending approvals beside the rows; the phone draws them, and (in a
-//! later build) answers them from there. Everything here is `serde_json`, so a
-//! phone that predates the fields ignores them rather than failing to decode.
+//! carries pending approvals beside the rows; the phone draws them and routes
+//! responses through the existing interaction flow. Everything here is
+//! `serde_json`, so a phone that predates the fields ignores them rather than
+//! failing to decode.
 
 use std::collections::BTreeMap;
 
@@ -37,10 +37,28 @@ use serde_json::{json, Value};
 
 /// How many rows one card carries.
 ///
-/// Apple's contract asks for a small card, and the widget that draws it caps the
-/// list. Mirrored in the relay (`MAX_ACTIVITY_ROWS`) and the app, so all three
-/// agree about which sessions are on screen.
-pub const MAX_ROWS: usize = 2;
+/// Complete per-host snapshot limit. The relay applies the smaller UI limit
+/// after merging snapshots from every host.
+pub const MAX_ROWS: usize = 32;
+/// Keep pending requests bounded independently from the session rows.
+pub const MAX_APPROVALS: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowStatus {
+    Running,
+    WaitingApproval,
+    WaitingAnswer,
+}
+
+impl RowStatus {
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::WaitingApproval => "waitingApproval",
+            Self::WaitingAnswer => "waitingAnswer",
+        }
+    }
+}
 
 /// One running session, as a card row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +74,9 @@ pub struct Row {
     /// restart: the true turn start is on the other side of a process it no
     /// longer has.
     pub running_since: i64,
+    /// Epoch milliseconds when this row began waiting, if it is waiting.
+    pub waiting_since: Option<i64>,
+    pub status: RowStatus,
 }
 
 /// One approval waiting for the operator.
@@ -67,6 +88,7 @@ pub struct Approval {
     pub tool: String,
     /// The sentence the agent wrote about it.
     pub detail: String,
+    pub requested_at: i64,
 }
 
 /// Everything the island draws.
@@ -76,12 +98,119 @@ pub struct Card {
     pub rows: Vec<Row>,
     /// Oldest first.
     pub approvals: Vec<Approval>,
+    /// Pending request identity and kind, including questions that have no
+    /// separate payload on the Live Activity wire.
+    pub pending: Vec<PendingInteraction>,
 }
 
 impl Card {
     /// Whether there is nothing to show, which means the activity should end.
     pub fn is_empty(&self) -> bool {
-        self.rows.is_empty() && self.approvals.is_empty()
+        self.rows.is_empty() && self.approvals.is_empty() && self.pending.is_empty()
+    }
+}
+
+/// Build the complete per-host snapshot from all engines' sessions. Child
+/// conversations use the domain's established `subagent` and `fork` origin
+/// markers and are omitted. A main session with an unresolved interaction is
+/// included even after its engine reports `running = false`.
+pub fn snapshot_card(sessions: &[Session], interactions: &[Interaction]) -> Card {
+    let main_sessions: std::collections::HashSet<String> = sessions
+        .iter()
+        .filter(|session| !matches!(session.origin.as_deref(), Some("subagent")))
+        .map(|session| session.key.to_string())
+        .collect();
+    let mut pending: Vec<PendingInteraction> = interactions
+        .iter()
+        .filter_map(|interaction| {
+            let session_id = interaction.session.as_ref()?.to_string();
+            if !main_sessions.contains(&session_id) {
+                return None;
+            }
+            let (status, approval) = match interaction.kind {
+                InteractionKind::Approval => (
+                    RowStatus::WaitingApproval,
+                    Some(Approval {
+                        request_id: interaction.id.clone(),
+                        session_id: session_id.clone(),
+                        tool: interaction.title.clone(),
+                        detail: interaction.detail.clone().unwrap_or_default(),
+                        requested_at: interaction.requested_at,
+                    }),
+                ),
+                InteractionKind::Question => (RowStatus::WaitingAnswer, None),
+            };
+            Some(PendingInteraction {
+                request_id: interaction.id.clone(),
+                session_id,
+                status,
+                requested_at: interaction.requested_at,
+                approval,
+            })
+        })
+        .collect();
+    pending.sort_by(|a, b| {
+        a.requested_at
+            .cmp(&b.requested_at)
+            .then(a.request_id.cmp(&b.request_id))
+    });
+    pending.truncate(MAX_APPROVALS);
+    let waiting: BTreeMap<&str, RowStatus> =
+        pending
+            .iter()
+            .fold(BTreeMap::new(), |mut statuses, interaction| {
+                statuses
+                    .entry(interaction.session_id.as_str())
+                    .and_modify(|status| {
+                        if interaction.status == RowStatus::WaitingApproval {
+                            *status = interaction.status;
+                        }
+                    })
+                    .or_insert(interaction.status);
+                statuses
+            });
+    let mut rows: Vec<Row> = sessions
+        .iter()
+        .filter(|session| {
+            !matches!(session.origin.as_deref(), Some("subagent"))
+                && (session.running || waiting.contains_key(session.key.to_string().as_str()))
+        })
+        .map(|session| Row {
+            session_id: session.key.to_string(),
+            title: session
+                .title
+                .clone()
+                .unwrap_or_else(|| "Session".to_string()),
+            running_since: session.updated_at,
+            waiting_since: waiting
+                .get(session.key.to_string().as_str())
+                .and_then(|status| {
+                    pending
+                        .iter()
+                        .filter(|interaction| {
+                            interaction.session_id == session.key.to_string()
+                                && interaction.status == *status
+                        })
+                        .map(|interaction| interaction.requested_at)
+                        .min()
+                }),
+            status: waiting
+                .get(session.key.to_string().as_str())
+                .copied()
+                .unwrap_or(RowStatus::Running),
+        })
+        .collect();
+    rows.sort_by_key(|row| row.running_since);
+    rows.truncate(MAX_ROWS);
+    let approvals: Vec<Approval> = pending
+        .iter()
+        .filter_map(|interaction| interaction.approval.clone())
+        .take(MAX_APPROVALS)
+        .collect();
+    Card {
+        rows,
+        approvals,
+        pending,
     }
 }
 
@@ -97,7 +226,16 @@ pub struct Tracker {
     /// a row that was third becomes second when one finishes — but only the head
     /// is published.
     rows: Vec<Row>,
-    approvals: BTreeMap<String, Approval>,
+    pending: BTreeMap<String, PendingInteraction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingInteraction {
+    pub request_id: String,
+    pub session_id: String,
+    pub status: RowStatus,
+    pub requested_at: i64,
+    pub approval: Option<Approval>,
 }
 
 impl Tracker {
@@ -115,6 +253,7 @@ impl Tracker {
             .filter(|title| !title.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| "Session".to_string());
+        let is_waiting = self.status_for_session(&session_id).is_some();
         if let Some(row) = self
             .rows
             .iter_mut()
@@ -124,16 +263,23 @@ impl Tracker {
             // created with an empty title and then never touched again, which
             // is why the island showed only a timer for that row. Publish the
             // title when it arrives; an unchanged title still produces no card.
+            let mut changed = false;
             if row.title != title {
                 row.title = title;
-                return Some(self.card());
+                changed = true;
             }
-            return None;
+            if row.status != RowStatus::Running && !is_waiting {
+                row.status = RowStatus::Running;
+                changed = true;
+            }
+            return changed.then(|| self.card());
         }
         self.rows.push(Row {
             session_id,
             title,
             running_since: now_ms,
+            waiting_since: None,
+            status: RowStatus::Running,
         });
         // Oldest first, and a tie broken by insertion so two turns that started
         // in the same millisecond keep a stable order.
@@ -148,10 +294,10 @@ impl Tracker {
         let session_id = key.to_string();
         let before = self.rows.len();
         self.rows.retain(|row| row.session_id != session_id);
-        let approvals = self.approvals.len();
-        self.approvals
-            .retain(|_, approval| approval.session_id != session_id);
-        if self.rows.len() == before && self.approvals.len() == approvals {
+        let pending = self.pending.len();
+        self.pending
+            .retain(|_, interaction| interaction.session_id != session_id);
+        if self.rows.len() == before && self.pending.len() == pending {
             return None;
         }
         Some(self.card())
@@ -162,26 +308,45 @@ impl Tracker {
         if interaction.kind != InteractionKind::Approval {
             return None;
         }
-        let approval = Approval {
+        self.interaction_requested(interaction)
+    }
+
+    /// An approval or question is waiting for the operator.
+    pub fn interaction_requested(&mut self, interaction: &Interaction) -> Option<Card> {
+        let session_id = interaction.session.as_ref()?.to_string();
+        let status = match interaction.kind {
+            InteractionKind::Approval => RowStatus::WaitingApproval,
+            InteractionKind::Question => RowStatus::WaitingAnswer,
+        };
+        let approval = (interaction.kind == InteractionKind::Approval).then(|| Approval {
             request_id: interaction.id.clone(),
-            session_id: interaction
-                .session
-                .as_ref()
-                .map(|key| key.to_string())
-                .unwrap_or_default(),
+            session_id: session_id.clone(),
             tool: interaction.title.clone(),
             detail: interaction.detail.clone().unwrap_or_default(),
+            requested_at: interaction.requested_at,
+        });
+        let pending = PendingInteraction {
+            request_id: interaction.id.clone(),
+            session_id,
+            status,
+            requested_at: interaction.requested_at,
+            approval,
         };
-        let changed = self
-            .approvals
-            .insert(approval.request_id.clone(), approval)
-            .is_none();
-        changed.then(|| self.card())
+        let changed = self.pending.get(&interaction.id) != Some(&pending);
+        if !changed {
+            return None;
+        }
+        self.pending.insert(interaction.id.clone(), pending);
+        self.refresh_row_statuses();
+        Some(self.card())
     }
 
     /// Somebody answered it -- this phone, the desktop window, or a timeout.
     pub fn approval_resolved(&mut self, id: &str) -> Option<Card> {
-        self.approvals.remove(id).map(|_| self.card())
+        self.pending.remove(id).map(|_| {
+            self.refresh_row_statuses();
+            self.card()
+        })
     }
 
     /// Replace this tracker's view of the world with an authoritative card.
@@ -212,12 +377,38 @@ impl Tracker {
             }
         }
         self.rows = rows;
-        self.approvals = card
-            .approvals
+        // Reconciliation updates row state without changing a known turn's
+        // start instant. Pending interactions are rebuilt by the server's
+        // authoritative snapshot below when requested/resolved events arrive.
+        self.pending = card
+            .pending
             .iter()
             .cloned()
-            .map(|approval| (approval.request_id.clone(), approval))
+            .map(|pending| (pending.request_id.clone(), pending))
             .collect();
+        for row in &mut self.rows {
+            row.status = card
+                .rows
+                .iter()
+                .find(|source| source.session_id == row.session_id)
+                .map(|source| source.status)
+                .unwrap_or(RowStatus::Running);
+        }
+    }
+
+    /// Reconcile a snapshot whose turn clocks have already been stabilized by
+    /// the server, including a new turn observed without an intermediate idle.
+    pub fn reconcile_authoritative(&mut self, card: &Card) {
+        self.reconcile(card);
+        for row in &mut self.rows {
+            if let Some(source) = card
+                .rows
+                .iter()
+                .find(|source| source.session_id == row.session_id)
+            {
+                row.running_since = source.running_since;
+            }
+        }
     }
 
     /// What the row for this session was called, before it leaves the card.
@@ -234,9 +425,71 @@ impl Tracker {
 
     /// The card as the wire wants it.
     pub fn card(&self) -> Card {
+        let mut rows: Vec<Row> = self.rows.iter().take(MAX_ROWS).cloned().collect();
+        for row in &mut rows {
+            if let Some(status) = self.status_for_session(&row.session_id) {
+                row.status = status;
+                row.waiting_since = self
+                    .pending
+                    .values()
+                    .filter(|pending| {
+                        pending.session_id == row.session_id && pending.status == status
+                    })
+                    .map(|pending| pending.requested_at)
+                    .min();
+            } else {
+                row.waiting_since = None;
+            }
+        }
+        let mut approvals: Vec<Approval> = self
+            .pending
+            .values()
+            .filter_map(|pending| pending.approval.clone())
+            .collect();
+        approvals.sort_by(|a, b| {
+            a.requested_at
+                .cmp(&b.requested_at)
+                .then(a.request_id.cmp(&b.request_id))
+        });
+        approvals.truncate(MAX_APPROVALS);
         Card {
-            rows: self.rows.iter().take(MAX_ROWS).cloned().collect(),
-            approvals: self.approvals.values().cloned().collect(),
+            rows,
+            approvals,
+            pending: self.pending.values().cloned().collect(),
+        }
+    }
+
+    fn status_for_session(&self, session_id: &str) -> Option<RowStatus> {
+        self.pending
+            .values()
+            .filter(|pending| pending.session_id == session_id)
+            .map(|pending| pending.status)
+            .min_by_key(|status| match status {
+                RowStatus::WaitingApproval => 0,
+                RowStatus::WaitingAnswer => 1,
+                RowStatus::Running => 2,
+            })
+    }
+
+    fn refresh_row_statuses(&mut self) {
+        let waiting: BTreeMap<String, RowStatus> =
+            self.pending
+                .values()
+                .fold(BTreeMap::new(), |mut map, pending| {
+                    map.entry(pending.session_id.clone())
+                        .and_modify(|status| {
+                            if pending.status == RowStatus::WaitingApproval {
+                                *status = pending.status;
+                            }
+                        })
+                        .or_insert(pending.status);
+                    map
+                });
+        for row in &mut self.rows {
+            row.status = waiting
+                .get(&row.session_id)
+                .copied()
+                .unwrap_or(RowStatus::Running);
         }
     }
 
@@ -257,17 +510,34 @@ impl Tracker {
 ///   - card: what should be on screen.
 ///   - except: devices whose app is on screen and has its own card.
 /// - Returns: the JSON body.
-pub fn activity_body(card: &Card, except: &[String]) -> Value {
+pub fn activity_body(
+    card: &Card,
+    except: &[String],
+    host_id: &str,
+    host_name: &str,
+    sent_at: i64,
+) -> Value {
     json!({
         "phase": "start",
+        "hostId": host_id,
+        "hostName": host_name,
+        "snapshotVersion": 2,
+        "sentAt": sent_at,
         "rows": card
             .rows
             .iter()
-            .map(|row| json!({
-                "sessionId": row.session_id,
-                "title": row.title,
-                "runningSince": row.running_since,
-            }))
+            .map(|row| {
+                let mut value = json!({
+                    "sessionId": row.session_id,
+                    "title": row.title,
+                    "runningSince": row.running_since,
+                    "status": row.status.wire_name(),
+                });
+                if let Some(waiting_since) = row.waiting_since {
+                    value["waitingSince"] = json!(waiting_since);
+                }
+                value
+            })
             .collect::<Vec<_>>(),
         "approvals": card
             .approvals
@@ -277,6 +547,7 @@ pub fn activity_body(card: &Card, except: &[String]) -> Value {
                 "sessionId": approval.session_id,
                 "tool": approval.tool,
                 "detail": approval.detail,
+                "requestedAt": approval.requested_at,
             }))
             .collect::<Vec<_>>(),
         "exceptDeviceIds": except,
@@ -302,6 +573,8 @@ pub fn turn_end_body(
     end_live_activity: bool,
     except: &[String],
     zh: bool,
+    host_id: &str,
+    host_name: &str,
 ) -> Value {
     let name = if title.trim().is_empty() {
         if zh { "会话" } else { "Session" }.to_string()
@@ -321,6 +594,8 @@ pub fn turn_end_body(
         "threadId": session.to_string(),
         "timeSensitive": false,
         "endLiveActivity": end_live_activity,
+        "hostId": host_id,
+        "hostName": host_name,
         "exceptDeviceIds": except,
     })
 }
@@ -426,11 +701,18 @@ mod tests {
             tracker.running(&session(id, Some(id)), 1_000 + index as i64);
         }
         let card = tracker.card();
-        assert_eq!(card.rows.len(), MAX_ROWS, "the widget draws two rows");
+        assert_eq!(
+            card.rows.len(),
+            3,
+            "the producer keeps the complete local snapshot"
+        );
         assert_eq!(card.rows[1].session_id, "dsh:b");
         let card = tracker.finished(&key("a")).unwrap();
         assert_eq!(card.rows[0].session_id, "dsh:b");
-        assert_eq!(card.rows[1].session_id, "dsh:c", "the third row moved up");
+        assert_eq!(
+            card.rows[1].session_id, "dsh:c",
+            "the third row remains in the snapshot"
+        );
     }
 
     #[test]
@@ -464,12 +746,28 @@ mod tests {
                 session_id: "dsh:a".to_string(),
                 title: "Build".to_string(),
                 running_since: 1_000,
+                waiting_since: Some(1),
+                status: RowStatus::WaitingApproval,
             }],
             approvals: vec![Approval {
                 request_id: "r1".to_string(),
                 session_id: "dsh:a".to_string(),
                 tool: "Bash".to_string(),
                 detail: "rm -rf build".to_string(),
+                requested_at: 1,
+            }],
+            pending: vec![PendingInteraction {
+                request_id: "r1".to_string(),
+                session_id: "dsh:a".to_string(),
+                status: RowStatus::WaitingApproval,
+                requested_at: 1,
+                approval: Some(Approval {
+                    request_id: "r1".to_string(),
+                    session_id: "dsh:a".to_string(),
+                    tool: "Bash".to_string(),
+                    detail: "rm -rf build".to_string(),
+                    requested_at: 1,
+                }),
             }],
         };
 
@@ -478,11 +776,14 @@ mod tests {
 
         let after = tracker.approval_resolved("r1").unwrap();
         assert!(after.approvals.is_empty());
-        assert_eq!(after.rows, card.rows, "the running row stays");
+        assert_eq!(after.rows[0].status, RowStatus::Running);
+        assert_eq!(after.rows[0].running_since, card.rows[0].running_since);
         assert_eq!(
             tracker.card(),
             Card {
+                rows: after.rows.clone(),
                 approvals: Vec::new(),
+                pending: Vec::new(),
                 ..card
             },
         );
@@ -498,14 +799,19 @@ mod tests {
                     session_id: "dsh:a".to_string(),
                     title: "Build".to_string(),
                     running_since: 5_000,
+                    waiting_since: None,
+                    status: RowStatus::Running,
                 },
                 Row {
                     session_id: "dsh:b".to_string(),
                     title: "Tests".to_string(),
                     running_since: 5_000,
+                    waiting_since: None,
+                    status: RowStatus::Running,
                 },
             ],
             approvals: Vec::new(),
+            pending: Vec::new(),
         };
 
         tracker.reconcile(&card);
@@ -547,35 +853,144 @@ mod tests {
         for (index, id) in ["a", "b", "c"].into_iter().enumerate() {
             tracker.running(&session(id, Some(id)), 1_000 + index as i64);
         }
-        let body = activity_body(&tracker.card(), &["device-1".to_string()]);
+        let body = activity_body(
+            &tracker.card(),
+            &["device-1".to_string()],
+            "host-id",
+            "Mac mini",
+            99_000,
+        );
         assert_eq!(body["phase"], "start");
         let rows = body["rows"].as_array().unwrap();
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 3);
         assert_eq!(rows[0]["sessionId"], "dsh:a");
         assert_eq!(rows[0]["runningSince"], 1_000);
+        assert_eq!(rows[0]["status"], "running");
+        assert!(rows[0].get("waitingSince").is_none());
+        assert_eq!(body["hostId"], "host-id");
+        assert_eq!(body["hostName"], "Mac mini");
+        assert_eq!(body["snapshotVersion"], 2);
+        assert_eq!(body["sentAt"], 99_000);
         assert_eq!(body["exceptDeviceIds"][0], "device-1");
         assert!(body["approvals"].as_array().unwrap().is_empty());
     }
 
     #[test]
+    fn a_waiting_main_session_is_included_and_child_sessions_are_excluded() {
+        let mut waiting = session("question", Some("Question"));
+        waiting.key = SessionKey::new(EngineId::Claude, "question");
+        waiting.running = false;
+        let mut child = session("child", Some("Child"));
+        child.origin = Some("subagent".to_string());
+        let mut fork = session("fork", Some("Fork"));
+        fork.origin = Some("fork".to_string());
+        let mut question = approval("q1", "question");
+        question.session = Some(waiting.key.clone());
+        question.kind = InteractionKind::Question;
+
+        let card = snapshot_card(&[waiting, child, fork], &[question]);
+        assert_eq!(card.rows.len(), 2);
+        assert!(card.rows.iter().any(|row| row.session_id == "dsh:fork"));
+        assert_eq!(card.rows[0].session_id, "claude:question");
+        assert_eq!(card.rows[0].status, RowStatus::WaitingAnswer);
+        assert!(card.approvals.is_empty());
+    }
+
+    #[test]
+    fn pending_does_not_restart_the_turn_clock() {
+        let mut tracker = Tracker::default();
+        tracker.running(&session("a", Some("Build")), 1_000);
+        let mut question = approval("q1", "a");
+        question.kind = InteractionKind::Question;
+        let waiting = tracker.interaction_requested(&question).unwrap();
+        assert_eq!(waiting.rows[0].status, RowStatus::WaitingAnswer);
+        assert_eq!(waiting.rows[0].running_since, 1_000);
+        assert_eq!(waiting.rows[0].waiting_since, Some(question.requested_at));
+        let body = activity_body(&waiting, &[], "id", "host", 10);
+        assert_eq!(body["rows"][0]["waitingSince"], question.requested_at);
+        let resolved = tracker.approval_resolved("q1").unwrap();
+        assert_eq!(resolved.rows[0].status, RowStatus::Running);
+        assert_eq!(resolved.rows[0].running_since, 1_000);
+        assert_eq!(resolved.rows[0].waiting_since, None);
+    }
+
+    #[test]
+    fn snapshot_uses_the_oldest_request_for_the_visible_wait_status() {
+        let mut running = session("a", Some("Build"));
+        running.updated_at = 90_000;
+        let mut oldest = approval("r-old", "a");
+        oldest.requested_at = 10_000;
+        let mut newer = approval("r-new", "a");
+        newer.requested_at = 20_000;
+        let mut question = approval("q", "a");
+        question.kind = InteractionKind::Question;
+        question.requested_at = 1_000;
+
+        let card = snapshot_card(&[running], &[newer, question, oldest]);
+        assert_eq!(card.rows[0].status, RowStatus::WaitingApproval);
+        assert_eq!(card.rows[0].running_since, 90_000);
+        assert_eq!(card.rows[0].waiting_since, Some(10_000));
+    }
+
+    #[test]
+    fn a_new_turn_after_finish_gets_a_new_clock_start() {
+        let mut tracker = Tracker::default();
+        tracker.running(&session("a", Some("Build")), 1_000);
+        tracker.finished(&key("a")).unwrap();
+        let next = tracker
+            .running(&session("a", Some("Build")), 5_000)
+            .unwrap();
+        assert_eq!(next.rows[0].running_since, 5_000);
+    }
+
+    #[test]
+    fn the_body_keeps_more_than_the_four_rows_the_relay_displays() {
+        let mut tracker = Tracker::default();
+        for index in 0..5 {
+            tracker.running(
+                &session(&format!("s{index}"), Some("Session")),
+                1_000 + index,
+            );
+        }
+        let body = activity_body(&tracker.card(), &[], "id", "host", 10);
+        assert_eq!(body["rows"].as_array().unwrap().len(), 5);
+    }
+
+    #[test]
     fn a_turn_end_notification_says_which_session_and_whether_to_end_the_card() {
-        let body = turn_end_body("Fix the tests", &key("a"), true, &[], false);
+        let body = turn_end_body(
+            "Fix the tests",
+            &key("a"),
+            true,
+            &[],
+            false,
+            "host-id",
+            "Host",
+        );
         assert_eq!(body["kind"], "turn_end");
         assert_eq!(body["sessionId"], "dsh:a");
         assert_eq!(body["endLiveActivity"], true);
         assert_eq!(body["body"], "Fix the tests is done");
 
         // A session with no title still gets a sentence rather than an empty one.
-        let unnamed = turn_end_body("", &key("b"), false, &[], false);
+        let unnamed = turn_end_body("", &key("b"), false, &[], false, "host-id", "Host");
         assert_eq!(unnamed["body"], "Session is done");
         assert_eq!(unnamed["endLiveActivity"], false);
 
         // A phone that registered a Chinese locale gets Chinese text, and the
         // session name stays the operator's own words.
-        let zh = turn_end_body("Fix the tests", &key("c"), true, &[], true);
+        let zh = turn_end_body(
+            "Fix the tests",
+            &key("c"),
+            true,
+            &[],
+            true,
+            "host-id",
+            "Host",
+        );
         assert_eq!(zh["title"], "会话已完成");
         assert_eq!(zh["body"], "Fix the tests 已完成");
-        let zh_unnamed = turn_end_body("", &key("d"), false, &[], true);
+        let zh_unnamed = turn_end_body("", &key("d"), false, &[], true, "host-id", "Host");
         assert_eq!(zh_unnamed["body"], "会话 已完成");
     }
 }

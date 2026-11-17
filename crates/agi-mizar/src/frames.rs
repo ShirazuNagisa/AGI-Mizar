@@ -434,6 +434,8 @@ pub struct SessionRow {
     pub session_id: String,
     #[serde(rename = "updatedAt")]
     pub updated_at: i64,
+    #[serde(rename = "turnStartedAt", skip_serializing_if = "Option::is_none")]
+    pub turn_started_at: Option<i64>,
     pub running: bool,
     /// A session with no title and no activity yet.
     pub blank: bool,
