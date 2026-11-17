@@ -6,6 +6,8 @@ name: Linux package
 # them as a workflow artifact for the release step to attach.
 on:
   workflow_dispatch:
+  push:
+    branches: [release/0.2.1-linux]
 
 jobs:
   package:
