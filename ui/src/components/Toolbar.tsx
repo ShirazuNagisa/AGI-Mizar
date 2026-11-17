@@ -6,6 +6,8 @@ interface ToolbarProps {
  children?: ReactNode
  /** A mark shown beside the title, e.g. an agent's connection lamp. */
  badge?: ReactNode
+ /** A control before the title, e.g. the way back from a tool's page. */
+ leading?: ReactNode
 }
 
 /**
@@ -17,7 +19,7 @@ interface ToolbarProps {
  * 1-bit: the title is the same 12px as everything else, so a filled square
  * marks where it starts. Size alone cannot carry hierarchy in this theme.
  */
-export function Toolbar({ title, badge, children }: ToolbarProps) {
+export function Toolbar({ title, badge, leading, children }: ToolbarProps) {
  const drag = isMac() || isWindows() ? { 'data-tauri-drag-region': 'deep' } : {}
  // Windows paints its window buttons into the top-right corner of the window;
  // reserve their 3 x 46px so the page's own actions stay clear of them. macOS
@@ -28,6 +30,7 @@ export function Toolbar({ title, badge, children }: ToolbarProps) {
       {...drag}
       className={'flex h-12 shrink-0 items-center gap-2 mz-divide-b px-6' + reserved}
     >
+      {leading}
       <span className="size-2 shrink-0 bg-ink" aria-hidden />
       <h1 className="text-[12px] tracking-[1px]">{title}</h1>
       {badge}

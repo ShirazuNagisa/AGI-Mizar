@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { EngineStatus, ServerMode } from '../api'
-import { AGENT_TABS, type AgentTab, type Page, samePage } from '../navigation'
-import { ENGINE_MARKS, GearIcon, RingMark } from '../icons'
+import { AGENT_TABS, inToolbox, type AgentTab, type Page, samePage } from '../navigation'
+import { ENGINE_MARKS, GearIcon, RingMark, ToolboxIcon } from '../icons'
 import { cn } from '../lib/utils'
 import { isMac, isWindows } from '../platform'
 import { WipeButton } from './ui/wipe'
@@ -144,7 +144,25 @@ export function Sidebar({
         aria-label="回到主页"
       >
         <RingMark />
-        <span className="text-[12px] tracking-[1px]">AGI Mizar</span>
+        <span className="shrink-0 text-[12px] tracking-[1px]">AGI Mizar</span>
+        <span className="flex-1" />
+        {/* The relay's state, beside the product name rather than as a row of
+            its own: it is a property of the window, not a destination. */}
+        <span
+          className="flex min-w-0 items-center gap-1.5"
+          title={serverOrigin ?? serverLabel}
+          aria-label={serverLabel}
+        >
+          <Lamp state={serverConnected ? 'on' : 'off'} label={serverLabel} />
+          <span
+            className={cn(
+              'shrink-0 text-[10px] leading-none tracking-[0.5px]',
+              serverConnected ? 'text-fg' : 'text-muted',
+            )}
+          >
+            {serverConnected ? '已连接' : '未连接'}
+          </span>
+        </span>
       </WipeButton>
 
       <nav className="mt-3 flex flex-col px-2">
@@ -189,14 +207,15 @@ export function Sidebar({
 
       <div className="flex flex-col px-2 pb-2">
         <WipeButton
-          onClick={() => onNavigate({ kind: 'settings' })}
-          className="flex h-8 items-center text-left text-[12px]"
-          contentClassName={cn(ROW_LABEL, 'gap-2')}
+          onClick={() => onNavigate({ kind: 'toolbox' })}
+          className={cn(
+            'flex h-9 items-center text-left text-[12px]',
+            inToolbox(page) && 'bg-ink text-bg',
+          )}
+          contentClassName={ROW_LABEL}
         >
-          <Lamp state={serverConnected ? 'on' : 'off'} label={serverLabel} />
-          <span className="min-w-0 truncate" title={serverOrigin ?? undefined}>
-            {serverLabel}
-          </span>
+          <ToolboxIcon size={17} />
+          <span className="flex-1">工具箱</span>
         </WipeButton>
 
         <WipeButton

@@ -6,6 +6,10 @@ export type Page =
   | { kind: 'agent'; tab: AgentTabId }
   | { kind: 'login' }
   | { kind: 'settings' }
+  /** The list of built-in tools and their switches. */
+  | { kind: 'toolbox' }
+  /** One tool's own settings surface; `id` is the tool id on the wire. */
+  | { kind: 'tool'; id: string }
 
 /** GUI and CLI are different surfaces of the same engine. */
 export type AgentSurface = 'gui' | 'cli'
@@ -71,5 +75,11 @@ export const AGENTS: { engine: EngineId; name: string }[] = [
 export function samePage(a: Page, b: Page): boolean {
   if (a.kind !== b.kind) return false
   if (a.kind === 'agent' && b.kind === 'agent') return a.tab === b.tab
+  if (a.kind === 'tool' && b.kind === 'tool') return a.id === b.id
   return true
+}
+
+/** Whether the toolbox is the current place, including one tool's page. */
+export function inToolbox(page: Page): boolean {
+  return page.kind === 'toolbox' || page.kind === 'tool'
 }

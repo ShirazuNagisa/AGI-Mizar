@@ -21,7 +21,6 @@ import { Switch } from './ui/switch'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
 import { Toolbar } from './Toolbar'
 import { ShellSettingsList } from './ShellSettingsList'
-import { RemoteAgentSettings } from './RemoteAgentSettings'
 import { LoginPage } from './LoginPage'
 import { ServerChoice } from './ServerChoice'
 import { useShellSettings } from '../lib/use-shell-settings'
@@ -218,9 +217,6 @@ export function SettingsPage({
             </>
           ) : null}
 
-          {tab === 'remote' ? (
-            <RemoteAgentSettings kernel={kernel} selfHosted={selfHosted} />
-          ) : null}
 
           {tab === 'approval' ? (
             <Section title="审批模型">
@@ -281,7 +277,6 @@ const SETTINGS_TABS = [
   { id: 'account', label: '账户' },
   { id: 'server', label: '服务器' },
   { id: 'devices', label: '设备与连接' },
-  { id: 'remote', label: 'Agent互联' },
   { id: 'approval', label: '审批模型' },
   { id: 'appearance', label: '外观' },
   { id: 'startup', label: '启动与窗口' },

@@ -27,8 +27,15 @@
   --border: #e2e2e6;
   --fg: #16171a;
   --muted: #6b6f76;
-  --accent: #0a78ae;
-  --accent-soft: rgb(10 120 174 / 0.12);
+  /* The accent is ink: a filled action is black with a paper label, the same
+     inversion dark mode does with white. Colour is reserved for the 1-Bit
+     theme, which draws its own blue. */
+  --accent: #16171a;
+  --accent-soft: rgb(22 23 26 / 0.08);
+  /* What sits on an accent fill. Every filled control (buttons, switches,
+     selected rows, lamps) reads its label from here, so the pair inverts
+     together instead of one side turning unreadable. */
+  --on-accent: #f6f6f7;
   --heat-0: #ececef;
   /* The 1-bit token name, mapped onto the classic palette so a component that
      says `border-ink` is outlined in the accent colour here. */
@@ -49,6 +56,7 @@
      white with a dark label, not a blue fill. */
   --accent: #ffffff;
   --accent-soft: rgb(255 255 255 / 0.14);
+  --on-accent: #08161c;
   --heat-0: #1c1e21;
   --ink: var(--accent);
 }
@@ -66,6 +74,7 @@ html[data-theme="oled"] {
   --muted: var(--ink);
   --accent: var(--ink);
   --accent-soft: transparent;
+  --on-accent: var(--bg);
   --heat-0: transparent;
   --ui-font: "Fusion Pixel", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
@@ -93,6 +102,7 @@ html[data-platform="windows"]:not([data-theme="oled"]) {
   --color-muted: var(--muted);
   --color-accent: var(--accent);
   --color-accent-soft: var(--accent-soft);
+  --color-on-accent: var(--on-accent);
   --color-heat-0: var(--heat-0);
   --color-ink: var(--ink);
   --font-sans: var(--ui-font);
@@ -331,7 +341,7 @@ html:not([data-theme="oled"]) .bg-ink {
 }
 
 html:not([data-theme="oled"]) .text-bg {
-  color: #08161c;
+  color: var(--on-accent);
 }
 
 /* Icons and lamps that use the foreground colour would disappear on the white
@@ -345,7 +355,7 @@ html:not([data-theme="oled"]) .bg-ink .border-fg {
 }
 
 html:not([data-theme="oled"]) .bg-ink .text-muted {
-  color: color-mix(in srgb, #08161c 68%, transparent);
+  color: color-mix(in srgb, var(--on-accent) 68%, transparent);
 }
 
 /* ── Type size, per theme ─────────────────────────────────────────────────

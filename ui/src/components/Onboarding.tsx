@@ -7,8 +7,6 @@ import type {
   Kernel,
   ModelCheck,
   ModelState,
-  PairingView,
-  RemotePrefs,
   ServerPrefs,
   ServerProbeResult,
   ServerView,
@@ -21,8 +19,8 @@ import { useShellSettings, type ShellSettingsState } from '../lib/use-shell-sett
 import { type DesktopPlatform } from '../platform'
 import { quitApp, shellAvailable, shellFailure } from '../shell'
 import { Button } from './ui/button'
-import { Progress } from './ui/progress'
 import { Switch } from './ui/switch'
+import { Progress } from './ui/progress'
 import { CheckIcon, ENGINE_MARKS, RingMark, Spinner } from '../icons'
 import { DshPluginHint } from './DshPluginHint'
 import { ServerChoice } from './ServerChoice'
@@ -40,7 +38,7 @@ const STEP_ORDER = [
   'login',
   'choose',
   'model',
-  'remote',
+  'toolbox',
   'preferences',
   'sharing',
   'finish',
@@ -55,7 +53,7 @@ const STEP_TITLES: Record<StepId, string> = {
   login: '登录',
   choose: '选择 Agent',
   model: '下载模型',
-  remote: 'Agent 互联',
+  toolbox: '工具箱',
   preferences: '偏好',
   sharing: '共享会话数据',
   finish: '完成',
@@ -154,41 +152,7 @@ export function Onboarding({
   )
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // Read once, at the start: the step is one screen of switches and the answer
-  // saves on its 下一步, not on every click.
-  const [remote, setRemote] = useState<RemotePrefs | null>(null)
-  const [remoteError, setRemoteError] = useState<string | null>(null)
-  const [remoteLoading, setRemoteLoading] = useState(true)
   const shell = useShellSettings()
-
-  useEffect(() => {
-    let cancelled = false
-    void (async () => {
-      try {
-        const next = await kernel.send<RemotePrefs>({ op: 'remote_target_settings' })
-        if (!cancelled) setRemote(next)
-      } catch (failure) {
-        if (!cancelled) setRemoteError(failureMessage(failure, '读取 Agent 互联设置失败'))
-      } finally {
-        if (!cancelled) setRemoteLoading(false)
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [kernel])
-
-  async function retryRemote() {
-    setRemoteLoading(true)
-    setRemoteError(null)
-    try {
-      setRemote(await kernel.send<RemotePrefs>({ op: 'remote_target_settings' }))
-    } catch (failure) {
-      setRemoteError(failureMessage(failure, '读取 Agent 互联设置失败'))
-    } finally {
-      setRemoteLoading(false)
-    }
-  }
 
   function toggle(engine: EngineId) {
     setSelected((current) => {
@@ -305,33 +269,6 @@ export function Onboarding({
         setStep(neighbours('choose').next)
       } catch (failure) {
         setError(failureMessage(failure, '没有记住所选的 Agent'))
-      } finally {
-        setBusy(false)
-      }
-      return
-    }
-    if (step === 'remote') {
-      // Nothing was read means nothing is remembered: it would replace whatever
-      // the machine already had with defaults.
-      if (remote === null) {
-        setStep(neighbours('remote').next)
-        return
-      }
-      setBusy(true)
-      try {
-        await kernel.send({
-          op: 'set_remote_target_settings',
-          enabled: remote.enabled,
-          allow_lan: remote.allowLan,
-          allow_wan: remote.allowWan,
-          allow_all_workspaces: remote.allowAllWorkspaces,
-          auto_archive: remote.autoArchive,
-          workspaces: remote.workspaces,
-          blocked: remote.blocked,
-        })
-        setStep(neighbours('remote').next)
-      } catch (failure) {
-        setError(failureMessage(failure, '没有记住 Agent 互联的选择'))
       } finally {
         setBusy(false)
       }
@@ -454,17 +391,7 @@ export function Onboarding({
                 }}
               />
             ) : null}
-            {step === 'remote' ? (
-              <RemoteStep
-                kernel={kernel}
-                selfHosted={server.mode === 'selfHosted'}
-                prefs={remote}
-                loading={remoteLoading}
-                error={remoteError}
-                onChange={setRemote}
-                onRetry={() => void retryRemote()}
-              />
-            ) : null}
+            {step === 'toolbox' ? <ToolboxStep platform={platform} /> : null}
             {step === 'preferences' ? <PreferenceStep shell={shell} platform={platform} /> : null}
             {step === 'sharing' ? (
               <SharingStep kernel={kernel} share={share} onChange={setShare} />
@@ -479,7 +406,6 @@ export function Onboarding({
                 shell={shell}
                 platform={platform}
                 sharing={share}
-                remote={remote}
               />
             ) : null}
           </div>
@@ -1267,194 +1193,49 @@ function ModelStep({ kernel, model, onLater }: ModelStepProps) {
 }
 
 /**
- * The remote-agent question, asked once.
+ * The toolbox, shown once before the guide ends.
  *
- * It is here because the feature only works when both computers say yes, and a
- * person is most likely to have both in front of them while setting up. The
- * routes are separate because one is free and physical (same LAN) and the other
- * costs money (through the relay), so turning the feature on must not turn the
- * paid route on with it.
+ * The guide used to ask the remote-agent questions here. Those now live in the
+ * window's toolbox page, beside the other tools, so this step is a signpost
+ * instead of a form: it says what the tools are and where the switches are.
+ * Nothing on this page writes anything.
  */
-function RemoteStep({
-  kernel,
-  selfHosted,
-  prefs,
-  loading,
-  error,
-  onChange,
-  onRetry,
-}: {
-  kernel: Kernel
-  selfHosted: boolean
-  prefs: RemotePrefs | null
-  loading: boolean
-  error: string | null
-  onChange: (next: RemotePrefs) => void
-  onRetry: () => void
-}) {
-  // The guide's entry into pairing is deliberately one code, not the whole
-  // settings surface: a person setting up two machines is told where to type it
-  // now, and the list of paired computers stays in the settings page.
-  const [pairing, setPairing] = useState<PairingView | null>(null)
-  const [pairingError, setPairingError] = useState<string | null>(null)
-  const [pairingBusy, setPairingBusy] = useState(false)
-
-  useEffect(() => {
-    if (!selfHosted) return
-    let cancelled = false
-    void (async () => {
-      try {
-        const next = await kernel.send<PairingView>({ op: 'pairing', refresh: false })
-        if (!cancelled) setPairing(next)
-      } catch (failure) {
-        if (!cancelled) setPairingError(failureMessage(failure, '没有拿到本机的配对码'))
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [kernel, selfHosted])
-
-  async function refreshPairing() {
-    setPairingBusy(true)
-    setPairingError(null)
-    try {
-      setPairing(await kernel.send<PairingView>({ op: 'pairing', refresh: true }))
-    } catch (failure) {
-      setPairingError(failureMessage(failure, '没有换到新的配对码'))
-    } finally {
-      setPairingBusy(false)
-    }
-  }
-
+function ToolboxStep({ platform }: { platform: DesktopPlatform }) {
+  const mac = platform === 'macos'
+  const tools: { name: string; summary: string; detail: string }[] = [
+    {
+      name: 'Agent 互联',
+      summary: '让一个 Agent 把任务交给 DSH 子代理：本机可以，另一台电脑也可以。',
+      detail: '开关、可用线路、工作区白名单和配对，都在它的设置页里。',
+    },
+    {
+      name: 'computer use',
+      summary: '让 Agent 读界面、点按钮、打字，操作这台电脑上的应用。',
+      detail: mac
+        ? '需要「辅助功能」和「屏幕录制」两项权限；第一次开启前可以在这里做一次依赖检查。'
+        : '目前只在 macOS 上提供。',
+    },
+  ]
   return (
     <section>
-      <h2 className="text-[24px] leading-8">Agent 互联</h2>
+      <h2 className="text-[24px] leading-8">工具箱</h2>
       <p className="mt-1.5 text-[12px] leading-5 text-muted">
-        {selfHosted
-          ? 'Agent 互联让一个 Agent 把任务交给 DSH 子代理：本机可以，另一台电脑也可以。这里先决定这台电脑是否接受别人的任务、以及委派出去的会话怎么收尾；之后随时可以在「设置 → Agent 互联」里改。'
-          : 'Agent 互联让一个 Agent 把任务交给 DSH 子代理：本机可以，同账户的另一台电脑也可以。这里先决定这台电脑是否接受别人的任务、以及委派出去的会话怎么收尾；之后随时可以在「设置 → Agent 互联」里改。'}
+        这个应用把能力做成可以单独开关的工具。进入应用后打开左侧栏的「工具箱」：每个工具一行，
+        右边的开关决定用不用它，箭头进入它的设置页。设置页里也有同样的入口。
       </p>
-
-      {loading ? (
-        <p className="mt-4 flex items-center gap-1.5 text-[12px] text-muted">
-          <Spinner size={12} />
-          正在读取这台电脑的设置…
-        </p>
-      ) : prefs === null ? (
-        <div className="mt-4 flex items-center justify-between gap-4 mz-border px-4 py-2.5">
-          <span className="text-[12px] leading-5 text-muted">{error ?? '没有读到这台电脑的设置'}</span>
-          <Button size="sm" variant="outline" onClick={onRetry}>
-            重试
-          </Button>
-        </div>
-      ) : (
-        <div className="mt-4 mz-border">
-          <div className="flex flex-col gap-3 px-4 py-3">
-            <RemoteRow
-              label="允许其他电脑把任务交给本机"
-              hint="总开关。关着时这台电脑不接受任何其他电脑的任务。"
-              checked={prefs.enabled}
-              onChange={(enabled) => onChange({ ...prefs, enabled })}
-            />
-            <RemoteRow
-              label="允许局域网（免费）"
-              hint="同一局域网、同账户；不经过中继。"
-              checked={prefs.allowLan}
-              disabled={!prefs.enabled}
-              onChange={(allowLan) => onChange({ ...prefs, allowLan })}
-            />
-            <RemoteRow
-              label={selfHosted ? '允许跨网（自建服务器）' : '允许跨网（付费）'}
-              hint={
-                selfHosted
-                  ? '通过你自己的 relay 转发；不需要账户。'
-                  : '通过账户中继；需要付费账户。'
-              }
-              checked={prefs.allowWan}
-              disabled={!prefs.enabled}
-              onChange={(allowWan) => onChange({ ...prefs, allowWan })}
-            />
-            <RemoteRow
-              label="对委派机开放所有工作区"
-              hint="打开后，委派机可查询本机 DSH 的全部工作区，不再受白名单限制。"
-              checked={prefs.allowAllWorkspaces}
-              disabled={!prefs.enabled}
-              onChange={(allowAllWorkspaces) => onChange({ ...prefs, allowAllWorkspaces })}
-            />
-            <RemoteRow
-              label="任务结束后自动归档子代理会话"
-              hint="本机与远程委派都适用：任务完成或失败后归档该子代理会话（之后不能再向它追加），取消的任务保留。默认开启。"
-              checked={prefs.autoArchive}
-              onChange={(autoArchive) => onChange({ ...prefs, autoArchive })}
-            />
+      <div className="mt-4 flex flex-col gap-2">
+        {tools.map((tool) => (
+          <div key={tool.name} className="mz-border px-4 py-3">
+            <div className="text-[12px] text-fg">{tool.name}</div>
+            <p className="mt-0.5 text-[12px] leading-5 text-muted">{tool.summary}</p>
+            <p className="mt-1 text-[11px] leading-5 text-muted">{tool.detail}</p>
           </div>
-          <p className="mz-divide-t px-4 py-2 text-[12px] leading-5 text-muted">
-            打开总开关后再选允许的线路；全部关着也能继续，之后在设置里改。
-          </p>
-        </div>
-      )}
-
-      {selfHosted ? (
-        <div className="mt-4 mz-border px-4 py-3">
-          <div className="text-[12px] text-fg">这台电脑的配对码</div>
-          <p className="mt-0.5 text-[12px] leading-5 text-muted">
-            在另一台电脑上打开「设置 → Agent 互联 → 配对另一台电脑」，选中这台电脑，再输入下面的码。
-            已配对的电脑和完整的配对入口都在那个页面里，这里只把两边的第一句话对上。
-          </p>
-          <div className="mt-2 flex flex-wrap items-center gap-3">
-            <span className="selectable font-mono text-[20px] leading-8 tracking-[3px] text-fg">
-              {pairing?.code ?? '—'}
-            </span>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => void refreshPairing()}
-              disabled={pairingBusy}
-            >
-              {pairingBusy ? <Spinner /> : null}
-              {pairingBusy ? '正在生成…' : '换一个'}
-            </Button>
-          </div>
-          {pairingError === null ? null : (
-            <p className="mt-1 text-[11px] leading-5 text-muted">{pairingError}</p>
-          )}
-          <p className="mt-1 text-[11px] leading-5 text-muted">
-            打开上面的总开关和「允许跨网（自建服务器）」后，另一台电脑才能连进来。配对码只能用一次。
-          </p>
-        </div>
-      ) : null}
-    </section>
-  )
-}
-
-function RemoteRow({
-  label,
-  hint,
-  checked,
-  disabled,
-  onChange,
-}: {
-  label: string
-  hint: string
-  checked: boolean
-  disabled?: boolean
-  onChange: (checked: boolean) => void
-}) {
-  return (
-    <div className="flex items-start justify-between gap-4">
-      <div className="min-w-0">
-        <div className="text-[12px] text-fg">{label}</div>
-        <div className="text-[11px] text-muted">{hint}</div>
+        ))}
       </div>
-      <Switch
-        className="mt-0.5"
-        checked={checked}
-        disabled={disabled}
-        onCheckedChange={onChange}
-        label={label}
-      />
-    </div>
+      <p className="mt-3 text-[11px] leading-5 text-muted">
+        现在不用选。工具默认是关的，进入应用后随时可以打开或关掉，也可以在这里的设置页里改。
+      </p>
+    </section>
   )
 }
 
@@ -1551,7 +1332,6 @@ interface DoneStepProps {
   shell: ShellSettingsState
   platform: DesktopPlatform
   sharing: boolean
-  remote: RemotePrefs | null
 }
 
 /** What is in place, so the window does not leave the guide quietly wrong. */
@@ -1564,7 +1344,6 @@ function DoneStep({
   shell,
   platform,
   sharing,
-  remote,
 }: DoneStepProps) {
   const selfHosted = server.mode === 'selfHosted'
   const serverText = selfHosted
@@ -1586,19 +1365,6 @@ function DoneStep({
     }
     if (shell.settings.tray_menu_only) preferences.push('托盘只开快捷菜单')
   }
-  const remoteText =
-    remote === null
-      ? '未读取'
-      : !remote.enabled
-        ? '未开启'
-        : `已开启（${[
-            remote.allowLan ? '局域网' : null,
-            remote.allowWan ? '跨网' : null,
-          ]
-            .filter(Boolean)
-            .join('、') || '没有线路'}${remote.allowAllWorkspaces ? ' · 全部工作区' : ''}${
-            remote.autoArchive ? ' · 自动归档' : ''
-          }）`
 
   const preferenceText =
     shell.settings === null
@@ -1627,7 +1393,7 @@ function DoneStep({
         />
         <DoneRow label="模型" value={active === null ? '未下载' : `Mizarllm ${active.version}`} />
         <DoneRow label="偏好" value={preferenceText} />
-        <DoneRow label="Agent 互联" value={remoteText} />
+        <DoneRow label="工具箱" value="进入应用后在左侧栏配置" />
         {selfHosted ? null : (
           <DoneRow label="会话数据" value={sharing ? '匿名共享中' : '仅保留在本机'} />
         )}

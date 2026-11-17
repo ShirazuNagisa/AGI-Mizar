@@ -7,6 +7,7 @@ import {
   type EngineId,
   type ServerView,
   type StateSnapshot,
+  type ToolView,
   type UsageOverview,
 } from './api'
 import { agentTab, type Page } from './navigation'
@@ -20,6 +21,8 @@ import { DshPluginUpdateDialog } from './components/DshPluginUpdateDialog'
 import { LoginPage } from './components/LoginPage'
 import { Onboarding } from './components/Onboarding'
 import { SettingsPage } from './components/SettingsPage'
+import { ToolboxPage } from './components/ToolboxPage'
+import { ToolSettingsPage } from './components/ToolSettingsPage'
 import { TrayPanel } from './components/TrayPanel'
 import { WindowControls } from './components/WindowControls'
 import { WindowResizeHandles } from './components/WindowResizeHandles'
@@ -43,6 +46,9 @@ export function App() {
   const [accountBusy, setAccountBusy] = useState(false)
   const [accountError, setAccountError] = useState<string | null>(null)
   const [banner, setBanner] = useState<string | null>(null)
+  // The tool whose switch is in flight, so its row can show a busy state and
+  // the rest of the toolbox keeps working.
+  const [toolBusy, setToolBusy] = useState<string | null>(null)
   const [serverConnected, setServerConnected] = useState(false)
   // The origin the tunnel is actually on. It comes from the kernel rather than
   // from the stored preference: a failed dial still leaves the preference in
@@ -462,6 +468,24 @@ export function App() {
   const platform = platformOf(snapshot?.platform)
   // A kernel older than this window has no `server` field; official is what it
   // would have been, so the fallback is not a guess about the user's choice.
+  /** Flip one built-in tool and refresh the rows it came from. */
+  const toggleTool = useCallback(
+    async (tool: ToolView, enabled: boolean) => {
+      if (toolBusy !== null) return
+      setToolBusy(tool.id)
+      setBanner(null)
+      try {
+        await kernel.send<ToolView[]>({ op: 'set_tool_enabled', tool: tool.id, enabled })
+        setSnapshot(await kernel.state())
+      } catch (error) {
+        setBanner(error instanceof Error ? error.message : '没有切换这个工具')
+      } finally {
+        setToolBusy(null)
+      }
+    },
+    [toolBusy],
+  )
+
   const serverView: ServerView = snapshot?.server ?? {
     mode: 'official',
     origin: '',
@@ -560,6 +584,38 @@ export function App() {
             onAppleStart={appleStart}
             onAppleExchange={appleExchange}
           />
+        ) : null}
+        {page.kind === 'toolbox' ? (
+          <ToolboxPage
+            tools={snapshot?.tools ?? []}
+            busy={toolBusy}
+            onOpen={(tool) => setPage({ kind: 'tool', id: tool.id })}
+            onToggle={(tool, enabled) => void toggleTool(tool, enabled)}
+          />
+        ) : null}
+        {page.kind === 'tool' ? (
+          (() => {
+            const tool = (snapshot?.tools ?? []).find((entry) => entry.id === page.id)
+            if (tool === undefined) {
+              // A stale link (the tool was removed from this build): send the
+              // window back rather than drawing an empty page.
+              return (
+                <div className="flex h-full flex-1 items-center justify-center text-[12px] text-muted">
+                  这个工具不在当前版本里。
+                </div>
+              )
+            }
+            return (
+              <ToolSettingsPage
+                tool={tool}
+                kernel={kernel}
+                selfHosted={serverView.mode === 'selfHosted'}
+                busy={toolBusy === tool.id}
+                onBack={() => setPage({ kind: 'toolbox' })}
+                onToggle={(enabled) => void toggleTool(tool, enabled)}
+              />
+            )
+          })()
         ) : null}
         {page.kind === 'settings' ? (
           <SettingsPage

@@ -124,6 +124,71 @@ export function PersonIcon({ size = 18, className }: MarkProps) {
   )
 }
 
+/** Two linked rings, for "this computer talks to that one". */
+export function LinkIcon({ size = 18, className }: MarkProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M9.6 14.4 14.4 9.6" />
+      <path d="M11 6.6l1.7-1.7a3.6 3.6 0 0 1 5.1 5.1l-1.7 1.7" />
+      <path d="M13 17.4l-1.7 1.7a3.6 3.6 0 0 1-5.1-5.1l1.7-1.7" />
+    </svg>
+  )
+}
+
+/** A toolbox, for the built-in tools page: a case with a handle and a latch. */
+export function ToolboxIcon({ size = 18, className }: MarkProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <rect x="3" y="8" width="18" height="12" rx="1.6" />
+      <path d="M9 8V6.2c0-.7.5-1.2 1.2-1.2h3.6c.7 0 1.2.5 1.2 1.2V8" />
+      <path d="M3 13h18" />
+      <path d="M10.5 13v1.6h3V13" />
+    </svg>
+  )
+}
+
+/** A right-pointing chevron, for "open this row". */
+export function ChevronRightIcon({ size = 16, className }: MarkProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="m9 6 6 6-6 6" />
+    </svg>
+  )
+}
+
 /** A chevron, for disclosure. */
 export function ChevronIcon({ size = 16, className }: MarkProps) {
   return (

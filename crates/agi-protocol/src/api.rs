@@ -50,6 +50,44 @@ pub struct StateSnapshot {
     /// The DSH helper plugin's version, and whether npm has a newer one.
     #[serde(rename = "dshPlugin")]
     pub dsh_plugin: DshPluginView,
+    /// The built-in tools this build ships, as the toolbox lists them.
+    pub tools: Vec<ToolView>,
+}
+
+/// One row in the toolbox.
+///
+/// A tool is a capability of this app, not an engine: Agent 互联 accepts work
+/// from other computers, computer use drives this machine's apps. The window
+/// needs the same three facts per row — what it is, whether the operator turned
+/// it on, and whether this platform can run it at all — so they travel together.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolView {
+    /// Stable id the window uses for routing and for `set_tool_enabled`.
+    pub id: String,
+    pub name: String,
+    /// One sentence, shown under the name.
+    pub summary: String,
+    /// Whether the operator has it on.
+    pub enabled: bool,
+    /// Whether this build can run it here (computer use is macOS-only today).
+    pub available: bool,
+    /// Why it is unavailable, or a short status line when it is available.
+    pub detail: String,
+}
+
+/// What one tool needs on this computer, checked on demand.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDependencyReport {
+    /// The tool this report is about.
+    pub tool: String,
+    /// Whether no item is `missing` or `outdated`; `unknown` is tolerated.
+    pub ok: bool,
+    pub summary: String,
+    pub items: Vec<DependencyItem>,
+    /// One sentence the settings page shows under the list.
+    pub hint: Option<String>,
 }
 
 /// Which relay this install talks to.
@@ -732,6 +770,12 @@ pub enum Command {
     Dependencies { engine: EngineId },
     /// Check one agent's dependencies and repair what can be repaired.
     DependenciesRepair { engine: EngineId },
+    /// The built-in tools and whether each is on.
+    Tools,
+    /// Turn one built-in tool on or off. UI token only.
+    SetToolEnabled { tool: String, enabled: bool },
+    /// Read one tool's dependencies without changing anything. UI token only.
+    ToolDependencies { tool: String },
     /// Ask npm what the newest `dsh-mizar` is.
     DshPluginCheck,
     /// Install or update `dsh-mizar` in the DSH profile npm reports as current.
