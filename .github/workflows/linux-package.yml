@@ -1,0 +1,28 @@
+name: Linux package
+
+# One-off: the Linux artifacts had to be built off the release branch's tag on a
+# runner instead of the usual test machine. Produces the same two files
+# `scripts/package-linux.sh` always does (portable tarball + .deb) and uploads
+# them as a workflow artifact for the release step to attach.
+on:
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v0.2.1
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the headless kernel and package it
+        run: |
+          chmod +x scripts/package-linux.sh
+          ./scripts/package-linux.sh --skip-ui --out dist
+      - name: Show what was built
+        run: ls -la dist && cat dist/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-package
+          path: dist/*
+          if-no-files-found: error
