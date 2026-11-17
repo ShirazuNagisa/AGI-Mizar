@@ -144,7 +144,7 @@ mizar://pair?h=100.64.0.1:19390&c=K7QP-3M2X&n=Mac-mini&v=1
 
 ## 方法表
 
-32 个方法（自建中继时没有 `relay.set`，为 31 个）。`payload` 里的键：
+33 个方法（自建中继时没有 `relay.set`，为 32 个）。`payload` 里的键：
 
 ### 主机与会话
 
@@ -350,6 +350,33 @@ if (workspace !== undefined) await workspace.attachSession(sessionId)
 现在适配器在 `session.create` 前读一次 `workspaceRegistry.list`，按注册表里的 `record.path` **精确匹配**（只忽略末尾斜杠），找到就把原始 registry id 作为 `workspaceId` 传给 DSH；找不到才退回 `cwd`。**不自动创建工作区**：旧的 0.8.x 插件会替用户建，0.9.0 的 link 不替产品做这个决定；没有就创建会让选错目录变成在电脑上凭空多一个工作区。路径必须原样匹配，因为错误的 `workspaceId` 会让 DSH 先建出会话、再在 attach 时失败，重试会留下重复会话。
 
 `workspaceId` 和 `cwd` **不能同时传**，DSH 会直接拒绝。`sessionId`（恢复已有会话）时不做任何解析：会话已经有归属了，而拿一个和它不一致的目录去 attach 会让整个调用失败。
+
+### Skill 表
+
+| 方法 | payload | 返回 |
+|---|---|---|
+| `skill.catalog` | `known?`, `maxSkills?` | `{skills[], removed[], complete, scannedAt, engines[], truncated}` —— 电脑上三个 agent 安装的 skill（`<agent home>/skills/<name>/SKILL.md`），**只回新增或指纹变化**的条目，见下。 |
+
+**`skill.catalog` 是增量同步，不是全量下载。** `known` 是手机缓存里的 `[{id, fingerprint}]`，可省略或为空（新装、清了缓存）；指纹一致的条目**绝不回传**，所以一千个 skill 里新装一个，一次同步只有一条。`maxSkills` 可选，宿主夹在 `1…2000`（默认 1000）；它是**回答**的上限而不是磁盘的上限，被它截断时 `complete: false, truncated: true`，手机保留其余缓存。扫描有 30 秒进程内缓存，本轮不提供显式 `refresh`。
+
+条目是 `{id, name, description, fingerprint, engine}`：
+
+- `id` 是去重后的 skill 名；`name` 与 `id` 当前相同（frontmatter 的 `name` 优先，否则目录名）。
+- `description` 去掉首尾空白、连续空白折成**一个**空格、按**字符**（不是字节）截断 600，不加省略号——手机显示时自己截。
+- `fingerprint` 是 FNV-1a 64 的 `name + U+001F + description`，16 位小写十六进制。它**不依赖 mtime**：`touch` 与「保存但没有改动」都不会造成假变更，否则一次备份就会让手机重写整张表。
+- `engine` 是 `dsh` / `claude` / `codex`。
+
+扫描规则：只收目录、跳过 `.` 开头、跳过没有 `SKILL.md` 的、跳过大于 256 KiB 的；frontmatter 解析失败时 `name` 退回目录名、`description` 为空，**不报错**——一个坏文件不能让手机丢掉另外九百个。同名 skill 按 `[Dsh, Claude, Codex]` 顺序第一个胜出，后面的整条丢弃（描述不合并），返回按 `id` 字典序。
+
+`removed` 只说「手机有、这次没扫到」。**`complete: false` 时它必须是空数组**：`complete` 为 false 只有两种原因——某个引擎目录读失败（`engines[].error` 非空），或命中 `maxSkills` 上限（`truncated: true`）。「读不到」和「没有了」否则是同一个空数组，而手机只有在 `complete: true` 时才允许删缓存。序列化后超过 512 KiB 时宿主从尾部截断，同样置 `complete: false, truncated: true`。
+
+`engines` 是**本次实际扫到的**引擎，与 `host.info.engines` 同一集合（作用域绑定时只有一个），每项 `{id, count, error?}`：`count` 是该引擎去重前扫到的条数，`error` 缺省表示读成功（没有 skills 目录不算失败）。
+
+`scannedAt` 是这次扫描的 Unix 毫秒。老宿主对未知方法回 `NOT_IMPLEMENTED`；手机先用下面的能力位判断，缺失就不发请求。
+
+**能力位 `agent.skills.v1`。** `host.info` 的 `plugin.capabilities` **无条件**带上它（只要求宿主实现了 `skill.catalog`）：skill 表来自这台电脑自己的磁盘，与该连接绑定哪个 agent、账户是否登录都无关。手机按 `plugin.id == "dsh-mizar" && capabilities.contains("agent.skills.v1")` 判断，缺失时抽屉直接显示「电脑端太旧」，不再重试直到重连。它与 `deepseek.balance.v1` 的差别就在这里——后者仍只在 DSH 存在且本连接没有被别的 agent 绑定时出现。
+
+新增方法与新增字段一样**不需要升 `PROTOCOL_VERSION`**：老客户端不会调用它，老宿主回 `NOT_IMPLEMENTED`。
 
 ### 交互
 
@@ -656,7 +683,7 @@ MIZAR_WRITE_FIXTURES=1 scripts/dev.sh smoke   # 重新捕获
 ## DeepSeek 官方账户余额（可选增量能力）
 
 `host.info` 可附带 `plugin: {id: "dsh-mizar", capabilities: [...]}`。当前列表包括
-`deepseek.balance.v1`、`file.read.v1`、`file.deliverables.v1`、`session.activity.v1`、
+`deepseek.balance.v1`、`agent.skills.v1`、`file.read.v1`、`file.deliverables.v1`、`session.activity.v1`、
 `session.archive.v1`、`session.fork.v1`、`live-activity.start.v1`、`relay.tier.v1`。
 缺少标记、其他插件或旧插件不代表余额为零，客户端不得发起 `account.balance`。
 标记只证明插件实现了对应能力，不证明宿主已登录、当前账户有余额或每个会话都可分叉。

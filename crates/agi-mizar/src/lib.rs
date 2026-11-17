@@ -5,7 +5,7 @@
 //! work over a network the operator does not control, so it is the only face with
 //! pairing, tokens and rate limits.
 //!
-//! Six modules:
+//! Seven modules:
 //!
 //! - [`frames`] is the wire: five server frames, two client ones, and the
 //!   translation from our flat records back into the DSH event shape the shipped
@@ -19,6 +19,8 @@
 //!   packet format and the per-packet seal. Byte-compatible with the phone's
 //!   kernel, pinned by the shared fixture.
 //! - [`server`] binds the three routes and answers the methods this build has.
+//! - [`skills`] reads the skill table off each agent's `SKILL.md` files, and
+//!   answers what changed since the phone last looked.
 //!
 //! ### What is not here yet
 //!
@@ -33,6 +35,7 @@ pub mod net;
 pub mod pairing;
 pub mod relay;
 pub mod server;
+pub mod skills;
 pub mod store;
 pub mod uploads;
 

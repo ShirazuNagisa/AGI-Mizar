@@ -18,6 +18,7 @@ pub mod domain;
 pub mod engine;
 pub mod link;
 pub mod session_state;
+pub mod skills;
 pub mod state_frame;
 pub mod usage;
 

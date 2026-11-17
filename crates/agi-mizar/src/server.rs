@@ -1143,6 +1143,23 @@ impl MizarServer {
             }
             "host.info" => {
                 let addresses = self.addresses();
+                // What this host can do beyond the base protocol. The app gates
+                // a feature on the capability rather than on a probe: without
+                // it, the balance card says the host does not support balance
+                // and never asks.
+                //
+                // The wallet belongs to DSH, so a phone scoped to another agent
+                // is not offered it: a card that can only say "unsupported" is
+                // worse than no card. Skills are this machine's own disk and do
+                // not depend on the agent the phone chose, so that bit is
+                // unconditional.
+                let mut capabilities: Vec<&str> = Vec::new();
+                if self.core.engine(EngineId::Dsh).is_some()
+                    && scope.is_none_or(|engine| engine == EngineId::Dsh)
+                {
+                    capabilities.push("deepseek.balance.v1");
+                }
+                capabilities.push("agent.skills.v1");
                 // Which agents this computer serves, so the phone can ask which
                 // one to open instead of having to guess from a merged list. The
                 // keys are the wire names `EngineId::parse` accepts.
@@ -1175,21 +1192,11 @@ impl MizarServer {
                         // says -- so the phone reads "no answer" and "no choice"
                         // as the same thing and does not invent a filter.
                         "engine": scope.map(|engine| engine.as_str()),
-                        // What this host can do beyond the base protocol. The
-                        // app gates the balance card on the capability rather
-                        // than on a probe: without it, the card says the host
-                        // does not support balance and never asks.
+                        // Built above, beside `addresses`: the same list the
+                        // app reads to decide what to offer this connection.
                         "plugin": {
                             "id": "dsh-mizar",
-                            // The wallet belongs to DSH, so a phone scoped to
-                            // another agent is not offered it: a card that can
-                            // only say "unsupported" is worse than no card.
-                            "capabilities": if self.core.engine(EngineId::Dsh).is_some()
-                                && scope.is_none_or(|engine| engine == EngineId::Dsh) {
-                                json!(["deepseek.balance.v1"])
-                            } else {
-                                json!([])
-                            },
+                            "capabilities": capabilities,
                         },
                         // `null` when no tunnel is configured, which the phone
                         // reads as "there is no relay route".
@@ -1695,6 +1702,29 @@ impl MizarServer {
                     );
                 }
                 ServerFrame::ok(id, serde_json::to_value(catalog).unwrap_or(Value::Null))
+            }
+
+            // What the phone's command palette lists, as a delta. Two rules
+            // matter here:
+            //
+            // - the engine set is the same one `host.info` reports and the same
+            //   one this connection is allowed to see, so a phone that chose
+            //   DSH never learns what the other two agents have installed;
+            // - a scan that could not finish is an answer, not an error: the
+            //   phone keeps its cache and retries, and an error frame would
+            //   cost it the palette entirely.
+            "skill.catalog" => {
+                let request: agi_protocol::skills::SkillCatalogRequest =
+                    serde_json::from_value(frame.payload.clone()).unwrap_or_default();
+                let mut roots = Vec::new();
+                for engine_id in Self::visible_engines(scope) {
+                    if self.core.engine(engine_id).is_none() {
+                        continue;
+                    }
+                    roots.push((engine_id, skill_home(engine_id)));
+                }
+                let answer = crate::skills::catalog(&roots, &request);
+                ServerFrame::ok(id, serde_json::to_value(answer).unwrap_or(Value::Null))
             }
 
             // What the operator's account is worth. The phone sends the client
@@ -4510,6 +4540,19 @@ fn os_name() -> &'static str {
         "Windows"
     } else {
         "Linux"
+    }
+}
+
+/// Where an agent keeps the profile its `skills/` directory lives under.
+///
+/// The same three roots every installer in this workspace writes to, resolved
+/// through [`agi_platform`] so a user who moved `DSH_HOME` or `CLAUDE_CONFIG_DIR`
+/// still gets the skills their agent actually reads.
+fn skill_home(engine: EngineId) -> std::path::PathBuf {
+    match engine {
+        EngineId::Dsh => agi_platform::dsh_home(),
+        EngineId::Claude => agi_platform::claude_home(),
+        EngineId::Codex => agi_platform::codex_home(),
     }
 }
 

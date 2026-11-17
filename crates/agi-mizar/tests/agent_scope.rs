@@ -1395,6 +1395,156 @@ async fn a_phone_reaches_the_host_through_the_real_relay() {
     }
 }
 
+/// Puts the three engine-home variables back when it is dropped.
+struct Homes(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+impl Homes {
+    fn capture(keys: [&'static str; 3]) -> Self {
+        Self(
+            keys.into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect(),
+        )
+    }
+}
+
+impl Drop for Homes {
+    fn drop(&mut self) {
+        for (key, value) in &self.0 {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
+/// The skill table the phone's command palette draws.
+///
+/// The scan resolves the three engine homes through `agi_platform`, so this test
+/// points `DSH_HOME` / `CLAUDE_CONFIG_DIR` / `CODEX_HOME` at a temporary
+/// directory (nothing else in this binary reads them, and [`Homes`] restores
+/// them even when an assertion fails) and drives the real WebSocket.
+#[tokio::test]
+async fn a_phone_syncs_the_skill_table_incrementally() {
+    let (server, store, _core, _fakes, _dir) = start().await;
+    let homes = tempfile::tempdir().unwrap();
+    let _homes = Homes::capture(["DSH_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME"]);
+    for (engine, key) in [
+        (EngineId::Dsh, "DSH_HOME"),
+        (EngineId::Claude, "CLAUDE_CONFIG_DIR"),
+        (EngineId::Codex, "CODEX_HOME"),
+    ] {
+        let home = homes.path().join(engine.as_str());
+        let directory = home.join("skills").join(format!("{engine}-skill"));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("SKILL.md"),
+            format!("---\nname: {engine}-skill\ndescription: installed for {engine}\n---\n"),
+        )
+        .unwrap();
+        std::env::set_var(key, home);
+    }
+
+    let issued = store.issue("iPhone", None).unwrap();
+    let (mut socket, welcome) = connect(server.port(), &issued.token, None).await;
+    assert_eq!(welcome["type"], "welcome");
+
+    // The capability is what tells the phone to ask at all.
+    let info = call(&mut socket, "host.info", json!({})).await;
+    let capabilities = info["result"]["plugin"]["capabilities"]
+        .as_array()
+        .expect("capabilities[]");
+    assert!(
+        capabilities
+            .iter()
+            .any(|capability| capability == "agent.skills.v1"),
+        "{info}"
+    );
+
+    let catalog = call(&mut socket, "skill.catalog", json!({})).await;
+    assert_eq!(catalog["type"], "ok", "{catalog}");
+    let answer = &catalog["result"];
+    let ids: Vec<&str> = answer["skills"]
+        .as_array()
+        .expect("skills[]")
+        .iter()
+        .map(|skill| skill["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        ["claude-skill", "codex-skill", "dsh-skill"],
+        "{catalog}"
+    );
+    assert_eq!(answer["complete"], true);
+    assert_eq!(answer["truncated"], false);
+    assert_eq!(answer["removed"].as_array().map(Vec::len), Some(0));
+    let engines: Vec<&str> = answer["engines"]
+        .as_array()
+        .expect("engines[]")
+        .iter()
+        .map(|engine| engine["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(engines, ["dsh", "claude", "codex"]);
+    assert!(answer["scannedAt"].as_u64().unwrap() > 1_577_836_800_000);
+
+    // The row the palette draws.
+    let dsh = answer["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|skill| skill["id"] == "dsh-skill")
+        .expect("the DSH skill");
+    assert_eq!(dsh["name"], "dsh-skill");
+    assert_eq!(dsh["description"], "installed for dsh");
+    assert_eq!(dsh["engine"], "dsh");
+    assert_eq!(dsh["fingerprint"].as_str().unwrap().len(), 16);
+
+    // What the phone now holds is not sent again.
+    let known: Vec<Value> = answer["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|skill| json!({ "id": skill["id"], "fingerprint": skill["fingerprint"] }))
+        .collect();
+    let quiet = call(&mut socket, "skill.catalog", json!({ "known": known })).await;
+    assert_eq!(
+        quiet["result"]["skills"].as_array().map(Vec::len),
+        Some(0),
+        "an unchanged table is an empty delta: {quiet}"
+    );
+    assert_eq!(quiet["result"]["complete"], true);
+
+    // A phone that chose an agent sees that agent's skills and no other, but is
+    // still told the host implements the method: the capability is not scoped.
+    let scoped = store.issue("iPhone", None).unwrap();
+    let (mut scoped_socket, _) = connect(server.port(), &scoped.token, Some("claude")).await;
+    let scoped_info = call(&mut scoped_socket, "host.info", json!({})).await;
+    assert!(
+        scoped_info["result"]["plugin"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "agent.skills.v1"),
+        "{scoped_info}"
+    );
+    let scoped_catalog = call(&mut scoped_socket, "skill.catalog", json!({})).await;
+    let scoped_engines: Vec<&str> = scoped_catalog["result"]["engines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|engine| engine["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(scoped_engines, ["claude"]);
+    let scoped_ids: Vec<&str> = scoped_catalog["result"]["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|skill| skill["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(scoped_ids, ["claude-skill"]);
+}
+
 /// Connect a phone WebSocket to a URL.
 async fn connect_to(
     url: &str,
