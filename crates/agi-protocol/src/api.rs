@@ -88,6 +88,16 @@ pub struct ToolDependencyReport {
     pub items: Vec<DependencyItem>,
     /// One sentence the settings page shows under the list.
     pub hint: Option<String>,
+    /// What turning the tool on already repaired, in the order it happened.
+    ///
+    /// Empty for a plain read. The toolbox shows these inline, so flipping a
+    /// switch explains itself instead of sending the operator to a manual.
+    #[serde(default)]
+    pub repaired: Vec<String>,
+    /// Whether this run asked the OS for permissions (the prompts are the
+    /// system's, not ours — we can only make them appear).
+    #[serde(default)]
+    pub prompts: bool,
 }
 
 /// Which relay this install talks to.
@@ -774,8 +784,14 @@ pub enum Command {
     Tools,
     /// Turn one built-in tool on or off. UI token only.
     SetToolEnabled { tool: String, enabled: bool },
-    /// Read one tool's dependencies without changing anything. UI token only.
-    ToolDependencies { tool: String },
+    /// Read one tool's dependencies. `fix` also repairs what it can. UI token only.
+    ToolDependencies {
+        tool: String,
+        #[serde(default)]
+        fix: bool,
+    },
+    /// Open the OS pane where this tool's permission lives. UI token only.
+    ToolPermissionPane { tool: String },
     /// Ask npm what the newest `dsh-mizar` is.
     DshPluginCheck,
     /// Install or update `dsh-mizar` in the DSH profile npm reports as current.

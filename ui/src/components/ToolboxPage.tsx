@@ -6,9 +6,10 @@
  * purpose: flipping a switch must not also navigate, and opening the settings
  * must not toggle anything.
  */
-import type { ToolView } from '../api'
+import type { ToolDependencyReport, ToolView } from '../api'
 import { ChevronRightIcon, LinkIcon, ToolboxIcon } from '../icons'
 import { cn } from '../lib/utils'
+import { Button } from './ui/button'
 import { Switch } from './ui/switch'
 import { Toolbar } from './Toolbar'
 
@@ -22,14 +23,21 @@ function ToolMark({ id }: { id: string }) {
 export function ToolboxPage({
   tools,
   busy,
+  reports,
   onOpen,
   onToggle,
+  onOpenPane,
+  onRecheck,
 }: {
   tools: ToolView[]
   /** The tool whose switch is in flight, if any. */
   busy: string | null
+  /** What enabling a tool repaired, or what it still needs. */
+  reports: Record<string, ToolDependencyReport>
   onOpen: (tool: ToolView) => void
   onToggle: (tool: ToolView, enabled: boolean) => void
+  onOpenPane: (tool: ToolView) => void
+  onRecheck: (tool: ToolView) => void
 }) {
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
@@ -43,11 +51,14 @@ export function ToolboxPage({
         {tools.length === 0 ? (
           <p className="px-6 text-[12px] text-muted">这个版本没有内置工具。</p>
         ) : null}
-        {tools.map((tool) => (
-          <div
-            key={tool.id}
-            className="mz-divide-b flex items-center gap-4 px-6 py-3.5"
-          >
+        {tools.map((tool) => {
+          const report = reports[tool.id]
+          const missing = report?.items.filter(
+            (entry) => entry.status === 'missing' || entry.status === 'outdated',
+          )
+          return (
+          <div key={tool.id} className="mz-divide-b flex flex-col px-6 py-3.5">
+          <div className="flex items-center gap-4">
             <button
               type="button"
               onClick={() => onOpen(tool)}
@@ -86,7 +97,42 @@ export function ToolboxPage({
               </button>
             </div>
           </div>
-        ))}
+          {report === undefined ? null : (
+            <div className="mt-2 flex flex-col gap-1.5 pl-8">
+              {report.repaired.length === 0 ? null : (
+                <p className="text-[11px] leading-4 text-muted">
+                  已自动补全：{report.repaired.join('；')}
+                </p>
+              )}
+              {missing !== undefined && missing.length === 0 ? (
+                report.repaired.length === 0 ? (
+                  <p className="text-[11px] leading-4 text-muted">{report.summary}</p>
+                ) : null
+              ) : (
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="text-[11px] leading-4 text-muted">
+                    还需要：{missing?.map((entry) => entry.label).join('、')}
+                  </p>
+                  {tool.id === 'computer-use' ? (
+                    <Button size="sm" variant="outline" onClick={() => onOpenPane(tool)}>
+                      打开系统设置
+                    </Button>
+                  ) : null}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={busy === tool.id}
+                    onClick={() => onRecheck(tool)}
+                  >
+                    重新检查
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+          </div>
+          )
+        })}
       </div>
     </div>
   )

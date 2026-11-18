@@ -3675,9 +3675,29 @@ impl Core {
                     Err(error) => CommandResponse::error("TOOL_NOT_SET", error),
                 }
             }
-            Command::ToolDependencies { tool } => match tools::check(self, &tool) {
-                Ok(report) => CommandResponse::ok(report),
-                Err(error) => CommandResponse::error("TOOL_UNKNOWN", error),
+            Command::ToolDependencies { tool, fix } => {
+                let answer = if fix {
+                    tools::ensure(self, &tool).await
+                } else {
+                    tools::check(self, &tool)
+                };
+                match answer {
+                    Ok(report) => CommandResponse::ok(report),
+                    Err(error) => CommandResponse::error("TOOL_UNKNOWN", error),
+                }
+            }
+            Command::ToolPermissionPane { tool } => match tools::permission_pane(&tool) {
+                Some(url) => match agi_platform::open_url(url) {
+                    Ok(()) => CommandResponse::ok(serde_json::json!({ "opened": true })),
+                    Err(error) => CommandResponse::error(
+                        "OPEN_FAILED",
+                        format!("the settings pane: {error}"),
+                    ),
+                },
+                None => CommandResponse::error(
+                    "TOOL_NO_PANE",
+                    "这个工具没有需要单独授权的系统设置".to_string(),
+                ),
             },
             Command::DshPluginCheck => CommandResponse::ok(self.refresh_dsh_plugin(true).await),
             Command::DshPluginUpdate => match self.install_dsh_plugin(None).await {

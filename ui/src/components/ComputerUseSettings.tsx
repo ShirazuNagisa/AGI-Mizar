@@ -33,7 +33,13 @@ function StatusMark({ status }: { status: string }) {
   return <span className="size-2 shrink-0 rounded-full border border-fg" aria-hidden />
 }
 
-function ReportView({ report }: { report: ToolDependencyReport }) {
+function ReportView({
+  report,
+  onOpenPane,
+}: {
+  report: ToolDependencyReport
+  onOpenPane: () => void
+}) {
   return (
     <div className="flex flex-col gap-2">
       <p className={cn('text-[12px]', report.ok ? 'text-fg' : 'text-muted')}>{report.summary}</p>
@@ -53,8 +59,24 @@ function ReportView({ report }: { report: ToolDependencyReport }) {
           </li>
         ))}
       </ul>
+      {report.repaired.length === 0 ? null : (
+        <ul className="flex flex-col gap-1">
+          {report.repaired.map((line) => (
+            <li key={line} className="text-[11px] leading-4 text-fg">
+              · {line}
+            </li>
+          ))}
+        </ul>
+      )}
       {report.hint === null ? null : (
         <p className="text-[11px] leading-5 text-muted">{report.hint}</p>
+      )}
+      {report.ok ? null : (
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant="outline" onClick={onOpenPane}>
+            打开系统设置
+          </Button>
+        </div>
       )}
     </div>
   )
@@ -79,11 +101,28 @@ export function ComputerUseSettings({
     setChecking(true)
     setError(null)
     try {
-      setReport(await kernel.send<ToolDependencyReport>({ op: 'tool_dependencies', tool: 'computer-use' }))
+      // `fix` is the point: this page builds/installs the kernel and raises the
+      // system prompts for whatever is not granted, so the operator never has
+      // to assemble the environment by hand.
+      setReport(
+        await kernel.send<ToolDependencyReport>({
+          op: 'tool_dependencies',
+          tool: 'computer-use',
+          fix: true,
+        }),
+      )
     } catch (failure) {
       setError(failureMessage(failure, '检查依赖完整性没有成功'))
     } finally {
       setChecking(false)
+    }
+  }
+
+  async function openPane() {
+    try {
+      await kernel.send({ op: 'tool_permission_pane', tool: 'computer-use' })
+    } catch (failure) {
+      setError(failureMessage(failure, '打不开系统设置'))
     }
   }
 
@@ -121,7 +160,7 @@ export function ComputerUseSettings({
               依赖完整性
             </h2>
             <p className="mt-1 text-[12px] leading-5 text-muted">
-              检查电脑操作内核、它的版本，以及辅助功能与屏幕录制两项系统权限。
+              会自己构建/安装内核，并向系统申请辅助功能与屏幕录制权限；缺什么就在下面列出来。
             </p>
           </div>
           <Button
@@ -132,7 +171,7 @@ export function ComputerUseSettings({
             disabled={checking}
           >
             {checking ? <Spinner /> : null}
-            {checking ? '正在检查…' : '检查依赖完整性'}
+            {checking ? '正在检查并补全…' : '检查并修复依赖'}
           </Button>
         </div>
 
@@ -146,7 +185,7 @@ export function ComputerUseSettings({
               {checking ? '正在检查…' : '还没有检查。检查是只读的，不会改动机器上的任何东西。'}
             </p>
           ) : (
-            <ReportView report={report} />
+            <ReportView report={report} onOpenPane={() => void openPane()} />
           )}
         </div>
       </section>

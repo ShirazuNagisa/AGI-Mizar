@@ -156,6 +156,16 @@ fn item(id: &str, label: &str, status: &str, detail: impl Into<String>, fix: Opt
 }
 
 fn report(tool: &str, items: Vec<DependencyItem>, hint: Option<String>) -> ToolDependencyReport {
+    finish(tool, items, hint, Vec::new(), false)
+}
+
+fn finish(
+    tool: &str,
+    items: Vec<DependencyItem>,
+    hint: Option<String>,
+    repaired: Vec<String>,
+    prompts: bool,
+) -> ToolDependencyReport {
     let problems = items
         .iter()
         .filter(|item| matches!(item.status.as_str(), "missing" | "outdated"))
@@ -172,7 +182,160 @@ fn report(tool: &str, items: Vec<DependencyItem>, hint: Option<String>) -> ToolD
         summary,
         items,
         hint,
+        repaired,
+        prompts,
     }
+}
+
+/// The directory the kernel is built from, when this machine has one.
+///
+/// A packaged app only ships the binary; a development checkout has the Swift
+/// package. Returning the directory is what lets the switch build the kernel
+/// instead of telling the operator to go find a shell.
+fn kernel_source() -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Ok(value) = std::env::var("AGI_MIZAR_CUA_SOURCE") {
+        if !value.trim().is_empty() {
+            dirs.push(PathBuf::from(value));
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            dirs.push(dir.join("computer-use-kernel"));
+            dirs.push(dir.join("../Resources/computer-use-kernel"));
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        dirs.push(PathBuf::from(home).join("Documents/project/DSH-Mizar/computer-use-kernel"));
+    }
+    dirs.into_iter()
+        .find(|dir| dir.join("Package.swift").is_file())
+}
+
+/// Build and install the kernel. Slow (a Swift release build), so the caller
+/// runs it off the async runtime.
+fn build_kernel(dir: &std::path::Path) -> Result<PathBuf, String> {
+    let status = Command::new("swift")
+        .args(["build", "-c", "release", "--package-path"])
+        .arg(dir)
+        .status()
+        .map_err(|error| format!("跑不了 swift build：{error}"))?;
+    if !status.success() {
+        return Err(format!("swift build 退出码 {status}"));
+    }
+    let built = dir.join(".build/release/cua-mcp");
+    if !built.is_file() {
+        return Err(format!("没找到构建产物 {}", built.display()));
+    }
+    let Some(home) = std::env::var_os("HOME") else {
+        return Ok(built);
+    };
+    let target_dir = PathBuf::from(home).join(".agi-mizar/tools");
+    std::fs::create_dir_all(&target_dir).map_err(|error| error.to_string())?;
+    let target = target_dir.join("cua-mcp");
+    std::fs::copy(&built, &target).map_err(|error| format!("复制内核失败：{error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755));
+    }
+    Ok(target)
+}
+
+/// Ask the kernel to raise the system prompts and tell us what is left.
+fn request_permissions(kernel: &std::path::Path) -> Result<Doctor, String> {
+    let output = Command::new(kernel)
+        .arg("--request-permissions")
+        .arg("--json")
+        .output()
+        .map_err(|error| error.to_string())?;
+    serde_json::from_slice::<Doctor>(&output.stdout).map_err(|error| format!("输出无法解析：{error}"))
+}
+
+/// The pane an operator needs for this tool's permission, if the OS has one.
+pub fn permission_pane(tool: &str) -> Option<&'static str> {
+    match tool {
+        COMPUTER_USE if cfg!(target_os = "macos") => {
+            Some("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+        }
+        _ => None,
+    }
+}
+
+/// Turn a tool on with its dependencies in place: repair what this machine can
+/// repair, then read the result.
+///
+/// The operator's instruction is "flipping the switch should be enough", so the
+/// order matters: build/install the kernel first, then ask the OS for the
+/// permissions, then report. Anything still outstanding is something only a
+/// human can grant.
+pub async fn ensure(core: &Core, tool: &str) -> Result<ToolDependencyReport, String> {
+    let mut repaired: Vec<String> = Vec::new();
+    let mut prompts = false;
+
+    match tool {
+        INTERCONNECT => {
+            // The Agent 互联 page already knows how to rewrite a stale MCP entry
+            // and skill; enabling the tool is exactly the moment to run it.
+            let health = crate::remote_health::check(core, true);
+            repaired.extend(health.changed);
+        }
+        COMPUTER_USE => {
+            if computer_use_available() && resolve_kernel().is_none() {
+                if let Some(dir) = kernel_source() {
+                    let built = tokio::task::spawn_blocking(move || build_kernel(&dir))
+                        .await
+                        .map_err(|error| format!("构建内核的任务失败：{error}"))?;
+                    match built {
+                        Ok(path) => repaired.push(format!("已构建内核 {}", path.display())),
+                        Err(error) => repaired.push(format!("自动构建内核失败：{error}")),
+                    }
+                }
+            }
+            if computer_use_available() {
+                if let Some(kernel) = resolve_kernel() {
+                    if let Ok(doctor) = run_doctor(&kernel) {
+                        if !doctor.accessibility || !doctor.screen_recording {
+                            match request_permissions(&kernel) {
+                                Ok(after) => {
+                                    prompts = true;
+                                    let mut asked: Vec<&str> = Vec::new();
+                                    if !doctor.accessibility {
+                                        asked.push("辅助功能");
+                                    }
+                                    if !doctor.screen_recording {
+                                        asked.push("屏幕录制");
+                                    }
+                                    let left: Vec<&str> = [
+                                        (!after.accessibility).then_some("辅助功能"),
+                                        (!after.screen_recording).then_some("屏幕录制"),
+                                    ]
+                                    .into_iter()
+                                    .flatten()
+                                    .collect();
+                                    if left.is_empty() {
+                                        repaired.push(format!("已弹出并授予系统授权（{}）", asked.join("、")));
+                                    } else {
+                                        repaired.push(format!(
+                                            "已弹出系统授权提示；还需要你勾选：{}",
+                                            left.join("、")
+                                        ));
+                                    }
+                                }
+                                Err(error) => repaired.push(format!("申请权限失败：{error}")),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        other => return Err(format!("unknown tool: {other}")),
+    }
+
+    let mut result = check(core, tool)?;
+    result.repaired = repaired;
+    result.prompts = prompts;
+    Ok(result)
 }
 
 /// Read one tool's dependencies. Nothing here changes the machine.
@@ -326,6 +489,18 @@ mod tests {
         assert_eq!(rows[1].id, COMPUTER_USE);
         assert!(!rows[1].enabled);
         assert_eq!(rows[1].available, cfg!(target_os = "macos"));
+    }
+
+    /// The toolbox's "打开系统设置" needs a pane to open, and only for the tool
+    /// whose permission lives in one.
+    #[test]
+    fn only_computer_use_has_a_system_pane() {
+        if cfg!(target_os = "macos") {
+            let pane = permission_pane(COMPUTER_USE).expect("macOS has a privacy pane");
+            assert!(pane.starts_with("x-apple.systempreferences:"));
+        }
+        assert!(permission_pane(INTERCONNECT).is_none());
+        assert!(permission_pane("printer").is_none());
     }
 
     #[test]

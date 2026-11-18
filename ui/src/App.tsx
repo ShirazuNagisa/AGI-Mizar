@@ -7,6 +7,7 @@ import {
   type EngineId,
   type ServerView,
   type StateSnapshot,
+  type ToolDependencyReport,
   type ToolView,
   type UsageOverview,
 } from './api'
@@ -49,6 +50,9 @@ export function App() {
   // The tool whose switch is in flight, so its row can show a busy state and
   // the rest of the toolbox keeps working.
   const [toolBusy, setToolBusy] = useState<string | null>(null)
+  // What turning each tool on repaired (or still needs). Keyed by tool id so a
+  // row can explain itself right where the switch was flipped.
+  const [toolReports, setToolReports] = useState<Record<string, ToolDependencyReport>>({})
   const [serverConnected, setServerConnected] = useState(false)
   // The origin the tunnel is actually on. It comes from the kernel rather than
   // from the stored preference: a failed dial still leaves the preference in
@@ -476,6 +480,23 @@ export function App() {
       setBanner(null)
       try {
         await kernel.send<ToolView[]>({ op: 'set_tool_enabled', tool: tool.id, enabled })
+        if (enabled) {
+          // Turning a tool on runs its dependency check and repairs what this
+          // machine can repair; whatever is left is a permission only the
+          // operator can grant, so it is reported right here.
+          const report = await kernel.send<ToolDependencyReport>({
+            op: 'tool_dependencies',
+            tool: tool.id,
+            fix: true,
+          })
+          setToolReports((current) => ({ ...current, [tool.id]: report }))
+        } else {
+          setToolReports((current) => {
+            const next = { ...current }
+            delete next[tool.id]
+            return next
+          })
+        }
         setSnapshot(await kernel.state())
       } catch (error) {
         setBanner(error instanceof Error ? error.message : '没有切换这个工具')
@@ -483,7 +504,39 @@ export function App() {
         setToolBusy(null)
       }
     },
-    [toolBusy],
+    [toolBusy, kernel],
+  )
+
+  /** Open the system pane that owns this tool's permission. */
+  const openPermissionPane = useCallback(
+    async (tool: ToolView) => {
+      try {
+        await kernel.send({ op: 'tool_permission_pane', tool: tool.id })
+      } catch (error) {
+        setBanner(error instanceof Error ? error.message : '打不开系统设置')
+      }
+    },
+    [kernel],
+  )
+
+  /** Re-read a tool's dependencies after the operator returns from System Settings. */
+  const recheckTool = useCallback(
+    async (tool: ToolView) => {
+      setToolBusy(tool.id)
+      try {
+        const report = await kernel.send<ToolDependencyReport>({
+          op: 'tool_dependencies',
+          tool: tool.id,
+          fix: true,
+        })
+        setToolReports((current) => ({ ...current, [tool.id]: report }))
+      } catch (error) {
+        setBanner(error instanceof Error ? error.message : '重新检查失败')
+      } finally {
+        setToolBusy(null)
+      }
+    },
+    [kernel],
   )
 
   const serverView: ServerView = snapshot?.server ?? {
@@ -589,8 +642,11 @@ export function App() {
           <ToolboxPage
             tools={snapshot?.tools ?? []}
             busy={toolBusy}
+            reports={toolReports}
             onOpen={(tool) => setPage({ kind: 'tool', id: tool.id })}
             onToggle={(tool, enabled) => void toggleTool(tool, enabled)}
+            onOpenPane={(tool) => void openPermissionPane(tool)}
+            onRecheck={(tool) => void recheckTool(tool)}
           />
         ) : null}
         {page.kind === 'tool' ? (
