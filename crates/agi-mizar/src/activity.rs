@@ -784,7 +784,6 @@ mod tests {
                 rows: after.rows.clone(),
                 approvals: Vec::new(),
                 pending: Vec::new(),
-                ..card
             },
         );
     }

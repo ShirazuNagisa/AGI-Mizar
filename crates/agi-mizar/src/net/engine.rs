@@ -509,6 +509,10 @@ async fn maintain_mapping(reach: Reach) {
     }
 }
 
+// The transport loop's pieces are already split as far as the call site can
+// take them; bundling two of them into a struct would only move the argument
+// list one level down.
+#[allow(clippy::too_many_arguments)]
 async fn run(
     socket: UdpSocket,
     identity: Arc<Identity>,

@@ -15,7 +15,7 @@ use agi_mizar::net::engine::{Engine, Reach};
 use agi_mizar::net::identity::{Identity, Purpose};
 
 fn decode_hex(text: &str) -> Result<Vec<u8>, String> {
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return Err("the secret must have an even number of hex digits".to_string());
     }
     (0..text.len())
