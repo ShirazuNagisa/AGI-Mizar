@@ -790,8 +790,17 @@ pub enum Command {
         #[serde(default)]
         fix: bool,
     },
-    /// Open the OS pane where this tool's permission lives. UI token only.
-    ToolPermissionPane { tool: String },
+    /// Open the OS pane where one of this tool's permissions lives.
+    ///
+    /// One tool can need two grants in two different panes (computer use needs
+    /// Accessibility and Screen Recording), so the permission travels with the
+    /// request; without it the host can only guess and send the operator to
+    /// the wrong panel half the time. UI token only.
+    ToolPermissionPane {
+        tool: String,
+        #[serde(default)]
+        item: Option<String>,
+    },
     /// Ask npm what the newest `dsh-mizar` is.
     DshPluginCheck,
     /// Install or update `dsh-mizar` in the DSH profile npm reports as current.

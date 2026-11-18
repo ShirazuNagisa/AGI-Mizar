@@ -36,7 +36,7 @@ export function ToolboxPage({
   reports: Record<string, ToolDependencyReport>
   onOpen: (tool: ToolView) => void
   onToggle: (tool: ToolView, enabled: boolean) => void
-  onOpenPane: (tool: ToolView) => void
+  onOpenPane: (tool: ToolView, item?: string) => void
   onRecheck: (tool: ToolView) => void
 }) {
   return (
@@ -110,14 +110,33 @@ export function ToolboxPage({
                 ) : null
               ) : (
                 <div className="flex flex-wrap items-center gap-2">
+                  {(missing?.filter(
+                    (entry) => entry.id === 'screen' || entry.id === 'accessibility',
+                  ).length ?? 0) > 1 ? (
+                    <p className="w-full text-[11px] leading-4 text-muted">
+                      这两项权限在两个不同的面板里，分别点下面的按钮勾选。
+                    </p>
+                  ) : null}
                   <p className="text-[11px] leading-4 text-muted">
                     还需要：{missing?.map((entry) => entry.label).join('、')}
                   </p>
-                  {tool.id === 'computer-use' ? (
-                    <Button size="sm" variant="outline" onClick={() => onOpenPane(tool)}>
-                      打开系统设置
-                    </Button>
-                  ) : null}
+                  {/* One button per pane: the two grants live in two different
+                      panels, and sending both to the same one is how people end
+                      up with half a permission. */}
+                  {(missing ?? []).map((entry) => {
+                    const pane = entry.id === 'screen' ? '屏幕录制' : entry.id === 'accessibility' ? '辅助功能' : null
+                    if (pane === null) return null
+                    return (
+                      <Button
+                        key={entry.id}
+                        size="sm"
+                        variant="outline"
+                        onClick={() => onOpenPane(tool, entry.id)}
+                      >
+                        打开「{pane}」
+                      </Button>
+                    )
+                  })}
                   <Button
                     size="sm"
                     variant="ghost"

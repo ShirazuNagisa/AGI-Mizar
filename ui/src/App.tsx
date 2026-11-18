@@ -507,11 +507,11 @@ export function App() {
     [toolBusy, kernel],
   )
 
-  /** Open the system pane that owns this tool's permission. */
+  /** Open the system pane that owns one specific permission. */
   const openPermissionPane = useCallback(
-    async (tool: ToolView) => {
+    async (tool: ToolView, item?: string) => {
       try {
-        await kernel.send({ op: 'tool_permission_pane', tool: tool.id })
+        await kernel.send({ op: 'tool_permission_pane', tool: tool.id, item })
       } catch (error) {
         setBanner(error instanceof Error ? error.message : '打不开系统设置')
       }
@@ -645,7 +645,7 @@ export function App() {
             reports={toolReports}
             onOpen={(tool) => setPage({ kind: 'tool', id: tool.id })}
             onToggle={(tool, enabled) => void toggleTool(tool, enabled)}
-            onOpenPane={(tool) => void openPermissionPane(tool)}
+            onOpenPane={(tool, item) => void openPermissionPane(tool, item)}
             onRecheck={(tool) => void recheckTool(tool)}
           />
         ) : null}

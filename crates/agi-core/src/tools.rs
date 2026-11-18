@@ -252,13 +252,24 @@ fn request_permissions(kernel: &std::path::Path) -> Result<Doctor, String> {
     serde_json::from_slice::<Doctor>(&output.stdout).map_err(|error| format!("输出无法解析：{error}"))
 }
 
-/// The pane an operator needs for this tool's permission, if the OS has one.
-pub fn permission_pane(tool: &str) -> Option<&'static str> {
-    match tool {
-        COMPUTER_USE if cfg!(target_os = "macos") => {
-            Some("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-        }
-        _ => None,
+/// The pane an operator needs for one of this tool's permissions.
+///
+/// computer use needs two grants that live in two different panels, so the
+/// item id decides where to land. `None` means "the first panel worth showing",
+/// which is the Accessibility list — the one every missing grant starts at when
+/// the caller does not know better.
+pub fn permission_pane(tool: &str, item: Option<&str>) -> Option<&'static str> {
+    if tool != COMPUTER_USE || !cfg!(target_os = "macos") {
+        return None;
+    }
+    const ACCESSIBILITY: &str =
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
+    const SCREEN: &str =
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
+    match item {
+        Some("screen") => Some(SCREEN),
+        Some("accessibility") => Some(ACCESSIBILITY),
+        _ => Some(ACCESSIBILITY),
     }
 }
 
@@ -496,11 +507,17 @@ mod tests {
     #[test]
     fn only_computer_use_has_a_system_pane() {
         if cfg!(target_os = "macos") {
-            let pane = permission_pane(COMPUTER_USE).expect("macOS has a privacy pane");
-            assert!(pane.starts_with("x-apple.systempreferences:"));
+            let first = permission_pane(COMPUTER_USE, None).expect("macOS has a privacy pane");
+            assert!(first.contains("Privacy_Accessibility"));
+            let screen =
+                permission_pane(COMPUTER_USE, Some("screen")).expect("screen has its own pane");
+            assert!(screen.contains("Privacy_ScreenCapture"));
+            let accessibility =
+                permission_pane(COMPUTER_USE, Some("accessibility")).expect("explicit id");
+            assert!(accessibility.contains("Privacy_Accessibility"));
         }
-        assert!(permission_pane(INTERCONNECT).is_none());
-        assert!(permission_pane("printer").is_none());
+        assert!(permission_pane(INTERCONNECT, None).is_none());
+        assert!(permission_pane("printer", None).is_none());
     }
 
     #[test]

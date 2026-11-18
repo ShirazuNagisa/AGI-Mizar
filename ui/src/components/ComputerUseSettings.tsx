@@ -38,7 +38,7 @@ function ReportView({
   onOpenPane,
 }: {
   report: ToolDependencyReport
-  onOpenPane: () => void
+  onOpenPane: (item: string) => void
 }) {
   return (
     <div className="flex flex-col gap-2">
@@ -73,9 +73,22 @@ function ReportView({
       )}
       {report.ok ? null : (
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" variant="outline" onClick={onOpenPane}>
-            打开系统设置
-          </Button>
+          {report.items
+            .filter((entry) => entry.status === 'missing')
+            .map((entry) => {
+              const pane = entry.id === 'screen' ? '屏幕录制' : entry.id === 'accessibility' ? '辅助功能' : null
+              if (pane === null) return null
+              return (
+                <Button
+                  key={entry.id}
+                  size="sm"
+                  variant="outline"
+                  onClick={() => onOpenPane(entry.id)}
+                >
+                  打开「{pane}」
+                </Button>
+              )
+            })}
         </div>
       )}
     </div>
@@ -118,9 +131,9 @@ export function ComputerUseSettings({
     }
   }
 
-  async function openPane() {
+  async function openPane(item: string) {
     try {
-      await kernel.send({ op: 'tool_permission_pane', tool: 'computer-use' })
+      await kernel.send({ op: 'tool_permission_pane', tool: 'computer-use', item })
     } catch (failure) {
       setError(failureMessage(failure, '打不开系统设置'))
     }
@@ -185,7 +198,7 @@ export function ComputerUseSettings({
               {checking ? '正在检查…' : '还没有检查。检查是只读的，不会改动机器上的任何东西。'}
             </p>
           ) : (
-            <ReportView report={report} onOpenPane={() => void openPane()} />
+            <ReportView report={report} onOpenPane={(item) => void openPane(item)} />
           )}
         </div>
       </section>

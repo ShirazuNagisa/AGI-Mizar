@@ -3686,7 +3686,8 @@ impl Core {
                     Err(error) => CommandResponse::error("TOOL_UNKNOWN", error),
                 }
             }
-            Command::ToolPermissionPane { tool } => match tools::permission_pane(&tool) {
+            Command::ToolPermissionPane { tool, item } => {
+                match tools::permission_pane(&tool, item.as_deref()) {
                 Some(url) => match agi_platform::open_url(url) {
                     Ok(()) => CommandResponse::ok(serde_json::json!({ "opened": true })),
                     Err(error) => CommandResponse::error(
@@ -3698,7 +3699,8 @@ impl Core {
                     "TOOL_NO_PANE",
                     "这个工具没有需要单独授权的系统设置".to_string(),
                 ),
-            },
+                }
+            }
             Command::DshPluginCheck => CommandResponse::ok(self.refresh_dsh_plugin(true).await),
             Command::DshPluginUpdate => match self.install_dsh_plugin(None).await {
                 Ok(view) => CommandResponse::ok(view),

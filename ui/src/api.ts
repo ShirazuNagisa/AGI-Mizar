@@ -609,7 +609,7 @@ export type Command =
   | { op: 'tools' }
   | { op: 'set_tool_enabled'; tool: string; enabled: boolean }
   | { op: 'tool_dependencies'; tool: string; fix?: boolean }
-  | { op: 'tool_permission_pane'; tool: string }
+  | { op: 'tool_permission_pane'; tool: string; item?: string }
   | { op: 'dsh_plugin_check' }
   | { op: 'dsh_plugin_update' }
   | { op: 'onboarding_complete' }
