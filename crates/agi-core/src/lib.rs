@@ -3688,17 +3688,17 @@ impl Core {
             }
             Command::ToolPermissionPane { tool, item } => {
                 match tools::permission_pane(&tool, item.as_deref()) {
-                Some(url) => match agi_platform::open_url(url) {
-                    Ok(()) => CommandResponse::ok(serde_json::json!({ "opened": true })),
-                    Err(error) => CommandResponse::error(
-                        "OPEN_FAILED",
-                        format!("the settings pane: {error}"),
+                    Some(url) => match agi_platform::open_url(url) {
+                        Ok(()) => CommandResponse::ok(serde_json::json!({ "opened": true })),
+                        Err(error) => CommandResponse::error(
+                            "OPEN_FAILED",
+                            format!("the settings pane: {error}"),
+                        ),
+                    },
+                    None => CommandResponse::error(
+                        "TOOL_NO_PANE",
+                        "这个工具没有需要单独授权的系统设置".to_string(),
                     ),
-                },
-                None => CommandResponse::error(
-                    "TOOL_NO_PANE",
-                    "这个工具没有需要单独授权的系统设置".to_string(),
-                ),
                 }
             }
             Command::DshPluginCheck => CommandResponse::ok(self.refresh_dsh_plugin(true).await),

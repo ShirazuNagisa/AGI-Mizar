@@ -673,9 +673,7 @@ async fn a_diagnostic_pairing_is_not_a_phone() {
     // live record as a phone, so a one-off probe left a third row ("Diag")
     // beside the iPhone and the iPad that the account actually has.
     let (server, store, _core, _fakes, _dir) = start().await;
-    let probe = store
-        .issue("Diag", Some("diag".to_string()))
-        .unwrap();
+    let probe = store.issue("Diag", Some("diag".to_string())).unwrap();
     store.describe(&probe.device.id, "diag").unwrap();
     store
         .issue("iPhone", Some("iPhone17,1".to_string()))
@@ -692,7 +690,10 @@ async fn another_computers_peer_token_is_not_a_phone() {
     // is not a phone, whatever name that computer has.
     let (server, store, _core, _fakes, _dir) = start().await;
     let peer = store
-        .issue("VM-0-12-opencloudo", Some("peer:acct:peer-1:dsh".to_string()))
+        .issue(
+            "VM-0-12-opencloudo",
+            Some("peer:acct:peer-1:dsh".to_string()),
+        )
         .unwrap();
     store.describe(&peer.device.id, "agi-peer").unwrap();
 
@@ -706,9 +707,7 @@ async fn a_phone_this_host_cannot_name_still_shows() {
     // reports a marketing model (`Pixel 8`) and a person may rename any phone,
     // so an unrecognised model has to stay in the list.
     let (server, store, _core, _fakes, _dir) = start().await;
-    store
-        .issue("Android", Some("Pixel 8".to_string()))
-        .unwrap();
+    store.issue("Android", Some("Pixel 8".to_string())).unwrap();
 
     let views = agi_core::DeviceStatusSource::device_views(&*server);
     let names: Vec<&str> = views.iter().map(|view| view.name.as_str()).collect();

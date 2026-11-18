@@ -134,8 +134,16 @@ fn kernel_candidates() -> Vec<PathBuf> {
         paths.push(home.join(".agi-mizar/tools/cua-mcp"));
         // Development trees: the workspace checkout.
         for dir in ["computer-use-kernel"] {
-            paths.push(home.join("Documents/project/DSH-Mizar").join(dir).join(".build/release/cua-mcp"));
-            paths.push(home.join("Documents/project/DSH-Mizar").join(dir).join(".build/debug/cua-mcp"));
+            paths.push(
+                home.join("Documents/project/DSH-Mizar")
+                    .join(dir)
+                    .join(".build/release/cua-mcp"),
+            );
+            paths.push(
+                home.join("Documents/project/DSH-Mizar")
+                    .join(dir)
+                    .join(".build/debug/cua-mcp"),
+            );
         }
     }
     paths
@@ -145,7 +153,13 @@ fn resolve_kernel() -> Option<PathBuf> {
     kernel_candidates().into_iter().find(|path| path.is_file())
 }
 
-fn item(id: &str, label: &str, status: &str, detail: impl Into<String>, fix: Option<String>) -> DependencyItem {
+fn item(
+    id: &str,
+    label: &str,
+    status: &str,
+    detail: impl Into<String>,
+    fix: Option<String>,
+) -> DependencyItem {
     DependencyItem {
         id: id.to_string(),
         label: label.to_string(),
@@ -249,7 +263,8 @@ fn request_permissions(kernel: &std::path::Path) -> Result<Doctor, String> {
         .arg("--json")
         .output()
         .map_err(|error| error.to_string())?;
-    serde_json::from_slice::<Doctor>(&output.stdout).map_err(|error| format!("输出无法解析：{error}"))
+    serde_json::from_slice::<Doctor>(&output.stdout)
+        .map_err(|error| format!("输出无法解析：{error}"))
 }
 
 /// The pane an operator needs for one of this tool's permissions.
@@ -325,7 +340,10 @@ pub async fn ensure(core: &Core, tool: &str) -> Result<ToolDependencyReport, Str
                                     .flatten()
                                     .collect();
                                     if left.is_empty() {
-                                        repaired.push(format!("已弹出并授予系统授权（{}）", asked.join("、")));
+                                        repaired.push(format!(
+                                            "已弹出并授予系统授权（{}）",
+                                            asked.join("、")
+                                        ));
                                     } else {
                                         repaired.push(format!(
                                             "已弹出系统授权提示；还需要你勾选：{}",
@@ -394,11 +412,29 @@ pub fn check(core: &Core, tool: &str) -> Result<ToolDependencyReport, String> {
                     "没找到 cua-mcp",
                     Some("构建 computer-use-kernel 后把它放进 ~/.agi-mizar/tools/".to_string()),
                 ));
-                items.push(item("accessibility", "辅助功能权限", "unknown", "内核未就绪，无法检查", None));
-                items.push(item("screen", "屏幕录制权限", "unknown", "内核未就绪，无法检查", None));
+                items.push(item(
+                    "accessibility",
+                    "辅助功能权限",
+                    "unknown",
+                    "内核未就绪，无法检查",
+                    None,
+                ));
+                items.push(item(
+                    "screen",
+                    "屏幕录制权限",
+                    "unknown",
+                    "内核未就绪，无法检查",
+                    None,
+                ));
                 return Ok(report(tool, items, Some(hint)));
             };
-            items.push(item("kernel", "内核（cua-mcp）", "ok", kernel.display().to_string(), None));
+            items.push(item(
+                "kernel",
+                "内核（cua-mcp）",
+                "ok",
+                kernel.display().to_string(),
+                None,
+            ));
 
             match run_doctor(&kernel) {
                 Ok(doctor) => {
@@ -412,7 +448,11 @@ pub fn check(core: &Core, tool: &str) -> Result<ToolDependencyReport, String> {
                     items.push(item(
                         "accessibility",
                         "辅助功能权限",
-                        if doctor.accessibility { "ok" } else { "missing" },
+                        if doctor.accessibility {
+                            "ok"
+                        } else {
+                            "missing"
+                        },
                         if doctor.accessibility {
                             "已授权：可以读界面、合成点击"
                         } else {
@@ -427,7 +467,11 @@ pub fn check(core: &Core, tool: &str) -> Result<ToolDependencyReport, String> {
                     items.push(item(
                         "screen",
                         "屏幕录制权限",
-                        if doctor.screen_recording { "ok" } else { "missing" },
+                        if doctor.screen_recording {
+                            "ok"
+                        } else {
+                            "missing"
+                        },
                         if doctor.screen_recording {
                             "已授权：可以截图"
                         } else {
@@ -448,8 +492,20 @@ pub fn check(core: &Core, tool: &str) -> Result<ToolDependencyReport, String> {
                         format!("cua-mcp 跑不起来：{error}"),
                         Some("确认它是可执行文件（chmod +x），并且是本机的架构".to_string()),
                     ));
-                    items.push(item("accessibility", "辅助功能权限", "unknown", "内核未就绪，无法检查", None));
-                    items.push(item("screen", "屏幕录制权限", "unknown", "内核未就绪，无法检查", None));
+                    items.push(item(
+                        "accessibility",
+                        "辅助功能权限",
+                        "unknown",
+                        "内核未就绪，无法检查",
+                        None,
+                    ));
+                    items.push(item(
+                        "screen",
+                        "屏幕录制权限",
+                        "unknown",
+                        "内核未就绪，无法检查",
+                        None,
+                    ));
                 }
             }
             Ok(report(tool, items, Some(hint)))
@@ -482,7 +538,8 @@ fn run_doctor(kernel: &std::path::Path) -> Result<Doctor, String> {
             stderr.trim().to_string()
         });
     }
-    serde_json::from_slice::<Doctor>(&output.stdout).map_err(|error| format!("输出无法解析：{error}"))
+    serde_json::from_slice::<Doctor>(&output.stdout)
+        .map_err(|error| format!("输出无法解析：{error}"))
 }
 
 #[cfg(test)]

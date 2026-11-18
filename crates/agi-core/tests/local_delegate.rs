@@ -101,7 +101,12 @@ impl Engine for FakeDsh {
         let base = i64::from(turn) * 3 - 2;
         let rows = [
             record(base, turn, RecordKind::TurnStart, None),
-            record(base + 1, turn, RecordKind::AssistantMessage, Some(&self.answer)),
+            record(
+                base + 1,
+                turn,
+                RecordKind::AssistantMessage,
+                Some(&self.answer),
+            ),
             record(base + 2, turn, RecordKind::TurnEnd, Some("completed")),
         ];
         {
@@ -181,7 +186,9 @@ impl Engine for FakeDsh {
         Ok(Vec::new())
     }
 
-    async fn permissions(&self) -> Result<Vec<agi_protocol::domain::PermissionPreset>, EngineError> {
+    async fn permissions(
+        &self,
+    ) -> Result<Vec<agi_protocol::domain::PermissionPreset>, EngineError> {
         Ok(Vec::new())
     }
 
@@ -235,7 +242,9 @@ async fn settled(core: &Arc<Core>, id: &str) -> Value {
             tokio::time::Instant::now() < deadline,
             "the local delegation did not settle"
         );
-        let value = ok(core.dispatch(Command::RemoteResult { id: id.to_string() }).await);
+        let value = ok(core
+            .dispatch(Command::RemoteResult { id: id.to_string() })
+            .await);
         if value["delegation"]["state"] != "running" {
             return value;
         }
@@ -316,7 +325,10 @@ async fn a_local_subagent_is_delegated_archived_and_then_refuses_follow_ups() {
             message: "second step".to_string(),
         })
         .await);
-    assert_eq!(follow["continuedFrom"], serde_json::json!(second_id.clone()));
+    assert_eq!(
+        follow["continuedFrom"],
+        serde_json::json!(second_id.clone())
+    );
     let follow_id = follow["delegation"]["id"].as_str().unwrap().to_string();
     let done = settled(&core, &follow_id).await;
     assert_eq!(done["finalText"], "LOCAL-OK");

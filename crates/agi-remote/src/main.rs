@@ -878,7 +878,11 @@ fn profile_dir(args: &[String]) -> Result<PathBuf> {
 fn requested_agents(args: &[String]) -> Result<Vec<&'static str>> {
     if let Some(value) = flag(args, "--agents") {
         let mut picked = Vec::new();
-        for name in value.split(',').map(str::trim).filter(|name| !name.is_empty()) {
+        for name in value
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
             let Some((id, _)) = AGENTS.iter().find(|(id, _)| *id == name) else {
                 bail!("unknown agent {name}; expected one of dsh, claude, codex");
             };

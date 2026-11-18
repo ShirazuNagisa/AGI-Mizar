@@ -87,7 +87,9 @@ fn run(core: &Core, mode: Repair) -> RemoteHealthReport {
             let agents = targets.join(",");
             let answer = crate::run_remote_installer(false, None, false, Some(&agents));
             if answer.ok {
-                changed.push(format!("已重写 {agents} 的 MCP 条目与 agi-mizar-remote skill"));
+                changed.push(format!(
+                    "已重写 {agents} 的 MCP 条目与 agi-mizar-remote skill"
+                ));
             } else {
                 error = answer.error.map(|failure| failure.message);
             }
@@ -239,7 +241,15 @@ fn claude_items(sidecar: Option<&Path>) -> Vec<DependencyItem> {
         .and_then(|args| args.as_array())
         .is_some_and(|args| host_arg(args.iter().filter_map(|arg| arg.as_str()), "claude"));
     vec![
-        agent_mcp_item("claude-mcp", "Claude Code 里的 MCP 条目", config.as_path(), command, host_ok, "claude", sidecar),
+        agent_mcp_item(
+            "claude-mcp",
+            "Claude Code 里的 MCP 条目",
+            config.as_path(),
+            command,
+            host_ok,
+            "claude",
+            sidecar,
+        ),
         agent_skill_item(
             "claude-skill",
             "Claude Code 里的 agi-mizar-remote skill",
@@ -280,7 +290,15 @@ fn codex_items(sidecar: Option<&Path>) -> Vec<DependencyItem> {
         .and_then(|text| toml_args(text, MCP_SERVER_NAME))
         .is_some_and(|args| host_arg(args.split_whitespace(), "codex"));
     vec![
-        agent_mcp_item("codex-mcp", "Codex 里的 MCP 条目", config.as_path(), entry.as_deref(), host_ok, "codex", sidecar),
+        agent_mcp_item(
+            "codex-mcp",
+            "Codex 里的 MCP 条目",
+            config.as_path(),
+            entry.as_deref(),
+            host_ok,
+            "codex",
+            sidecar,
+        ),
         agent_skill_item(
             "codex-skill",
             "Codex 里的 agi-mizar-remote skill",
@@ -348,7 +366,9 @@ fn host_arg<'a>(args: impl Iterator<Item = &'a str>, host: &str) -> bool {
         if arg.trim_matches(|c| c == '"' || c == '\'' || c == ',') == "--host" {
             return args
                 .next()
-                .map(|value| value.trim_matches(|c| c == '"' || c == '\'' || c == ',' || c == ']') == host)
+                .map(|value| {
+                    value.trim_matches(|c| c == '"' || c == '\'' || c == ',' || c == ']') == host
+                })
                 .unwrap_or(false);
         }
     }
@@ -367,7 +387,13 @@ fn toml_args(text: &str, name: &str) -> Option<String> {
         }
         if inside {
             if let Some(value) = trimmed.strip_prefix("args") {
-                return Some(value.trim_start().trim_start_matches('=').trim().to_string());
+                return Some(
+                    value
+                        .trim_start()
+                        .trim_start_matches('=')
+                        .trim()
+                        .to_string(),
+                );
             }
         }
     }
@@ -375,12 +401,7 @@ fn toml_args(text: &str, name: &str) -> Option<String> {
 }
 
 /// One "this agent has our skill" row.
-fn agent_skill_item(
-    id: &str,
-    label: &str,
-    path: &Path,
-    sidecar: Option<&Path>,
-) -> DependencyItem {
+fn agent_skill_item(id: &str, label: &str, path: &Path, sidecar: Option<&Path>) -> DependencyItem {
     match std::fs::read_to_string(path) {
         Ok(text) if text == SKILL => item(id, label, "ok", path.display().to_string(), None),
         Ok(_) => item(

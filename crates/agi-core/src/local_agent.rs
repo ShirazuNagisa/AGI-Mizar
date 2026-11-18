@@ -228,7 +228,9 @@ async fn settled(
         Some(turn) => {
             let start = records
                 .iter()
-                .rposition(|record| record.kind == RecordKind::TurnStart && record.turn == Some(turn))
+                .rposition(|record| {
+                    record.kind == RecordKind::TurnStart && record.turn == Some(turn)
+                })
                 .unwrap_or(0);
             let slice: Vec<_> = records[start..]
                 .iter()

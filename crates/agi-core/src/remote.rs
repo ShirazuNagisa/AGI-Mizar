@@ -863,8 +863,10 @@ impl RemoteManager {
         let manager = Arc::clone(self);
         let task_id = id.clone();
         tokio::spawn(async move {
-            let outcome =
-                run_local_one(&manager, &task_id, agent, launch, &prompt, session, cancel_rx).await;
+            let outcome = run_local_one(
+                &manager, &task_id, agent, launch, &prompt, session, cancel_rx,
+            )
+            .await;
             manager.finish(&task_id, outcome);
         });
         Ok(record)
@@ -879,7 +881,10 @@ impl RemoteManager {
             .records
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let running = records.values().filter(|record| record.state.is_active()).count();
+        let running = records
+            .values()
+            .filter(|record| record.state.is_active())
+            .count();
         if running >= MAX_ACTIVE {
             return Err(format!(
                 "too many remote delegations are already running ({MAX_ACTIVE})"
@@ -1179,7 +1184,9 @@ async fn run_lan_one(
 ) -> Result<TurnOutcome, RunFailure> {
     let client = agi_lan::LanMizarClient::connect(address, &credentials)
         .await
-        .map_err(|error| RunFailure::early(RemoteState::Failed, error.to_string(), "lan.connect"))?;
+        .map_err(|error| {
+            RunFailure::early(RemoteState::Failed, error.to_string(), "lan.connect")
+        })?;
     let session = match existing_session {
         Some(session) => session,
         None => client
@@ -1270,7 +1277,12 @@ async fn run_local_one(
     manager.set_session(id, session.clone());
     if let (Some(provider), Some(model)) = (launch.provider.as_deref(), launch.model.as_deref()) {
         agent
-            .set_model(&session, provider, model, launch.reasoning_effort.as_deref())
+            .set_model(
+                &session,
+                provider,
+                model,
+                launch.reasoning_effort.as_deref(),
+            )
             .await
             .map_err(|message| {
                 RunFailure::early(RemoteState::Failed, message, "local.session.model.set")
@@ -1281,11 +1293,7 @@ async fn run_local_one(
             .set_permission(&session, preset)
             .await
             .map_err(|message| {
-                RunFailure::early(
-                    RemoteState::Failed,
-                    message,
-                    "local.session.permission.set",
-                )
+                RunFailure::early(RemoteState::Failed, message, "local.session.permission.set")
             })?;
     }
     let turn = agent.run_turn(&session, prompt, TURN_TIMEOUT, cancel).await;
