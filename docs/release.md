@@ -74,6 +74,49 @@ Notes on the job graph:
   the release list in the first place; nothing in the current pipeline needs
   that lookup.
 
+## 2.2 Signing the updater artifact locally
+
+`TAURI_SIGNING_PRIVATE_KEY` is a repository secret and is the only key whose
+public half is baked into `crates/agi-app/tauri.conf.json`
+(`plugins > updater > pubkey`, key id `3c925fb34b368af9`). A machine that keeps
+an older copy of the key will still bundle fine but print:
+
+```
+Warn The updater secret key from `TAURI_SIGNING_PRIVATE_KEY` does not match
+     the public key from `plugins > updater > pubkey`.
+```
+
+Signatures from that key are rejected at update time, so **do not publish
+artifacts signed with a local key**. Check which key you have before trusting a
+local build:
+
+```sh
+cargo tauri signer sign --private-key-path ~/.tauri/agi-mizar.key \
+  --password "$(cat ~/.tauri/agi-mizar.key.password)" /tmp/probe.txt
+# decode /tmp/probe.txt.sig, first blob's bytes 2..10 are the key id
+```
+
+Verify a published signature against the configured public key (minisign
+prehashed mode, `ED`):
+
+```python
+import base64, json, hashlib
+cfg = json.load(open("crates/agi-app/tauri.conf.json"))
+pub = base64.b64decode([l for l in base64.b64decode(
+    cfg["plugins"]["updater"]["pubkey"]).decode().splitlines()
+    if l.startswith("RW")][0])
+sig = base64.b64decode(open("AGI.Mizar_universal.app.tar.gz.sig").read()).decode()
+blob = base64.b64decode([l for l in sig.splitlines()
+                         if l and not l.startswith(("untrusted", "trusted"))][0])
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+Ed25519PublicKey.from_public_bytes(pub[10:42]).verify(
+    blob[10:74], hashlib.blake2b(open("AGI.Mizar_universal.app.tar.gz", "rb").read(),
+                                 digest_size=64).digest())   # raises on mismatch
+```
+
+Run this for every release: a mismatched key means updates would be offered and
+then refused, which users experience as "downloads but never installs".
+
 ## 2.1 Linux artifacts
 
 The workflow above builds macOS and Windows only. Linux is packaged separately
