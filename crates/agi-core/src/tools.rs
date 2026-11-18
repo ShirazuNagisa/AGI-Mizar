@@ -132,19 +132,10 @@ fn kernel_candidates() -> Vec<PathBuf> {
     if let Some(home) = std::env::var_os("HOME") {
         let home = PathBuf::from(home);
         paths.push(home.join(".agi-mizar/tools/cua-mcp"));
-        // Development trees: the workspace checkout.
-        for dir in ["computer-use-kernel"] {
-            paths.push(
-                home.join("Documents/project/DSH-Mizar")
-                    .join(dir)
-                    .join(".build/release/cua-mcp"),
-            );
-            paths.push(
-                home.join("Documents/project/DSH-Mizar")
-                    .join(dir)
-                    .join(".build/debug/cua-mcp"),
-            );
-        }
+        // Development tree: the workspace checkout.
+        let tree = home.join("Documents/project/DSH-Mizar/computer-use-kernel");
+        paths.push(tree.join(".build/release/cua-mcp"));
+        paths.push(tree.join(".build/debug/cua-mcp"));
     }
     paths
 }
