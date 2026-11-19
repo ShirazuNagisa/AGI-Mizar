@@ -12,7 +12,9 @@ use std::time::Duration;
 use agi_core::Core;
 use agi_engine::{Engine, EngineError, EngineEvent};
 use agi_mizar::{DeviceStore, MizarServer};
+use agi_protocol::catalog::{ModelCatalog, ModelOption, ProviderGroup};
 use agi_protocol::domain::{Record, Session, SessionKey, Workspace};
+use agi_protocol::usage::ModelSelection;
 use agi_protocol::engine::{Capabilities, EngineId};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
@@ -44,6 +46,8 @@ struct Fake {
     events: broadcast::Sender<EngineEvent>,
     answer: Answer,
     calls: Mutex<Vec<Call>>,
+    /// What `model_catalog` answers; `None` is the engine with no catalog.
+    catalog: Mutex<Option<ModelCatalog>>,
 }
 
 impl Fake {
@@ -58,6 +62,7 @@ impl Fake {
             events,
             answer,
             calls: Mutex::new(Vec::new()),
+            catalog: Mutex::new(None),
         })
     }
 
@@ -66,6 +71,13 @@ impl Fake {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    fn set_catalog(&self, catalog: ModelCatalog) {
+        *self
+            .catalog
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(catalog);
     }
 }
 
@@ -131,6 +143,21 @@ impl Engine for Fake {
 
     async fn workspaces(&self) -> Result<Vec<Workspace>, EngineError> {
         Ok(Vec::new())
+    }
+
+    async fn model_catalog(&self) -> Result<ModelCatalog, EngineError> {
+        match self
+            .catalog
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        {
+            Some(catalog) => Ok(catalog),
+            None => Err(EngineError::Unsupported {
+                engine: self.id,
+                feature: "MODELS_UNSUPPORTED",
+            }),
+        }
     }
 
     fn subscribe(&self) -> broadcast::Receiver<EngineEvent> {
@@ -252,6 +279,44 @@ fn good_payload() -> Value {
         "draft": "hey can u fix this",
         "maxTokens": 512,
     })
+}
+
+#[tokio::test]
+async fn a_stale_provider_is_resolved_from_the_catalog() {
+    // The phone sends the provider cached with the session's model. The
+    // account catalog moves; the model stays. The host must use the route that
+    // serves the model instead of failing NO_ADAPTER on a name the operator
+    // never chose.
+    let (server, store, _dir, dsh) = start(Answer::Text("Fixed.".to_string())).await;
+    dsh.set_catalog(ModelCatalog {
+        default: Some(ModelSelection {
+            provider: "opencode-go".to_string(),
+            model: "deepseek-v4".to_string(),
+            reasoning_effort: None,
+        }),
+        providers: vec![ProviderGroup {
+            id: "opencode-go".to_string(),
+            name: "OpenCode Go".to_string(),
+            models: vec![ModelOption {
+                id: "deepseek-v4".to_string(),
+                name: "DeepSeek V4".to_string(),
+                description: None,
+                efforts: Vec::new(),
+                default_effort: None,
+            }],
+        }],
+        failures: Vec::new(),
+    });
+    let issued = store.issue("iPhone", None).unwrap();
+    let (mut socket, _) = connect(server.port(), &issued.token, Some("dsh")).await;
+    let mut payload = good_payload();
+    payload["provider"] = json!("deepseek");
+    let answer = call(&mut socket, "session.enhancePrompt", payload).await;
+    assert_eq!(answer["type"], "ok", "the rewrite was not accepted: {answer}");
+    let calls = dsh.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].provider, "opencode-go");
+    assert_eq!(calls[0].model, "deepseek-v4");
 }
 
 #[tokio::test]

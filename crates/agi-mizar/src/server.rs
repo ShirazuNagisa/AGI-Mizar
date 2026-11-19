@@ -1708,6 +1708,15 @@ impl MizarServer {
                         format!("no engine for {}", key.engine),
                     );
                 };
+                // The phone names the model the session is on; the route that
+                // serves it is the host's. A provider id from an older catalog
+                // (or from the session's cached row) would otherwise answer
+                // NO_ADAPTER while another route serves the same model -- the
+                // rewrite would fail on a distinction the operator never made.
+                let provider = match engine.model_catalog().await {
+                    Ok(catalog) => resolved_provider(&catalog, &provider, &model).unwrap_or(provider),
+                    Err(_) => provider,
+                };
                 match engine
                     .enhance(&key, &provider, &model, &system, &draft, max_tokens)
                     .await
@@ -5055,4 +5064,36 @@ mod tests {
             Some("https://dshmizar.shirazu-nagisa.com/r/ROOM".to_string())
         );
     }
+}
+
+/// The provider the host can actually reach for `model`.
+///
+/// A phone may send a provider id that is no longer registered (the account
+/// catalog moved) or the session row's own guess. When the named provider does
+/// not offer the model, the catalog's default route is preferred, then any
+/// provider that lists the model. `None` means "keep what was asked for", so an
+/// unknown model still reaches the engine's own NO_ADAPTER answer.
+fn resolved_provider(
+    catalog: &agi_protocol::catalog::ModelCatalog,
+    provider: &str,
+    model: &str,
+) -> Option<String> {
+    let offers = |id: &str| {
+        catalog.providers.iter().any(|group| {
+            group.id == id && group.models.iter().any(|option| option.id == model)
+        })
+    };
+    if offers(provider) {
+        return None;
+    }
+    if let Some(default) = catalog.default.as_ref() {
+        if default.model == model && offers(&default.provider) {
+            return Some(default.provider.clone());
+        }
+    }
+    catalog
+        .providers
+        .iter()
+        .find(|group| group.models.iter().any(|option| option.id == model))
+        .map(|group| group.id.clone())
 }

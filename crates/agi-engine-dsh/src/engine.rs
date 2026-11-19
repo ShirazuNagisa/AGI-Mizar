@@ -1796,6 +1796,10 @@ impl Engine for DshEngine {
                     json!(system),
                     json!(draft),
                     json!(max_tokens),
+                    // Routes that cache or scope by Session (OpenCode's
+                    // `x-opencode-session`, OpenAI's prompt cache key) need
+                    // this; a rewrite is still not a turn.
+                    json!(session.raw()),
                 ],
                 ENHANCE_TIMEOUT,
             )

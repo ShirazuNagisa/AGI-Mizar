@@ -871,7 +871,8 @@ async fn rewrites_a_draft_through_the_enhance_service() {
             "deepseek-v4",
             "Rewrite the draft as one sentence.",
             "hey can u fix this",
-            512
+            512,
+            "s1"
         ])
     );
     let id = frame["id"].as_str().unwrap().to_string();
