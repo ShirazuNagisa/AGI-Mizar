@@ -1179,6 +1179,10 @@ impl MizarServer {
                     capabilities.push("deepseek.balance.v1");
                 }
                 capabilities.push("agent.skills.v1");
+                // The repository is on this machine's disk, not the agent's:
+                // every engine's sessions have a working directory, so this bit
+                // is unconditional too.
+                capabilities.push("workspace.git.v1");
                 // Which agents this computer serves, so the phone can ask which
                 // one to open instead of having to guess from a merged list. The
                 // keys are the wire names `EngineId::parse` accepts.
@@ -1590,6 +1594,53 @@ impl MizarServer {
                         "stats": usage,
                     }),
                 )
+            }
+
+            // The composer's Git pill: how much is uncommitted in the directory
+            // this session works in. Read-only and additive; a session whose
+            // directory holds no repository answers `null`, while a Git that ran
+            // and failed answers an error so the phone keeps what it drew.
+            //
+            // The directory comes from the host's own record, never from the
+            // frame: the payload is read for a session id and nothing else, so a
+            // client cannot point this at a repository it was not given.
+            "session.workspaceGit" => {
+                let Some(key) = self.scoped_session_of(device, scope, frame) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "session.workspaceGit needs a sessionId",
+                    );
+                };
+                let Some(engine) = self.core.engine(key.engine) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::RemoteError,
+                        format!("no engine for {}", key.engine),
+                    );
+                };
+                let answer = match engine.session_cwd(&key).await {
+                    Ok(cwd) => crate::git::summarize(&cwd).await,
+                    Err(error) => {
+                        // An adapter that cannot name a working directory has
+                        // nothing to draw; that is not a failed Git read, and
+                        // making it one would flash an error on every refresh.
+                        tracing::debug!(
+                            "mizar: session.workspaceGit has no cwd for {key} — {error}"
+                        );
+                        Ok(None)
+                    }
+                };
+                match answer {
+                    Ok(git) => ServerFrame::ok(
+                        id,
+                        json!({
+                            "sessionId": key.to_string(),
+                            "git": git.map(crate::git::GitSummary::to_json),
+                        }),
+                    ),
+                    Err(error) => ServerFrame::error(Some(id), ErrorCode::RemoteError, error),
+                }
             }
 
             // The phone groups its session list by workspace. Membership is the

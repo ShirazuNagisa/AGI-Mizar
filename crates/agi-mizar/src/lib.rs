@@ -5,7 +5,7 @@
 //! work over a network the operator does not control, so it is the only face with
 //! pairing, tokens and rate limits.
 //!
-//! Seven modules:
+//! The modules:
 //!
 //! - [`frames`] is the wire: five server frames, two client ones, and the
 //!   translation from our flat records back into the DSH event shape the shipped
@@ -21,6 +21,8 @@
 //! - [`server`] binds the three routes and answers the methods this build has.
 //! - [`skills`] reads the skill table off each agent's `SKILL.md` files, and
 //!   answers what changed since the phone last looked.
+//! - [`git`] counts the uncommitted change in a session's repository for the
+//!   composer's Git pill, read-only and on demand.
 //!
 //! ### What is not here yet
 //!
@@ -31,6 +33,7 @@
 
 pub mod activity;
 pub mod frames;
+pub mod git;
 pub mod net;
 pub mod pairing;
 pub mod relay;

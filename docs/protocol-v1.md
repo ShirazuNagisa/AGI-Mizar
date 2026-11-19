@@ -144,7 +144,7 @@ mizar://pair?h=100.64.0.1:19390&c=K7QP-3M2X&n=Mac-mini&v=1
 
 ## 方法表
 
-33 个方法（自建中继时没有 `relay.set`，为 32 个）。`payload` 里的键：
+34 个方法（自建中继时没有 `relay.set`，为 33 个）。`payload` 里的键：
 
 ### 主机与会话
 
@@ -158,6 +158,7 @@ mizar://pair?h=100.64.0.1:19390&c=K7QP-3M2X&n=Mac-mini&v=1
 | `session.activity` | `sessionId`, `maxEntries?`（默认 200，最多 300）, `beforeSeq?`, `turn?`（见下） | `{sessionId, asOfSeq, turn, entries[], hasMore, oldestSeq}` —— **只返回正在跑的那一轮的紧凑过程**，付费账户的「全量细节」来源：`entries` 里每行是 `{id, seq, at, kind, title, text}`，`kind` 为 `thinking` / `command` / `output` / `tool`，`text` 一行、最多 240 字符；没有正在跑的轮次时 `turn: null, entries: [], hasMore: false`。详细语义见下。 |
 | `session.stream` | `sessionId` | `{sessionId, turn, state, interval, textSeq, truncated, entries[]}` —— 把**本轮已产出的状态区间**整轮重放给手机：`entries` 由旧到新，每项是 `{interval, state, text, final}`；`state`/`interval`/`textSeq` 是此刻线上的那一个区间，`turn` 可为 `null`。只读方法，不唤醒 agent。见下「`session.stream`：断线期间的状态区间」。 |
 | `session.stats` | `sessionId` | `{sessionId, asOfSeq, stats}` —— `stats` 里的每个字段来自主机各自的 projection，**谁有就答谁**：agent 还没跑过的会话没有 `context`（上下文占用）也没有 `title`（标题要等模型读完对话才有），只有 `tokenUsage` 一类。所以「这次的帧比上一帧少几个字段」是**正常回答**，不是失败——实测一台真主机上 12 个会话里有 4 个是这样（缺 `context, title`）。手机必须把新帧**合并**进旧帧（有新值用新值，没有的保留），直接替换会把屏幕上已经画出来的标题、模型、上下文用量抹掉。 |
+| `session.workspaceGit` | `sessionId` | `{sessionId, git}` —— 会话工作目录所在仓库的未提交统计；`git` 是 `{files, additions, deletions}`，不在仓库里（或目录不可信）时是 `null`。只读、按需，见下「工作区 Git 统计」。 |
 | `session.create` | `cwd?`, `sessionId?`, `agentPreset?` | `{sessionId, agentPreset}` —— 传 `cwd` 时适配器先在工作区注册表里找**根目录相同**的工作区；找到就只把 `workspaceId` 交给 DSH，找不到才退回 `cwd`。不自动创建工作区。原因见下。 |
 | `session.rename` | `sessionId`, `title` | `{renamed: true}` |
 | `session.prompt` | `sessionId`, `text?`, `attachmentIds?`, `requestId?`, `clientTimeZone?`, `mode?` | `{accepted, requestId}` —— `text` **在有附件时可省**;两者不能同时缺。`attachmentIds` 是 `upload.finish` 返回的 id,顺序就是 content 的顺序(文本在最前);附件怎么来见「附件上传」。 |
@@ -168,7 +169,7 @@ mizar://pair?h=100.64.0.1:19390&c=K7QP-3M2X&n=Mac-mini&v=1
 
 - 两处声明，优先级分明：**账户流程把选择写进令牌**（`account:<账户>:<手机>:<engine>`，由中继 provision，重连也带着），**扫码配对的令牌没有这层**，所以由 `hello` 顶层的 `engine` 字段按连接声明。令牌里的作用域**永远优先**：拿着 dsh 作用域的令牌在 `hello` 里写 `claude` 也只会看到 dsh —— 这是「只让这台手机的所选 agent 的内容离开这台机器」的承诺，不能由客户端放宽。
 - 不带任何作用域的老连接照旧看到三份合并列表（向后兼容，不是错误）。
-- 作用域生效时，主机侧统一过滤：`session.list`、`workspace.list`（**行里带 `engine` 字段**，`workspaceId` 前缀也是它）、`model.catalog`、`permissions.catalog`、`session.create`、`interactions.pending`、状态通道与 `approval.request` 事件；**按 sessionId 直呼**的每个方法（`session.messages`/`stats`/`stream`/`activity`/`archive`/`fork`/`prompt`/`cancel`/`model.set`/`permission.set`/`file.*`）也会拒绝别的 agent 的 id，而且**与「没有这个会话」回答得一模一样**，否则手机可以靠试探枚举出机器上还跑着哪些 agent。`approval.answer`/`question.answer` 同理：不在作用域里的 requestId 回 `REMOTE_ERROR`。
+- 作用域生效时，主机侧统一过滤：`session.list`、`workspace.list`（**行里带 `engine` 字段**，`workspaceId` 前缀也是它）、`model.catalog`、`permissions.catalog`、`session.create`、`interactions.pending`、状态通道与 `approval.request` 事件；**按 sessionId 直呼**的每个方法（`session.messages`/`stats`/`stream`/`activity`/`archive`/`fork`/`prompt`/`cancel`/`model.set`/`permission.set`/`workspaceGit`/`file.*`）也会拒绝别的 agent 的 id，而且**与「没有这个会话」回答得一模一样**，否则手机可以靠试探枚举出机器上还跑着哪些 agent。`approval.answer`/`question.answer` 同理：不在作用域里的 requestId 回 `REMOTE_ERROR`。
 - `host.info` 因此多了两个字段：`engines`（这台电脑托管的 agent，`[{id,label,connected,detail}]`，**不随作用域收窄**——手机要能据此提供切换）和 `engine`（**这条连接实际绑定的 agent**，`null` 表示没有作用域）。免鉴权的 `GET /mizar/v1/hello` 也带 `engines`，供配对后立刻选择。
 - 全是**新增可选字段**，老宿主不答、老客户端忽略，**不需要升 `PROTOCOL_VERSION`**。
 
@@ -547,6 +548,45 @@ Read completed with an error Message too long
 - 老宿主对这两个方法回 `NOT_IMPLEMENTED`,新客户端据此说「电脑端插件版本过旧」,
   而不是「文件不存在」。纯加法,**不需要升 `PROTOCOL_VERSION`**。
 
+#### 工作区 Git 统计:`session.workspaceGit`
+
+输入区胶囊要显示「这个会话的目录里有多少没提交的改动」。这是手机唯一需要 Git 的地方,
+所以它是一个按需的只读方法,而不是会话列表的一部分:
+
+| 方法 | payload | 返回 |
+|---|---|---|
+| `session.workspaceGit` | `sessionId` | `{sessionId, git}` |
+
+```json
+{"sessionId":"dsh:abc","git":{"files":3,"additions":42,"deletions":7}}
+{"sessionId":"dsh:abc","git":null}
+```
+
+- **payload 只有既有 `sessionId`。** 工作目录取自宿主自己的会话记录(与 `file.stat` 同一个
+  `engine.session_cwd`),客户端传的 `path`/`cwd` 一律不读 —— 否则手机就能让宿主机去数一个它
+  没被授权看的仓库。
+- **`git` 是相对 `HEAD` 的工作树净改动**:已暂存 + 未暂存 + 未忽略的未跟踪文件。同一文件只
+  算一次(`add` 之后又改也只算一份,重命名按一个文件计);二进制文件只计入 `files`;未跟踪的
+  普通文本按行计入 `additions`,末尾没有换行的最后一行也算一行(单个超过 4 MiB 的文件只计
+  文件数,不读内容);符号链接只计文件数,不跟随目标。仓库干净时是三个 `0`。**空仓库以空树
+  为基准**,所以首次提交前暂存的内容也是 `additions`。
+- **仓库由 Git 从会话目录向上发现**,遇到嵌套仓库以最近的那个为准;独立 worktree 和刚
+  `git init` 的目录都算;会话在子目录时看到的是**整个仓库**的数字。子模块按父仓库记录的
+  commit 计一个 gitlink 改动,不进入子模块自己的工作树。响应里没有路径。
+- **`null` 只表示「这里没有仓库」**(不是仓库、不是工作树、目录缺失/不是绝对路径,或适配器
+  给不出工作目录)。Git 跑了但失败(超时、权限、仓库元数据损坏)回 `REMOTE_ERROR`,客户端
+  必须**保留**已经显示的统计,不能当成干净仓库清空。
+- **只读、按需、开销有界**:只有客户端点名这个会话才执行 Git,`session.list` 不触发任何扫描。
+  命令不经 shell;`--no-ext-diff`/`--no-textconv` 之外,`.gitattributes` 引用的 clean 过滤
+  器(`filter.<name>.clean`/`.process`)也会被**同一份有效配置**查出来,再以命令级配置把
+  clean/process 置空、`required=false`,不让一次刷新执行仓库里的过滤器;`diff.external` 与
+  fsmonitor 钩子同样禁用,继承来的 `GIT_CONFIG_*`/`GIT_CONFIG_PARAMETERS` 会被清掉,
+  `GIT_OPTIONAL_LOCKS=0` 不写索引、不留锁,`GIT_NO_LAZY_FETCH=1` 不因缺对象去联网;每条命令
+  5 秒超时即杀进程;未跟踪文件的读取有 4 MiB/次、32 MiB/回答的预算(读到的内容即使判为
+  二进制也计入),所以一次刷新最多五条只读命令、不会随仓库大小无限变慢。
+- 老宿主回 `NOT_IMPLEMENTED`(客户端据此判「电脑端插件过旧」);能力标记是
+  `workspace.git.v1`。纯加法,**不需要升 `PROTOCOL_VERSION`**。
+
 ### `requestId` 的语义
 
 `requestId` 是**幂等键**，宿主靠它避免同一条消息被插入两次：
@@ -683,7 +723,7 @@ MIZAR_WRITE_FIXTURES=1 scripts/dev.sh smoke   # 重新捕获
 ## DeepSeek 官方账户余额（可选增量能力）
 
 `host.info` 可附带 `plugin: {id: "dsh-mizar", capabilities: [...]}`。当前列表包括
-`deepseek.balance.v1`、`agent.skills.v1`、`file.read.v1`、`file.deliverables.v1`、`session.activity.v1`、
+`deepseek.balance.v1`、`agent.skills.v1`、`workspace.git.v1`、`file.read.v1`、`file.deliverables.v1`、`session.activity.v1`、
 `session.archive.v1`、`session.fork.v1`、`live-activity.start.v1`、`relay.tier.v1`。
 缺少标记、其他插件或旧插件不代表余额为零，客户端不得发起 `account.balance`。
 标记只证明插件实现了对应能力，不证明宿主已登录、当前账户有余额或每个会话都可分叉。
