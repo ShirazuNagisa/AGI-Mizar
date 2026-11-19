@@ -14,8 +14,8 @@ use agi_engine::{Engine, EngineError, EngineEvent};
 use agi_mizar::{DeviceStore, MizarServer};
 use agi_protocol::catalog::{ModelCatalog, ModelOption, ProviderGroup};
 use agi_protocol::domain::{Record, Session, SessionKey, Workspace};
-use agi_protocol::usage::ModelSelection;
 use agi_protocol::engine::{Capabilities, EngineId};
+use agi_protocol::usage::ModelSelection;
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -312,7 +312,10 @@ async fn a_stale_provider_is_resolved_from_the_catalog() {
     let mut payload = good_payload();
     payload["provider"] = json!("deepseek");
     let answer = call(&mut socket, "session.enhancePrompt", payload).await;
-    assert_eq!(answer["type"], "ok", "the rewrite was not accepted: {answer}");
+    assert_eq!(
+        answer["type"], "ok",
+        "the rewrite was not accepted: {answer}"
+    );
     let calls = dsh.calls();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].provider, "opencode-go");

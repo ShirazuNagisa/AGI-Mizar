@@ -1714,7 +1714,9 @@ impl MizarServer {
                 // NO_ADAPTER while another route serves the same model -- the
                 // rewrite would fail on a distinction the operator never made.
                 let provider = match engine.model_catalog().await {
-                    Ok(catalog) => resolved_provider(&catalog, &provider, &model).unwrap_or(provider),
+                    Ok(catalog) => {
+                        resolved_provider(&catalog, &provider, &model).unwrap_or(provider)
+                    }
                     Err(_) => provider,
                 };
                 match engine
@@ -5079,9 +5081,10 @@ fn resolved_provider(
     model: &str,
 ) -> Option<String> {
     let offers = |id: &str| {
-        catalog.providers.iter().any(|group| {
-            group.id == id && group.models.iter().any(|option| option.id == model)
-        })
+        catalog
+            .providers
+            .iter()
+            .any(|group| group.id == id && group.models.iter().any(|option| option.id == model))
     };
     if offers(provider) {
         return None;
