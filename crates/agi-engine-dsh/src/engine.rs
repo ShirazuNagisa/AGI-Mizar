@@ -56,6 +56,14 @@ const STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 /// wait on a service, so the only honest gate is trying again.
 const COMPOSE_GRACE: Duration = Duration::from_secs(60);
 
+/// How long one prompt rewrite via `mizarEnhance.rewrite` may take.
+///
+/// This is a model call, not a disk read: the default 30-second deadline is a
+/// session-read budget, and a provider that queues behind a slow turn routinely
+/// takes longer. Two minutes is long enough to answer and short enough that a
+/// phone waiting on the composer is not left hanging.
+const ENHANCE_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// How many sessions get their projections read after a list.
 const ENRICH_LIMIT: usize = 40;
 
@@ -356,11 +364,23 @@ impl DshEngine {
         method: &str,
         args: Vec<Value>,
     ) -> Result<Value, EngineError> {
+        self.call_service_with(service, method, args, REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// Call an in-process service, allowing a longer wait than the default.
+    async fn call_service_with(
+        &self,
+        service: &str,
+        method: &str,
+        args: Vec<Value>,
+        timeout: Duration,
+    ) -> Result<Value, EngineError> {
         let id = self.next_id();
         self.request_with(
             DesktopFrame::service(id.clone(), service, method, args),
             id,
-            REQUEST_TIMEOUT,
+            timeout,
         )
         .await
     }
@@ -1738,6 +1758,61 @@ impl Engine for DshEngine {
         )
         .await?;
         Ok(())
+    }
+
+    async fn enhance(
+        &self,
+        session: &SessionKey,
+        provider: &str,
+        model: &str,
+        system: &str,
+        draft: &str,
+        max_tokens: u32,
+    ) -> Result<String, EngineError> {
+        if session.engine != EngineId::Dsh {
+            return Err(EngineError::UnknownSession(session.clone()));
+        }
+        // The service lives inside the plugin, so no link means no model. Say
+        // `NOT_CONNECTED` rather than sending into a channel nobody reads: the
+        // phone draws "电脑端未连接" instead of an upstream failure it can
+        // never resolve.
+        if !self.connected() {
+            return Err(EngineError::NotConnected {
+                engine: EngineId::Dsh,
+            });
+        }
+        // The plugin's `mizarEnhance.rewrite(provider, model, system, draft,
+        // maxTokens)` is a plain completion: it neither starts a turn nor writes
+        // the session log, so the only thing that leaves this machine is the
+        // provider/model choice and the words themselves — the same path a
+        // normal session turn takes.
+        let value = self
+            .call_service_with(
+                "mizarEnhance",
+                "rewrite",
+                vec![
+                    json!(provider),
+                    json!(model),
+                    json!(system),
+                    json!(draft),
+                    json!(max_tokens),
+                ],
+                ENHANCE_TIMEOUT,
+            )
+            .await?;
+        // The plugin answers with its own JSON envelope as a string
+        // (`{"text":"..."}`), because the service channel returns one value
+        // verbatim. Unwrap it; a bare string is accepted too, so an older
+        // plugin cannot put braces in the composer.
+        let raw = value
+            .as_str()
+            .ok_or_else(|| EngineError::upstream("mizarEnhance.rewrite did not return a string"))?;
+        if let Ok(parsed) = serde_json::from_str::<Value>(raw) {
+            if let Some(text) = parsed.get("text").and_then(Value::as_str) {
+                return Ok(text.to_string());
+            }
+        }
+        Ok(raw.to_string())
     }
 
     async fn compact(&self, session: &SessionKey) -> Result<(), EngineError> {

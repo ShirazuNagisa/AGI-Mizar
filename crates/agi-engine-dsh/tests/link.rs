@@ -11,7 +11,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use agi_engine::{Engine, EngineEvent};
+use agi_engine::{Engine, EngineError, EngineEvent};
 use agi_engine_dsh::DshEngine;
 use agi_protocol::domain::{RecordKind, SessionKey};
 use agi_protocol::engine::EngineId;
@@ -127,6 +127,17 @@ impl Harness {
                 frame["type"], "result",
                 "unexpected answer while waiting for {endpoint}"
             );
+        }
+    }
+
+    /// Read frames until the next `service` call to `method`, ignoring cancels
+    /// and the attach-time list.
+    async fn next_service(&mut self, method: &str) -> Value {
+        loop {
+            let frame = self.next().await;
+            if frame["type"] == "service" && frame["method"] == method {
+                return frame;
+            }
         }
     }
 }
@@ -823,5 +834,157 @@ async fn a_list_does_not_blank_the_title_enrichment_learned() {
         }
         Ok(Ok(_)) | Ok(Err(_)) => {}
     }
+    h.handle.abort();
+}
+
+#[tokio::test]
+async fn rewrites_a_draft_through_the_enhance_service() {
+    let mut h = start();
+    h.hello().await;
+    assert_eq!(h.next().await["type"], "welcome");
+    h.answer_session_list(json!([])).await;
+
+    // The trait call is a one-shot completion: it must not ask the plugin for a
+    // turn, a page, or a session write — only the service call.
+    let engine = Arc::clone(&h.engine);
+    let key = SessionKey::new(EngineId::Dsh, "s1");
+    let asking = tokio::spawn(async move {
+        engine
+            .enhance(
+                &key,
+                "deepseek-account",
+                "deepseek-v4",
+                "Rewrite the draft as one sentence.",
+                "hey can u fix this",
+                512,
+            )
+            .await
+    });
+
+    let frame = h.next_service("rewrite").await;
+    assert_eq!(frame["service"], "mizarEnhance");
+    // Five positional arguments, in the order the plugin's signature names them.
+    assert_eq!(
+        frame["args"],
+        json!([
+            "deepseek-account",
+            "deepseek-v4",
+            "Rewrite the draft as one sentence.",
+            "hey can u fix this",
+            512
+        ])
+    );
+    let id = frame["id"].as_str().unwrap().to_string();
+    // The plugin's service channel returns one value verbatim, and the plugin
+    // answers with its own JSON envelope as a string.
+    h.send(json!({
+        "v": 1, "type": "result", "id": id, "ok": true,
+        "value": "{\"text\":\"Could you fix this?\"}"
+    }))
+    .await;
+
+    let text = asking.await.unwrap().unwrap();
+    assert_eq!(text, "Could you fix this?");
+    h.handle.abort();
+}
+
+#[tokio::test]
+async fn an_enhance_error_frame_becomes_an_upstream_failure() {
+    let mut h = start();
+    h.hello().await;
+    assert_eq!(h.next().await["type"], "welcome");
+    h.answer_session_list(json!([])).await;
+
+    let engine = Arc::clone(&h.engine);
+    let key = SessionKey::new(EngineId::Dsh, "s1");
+    let asking = tokio::spawn(async move {
+        engine
+            .enhance(
+                &key,
+                "deepseek-account",
+                "deepseek-v4",
+                "Rewrite.",
+                "hey",
+                256,
+            )
+            .await
+    });
+
+    let frame = h.next_service("rewrite").await;
+    let id = frame["id"].as_str().unwrap().to_string();
+    h.send(json!({
+        "v": 1, "type": "result", "id": id, "ok": false,
+        "code": "MODEL_UNAVAILABLE", "message": "no such model"
+    }))
+    .await;
+
+    match asking.await.unwrap() {
+        Err(EngineError::Upstream { code, message, .. }) => {
+            assert_eq!(code, "MODEL_UNAVAILABLE");
+            assert_eq!(message, "no such model");
+        }
+        other => panic!("an error frame did not become Upstream: {other:?}"),
+    }
+    h.handle.abort();
+}
+
+#[tokio::test]
+async fn an_enhance_answer_that_is_not_a_string_is_an_upstream_failure() {
+    let mut h = start();
+    h.hello().await;
+    assert_eq!(h.next().await["type"], "welcome");
+    h.answer_session_list(json!([])).await;
+
+    let engine = Arc::clone(&h.engine);
+    let key = SessionKey::new(EngineId::Dsh, "s1");
+    let asking = tokio::spawn(async move {
+        engine
+            .enhance(
+                &key,
+                "deepseek-account",
+                "deepseek-v4",
+                "Rewrite.",
+                "hey",
+                256,
+            )
+            .await
+    });
+
+    let frame = h.next_service("rewrite").await;
+    let id = frame["id"].as_str().unwrap().to_string();
+    // An object envelope is a plugin this adapter does not understand; putting
+    // its JSON on the composer would be worse than saying so.
+    h.send(json!({
+        "v": 1, "type": "result", "id": id, "ok": true,
+        "value": { "text": "Could you fix this?" }
+    }))
+    .await;
+
+    assert!(matches!(
+        asking.await.unwrap(),
+        Err(EngineError::Upstream { .. })
+    ));
+    h.handle.abort();
+}
+
+#[tokio::test]
+async fn enhance_without_a_link_says_not_connected() {
+    // No hello: the plugin has not attached, so there is no model service to
+    // call and no frame may be sent into a channel nobody reads.
+    let h = start();
+    let key = SessionKey::new(EngineId::Dsh, "s1");
+    let error = h
+        .engine
+        .enhance(
+            &key,
+            "deepseek-account",
+            "deepseek-v4",
+            "Rewrite.",
+            "hey",
+            256,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, EngineError::NotConnected { .. }), "{error}");
     h.handle.abort();
 }

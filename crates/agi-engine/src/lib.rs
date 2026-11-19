@@ -223,6 +223,31 @@ pub trait Engine: Send + Sync {
         self.prompt(session, text).await
     }
 
+    /// Rewrite a draft with a single model call.
+    ///
+    /// This is a one-shot completion, not a turn: it must not start one, must
+    /// not append to the session log, and must not disturb a turn that is
+    /// already running. The `session` names the engine (and its credentials and
+    /// provider list) the call is scoped to; nothing is recorded for it, so
+    /// calling this twice on the same draft costs two calls and changes nothing
+    /// a client could read back. The answer is the rewritten text itself, not a
+    /// JSON envelope.
+    ///
+    /// The default refuses: an adapter with no model service of its own has no
+    /// model to spend, and pretending otherwise would spend the operator's
+    /// account in a product it did not choose.
+    async fn enhance(
+        &self,
+        _session: &SessionKey,
+        _provider: &str,
+        _model: &str,
+        _system: &str,
+        _draft: &str,
+        _max_tokens: u32,
+    ) -> Result<String, EngineError> {
+        Err(self.unsupported("ENHANCE_UNSUPPORTED"))
+    }
+
     /// The engine's event stream. One receiver per subscriber.
     fn subscribe(&self) -> tokio::sync::broadcast::Receiver<EngineEvent>;
 

@@ -1183,6 +1183,13 @@ impl MizarServer {
                 // every engine's sessions have a working directory, so this bit
                 // is unconditional too.
                 capabilities.push("workspace.git.v1");
+                // The composer can have this machine's model service rewrite a
+                // draft before it is sent. The method exists on every engine,
+                // but only one whose product owns a model service can answer it
+                // (`ENHANCE_UNSUPPORTED` otherwise), so the bit is advertised
+                // unconditionally: what it promises is "this host knows the
+                // method", which is what the app feature-detects.
+                capabilities.push("session.promptEnhance.v1");
                 // Which agents this computer serves, so the phone can ask which
                 // one to open instead of having to guess from a merged list. The
                 // keys are the wire names `EngineId::parse` accepts.
@@ -1640,6 +1647,77 @@ impl MizarServer {
                         }),
                     ),
                     Err(error) => ServerFrame::error(Some(id), ErrorCode::RemoteError, error),
+                }
+            }
+
+            // The composer's rewrite: the phone's draft goes to this machine's
+            // model service and comes back as text. It names a session for the
+            // same reason every other method does — scoping and peer ownership —
+            // but it is a one-shot completion: no turn starts and nothing is
+            // written to the log.
+            //
+            // The draft and the instructions are the operator's words. They are
+            // passed through and never logged, and the only machine they reach
+            // beyond this one is the model provider the session would use for a
+            // normal turn.
+            "session.enhancePrompt" => {
+                let Some(key) = self.scoped_session_of(device, scope, frame) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "session.enhancePrompt needs a sessionId",
+                    );
+                };
+                // Trimmed, and refused when blank: a rewrite with no words to
+                // rewrite (or no instructions to rewrite them by) would spend a
+                // model call to answer nothing.
+                let field = |name: &str| {
+                    frame
+                        .payload
+                        .get(name)
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty())
+                        .map(str::to_string)
+                };
+                let (Some(provider), Some(model), Some(system), Some(draft)) = (
+                    field("provider"),
+                    field("model"),
+                    field("system"),
+                    field("draft"),
+                ) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::MalformedFrame,
+                        "session.enhancePrompt needs provider, model, system and draft",
+                    );
+                };
+                // The phone asks for a budget; the host bounds it, so a client
+                // cannot make one rewrite cost an unbounded number of tokens.
+                // Absent means the app's default.
+                let max_tokens = frame
+                    .payload
+                    .get("maxTokens")
+                    .and_then(Value::as_u64)
+                    .map(|value| value.clamp(64, 2048))
+                    .unwrap_or(1024) as u32;
+                let Some(engine) = self.core.engine(key.engine) else {
+                    return ServerFrame::error(
+                        Some(id),
+                        ErrorCode::RemoteError,
+                        format!("no engine for {}", key.engine),
+                    );
+                };
+                match engine
+                    .enhance(&key, &provider, &model, &system, &draft, max_tokens)
+                    .await
+                {
+                    Ok(text) => ServerFrame::ok(id, json!({ "text": text })),
+                    Err(error) => ServerFrame::error(
+                        Some(id),
+                        ErrorCode::from_engine(error.code()),
+                        error.to_string(),
+                    ),
                 }
             }
 

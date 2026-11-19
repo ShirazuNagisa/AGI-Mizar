@@ -159,6 +159,7 @@ mizar://pair?h=100.64.0.1:19390&c=K7QP-3M2X&n=Mac-mini&v=1
 | `session.stream` | `sessionId` | `{sessionId, turn, state, interval, textSeq, truncated, entries[]}` —— 把**本轮已产出的状态区间**整轮重放给手机：`entries` 由旧到新，每项是 `{interval, state, text, final}`；`state`/`interval`/`textSeq` 是此刻线上的那一个区间，`turn` 可为 `null`。只读方法，不唤醒 agent。见下「`session.stream`：断线期间的状态区间」。 |
 | `session.stats` | `sessionId` | `{sessionId, asOfSeq, stats}` —— `stats` 里的每个字段来自主机各自的 projection，**谁有就答谁**：agent 还没跑过的会话没有 `context`（上下文占用）也没有 `title`（标题要等模型读完对话才有），只有 `tokenUsage` 一类。所以「这次的帧比上一帧少几个字段」是**正常回答**，不是失败——实测一台真主机上 12 个会话里有 4 个是这样（缺 `context, title`）。手机必须把新帧**合并**进旧帧（有新值用新值，没有的保留），直接替换会把屏幕上已经画出来的标题、模型、上下文用量抹掉。 |
 | `session.workspaceGit` | `sessionId` | `{sessionId, git}` —— 会话工作目录所在仓库的未提交统计；`git` 是 `{files, additions, deletions}`，不在仓库里（或目录不可信）时是 `null`。只读、按需，见下「工作区 Git 统计」。 |
+| `session.enhancePrompt` | `sessionId`, `provider`, `model`, `system`, `draft`, `maxTokens` | `{text}` —— 用这台电脑的模型服务把输入框里的草稿改写一遍。一次性补全：不开轮次、不写会话日志；`system` 是改写指令，`draft` 是用户原文。空字段回 `MALFORMED_FRAME`，`maxTokens` 被夹在 64–2048（缺省 1024）。见下「输入框改写」。 |
 | `session.create` | `cwd?`, `sessionId?`, `agentPreset?` | `{sessionId, agentPreset}` —— 传 `cwd` 时适配器先在工作区注册表里找**根目录相同**的工作区；找到就只把 `workspaceId` 交给 DSH，找不到才退回 `cwd`。不自动创建工作区。原因见下。 |
 | `session.rename` | `sessionId`, `title` | `{renamed: true}` |
 | `session.prompt` | `sessionId`, `text?`, `attachmentIds?`, `requestId?`, `clientTimeZone?`, `mode?` | `{accepted, requestId}` —— `text` **在有附件时可省**;两者不能同时缺。`attachmentIds` 是 `upload.finish` 返回的 id,顺序就是 content 的顺序(文本在最前);附件怎么来见「附件上传」。 |
@@ -587,6 +588,37 @@ Read completed with an error Message too long
 - 老宿主回 `NOT_IMPLEMENTED`(客户端据此判「电脑端插件过旧」);能力标记是
   `workspace.git.v1`。纯加法,**不需要升 `PROTOCOL_VERSION`**。
 
+#### 输入框改写:`session.enhancePrompt`
+
+手机输入框的「改写」要的是这台电脑上已经配置好的模型,而不是让手机再存一份凭据。
+所以它是宿主代跑的一次性补全,不是一轮对话:
+
+| 方法 | payload | 返回 |
+|---|---|---|
+| `session.enhancePrompt` | `sessionId`, `provider`, `model`, `system`, `draft`, `maxTokens` | `{text}` |
+
+```json
+{"sessionId":"dsh:abc","provider":"deepseek-account","model":"deepseek-v4","system":"Rewrite this draft as one concise sentence.","draft":"hey can u fix this","maxTokens":512}
+{"text":"Could you fix this?"}
+```
+
+- **`sessionId` 只用来选引擎、校验作用域与归属**,与其他按 sessionId 直呼的方法同一套规则;
+  它不读写那个会话。`provider`/`model` 是这次调用用的模型(通常是输入框当前选中的那个),
+  `system` 是改写指令,`draft` 是原文。
+- **一次性补全,不是一轮对话**:不走 `session.prompt`、不开 turn、不追加任何记录,所以电脑上的
+  会话里不会留下这次改写的痕迹;连点两次就是两次独立的调用。也不会唤醒或打断正在跑的轮次。
+- **先 trim 再校验**:`provider`/`model`/`system`/`draft` 任何一个缺失或 trim 后为空都回
+  `MALFORMED_FRAME`,不花一次模型调用去改写空文本。`maxTokens` 由宿主夹在 `64..2048`、缺省
+  `1024`;客户端传再大的值也不能让一次改写无界花钱。
+- **草稿不出这台已配对的电脑**,除了它本来就会去的那个模型 provider(与会话正常轮次同一条
+  路径)。这条路径本身不写日志、不进会话记录;响应只有 `{text}`,不回显 draft、`system`、
+  session id 或任何宿主机路径。
+- **失败按正常协议错误回**:适配器不提供模型服务时回 `REMOTE_ERROR`(`ENHANCE_UNSUPPORTED`),
+  链路未连接也是 `REMOTE_ERROR`;模型/额度错误带上游 code。成功一定是 `{text}`,且 `text` 一定是
+  字符串——客户端不能把「没有 text」当成一次空改写。
+- 老宿主对未知方法回 `NOT_IMPLEMENTED`;能力标记是 `session.promptEnhance.v1`,在 `host.info` 的
+  `plugin.capabilities` 里。纯加法,**不需要升 `PROTOCOL_VERSION`**。
+
 ### `requestId` 的语义
 
 `requestId` 是**幂等键**，宿主靠它避免同一条消息被插入两次：
@@ -724,7 +756,8 @@ MIZAR_WRITE_FIXTURES=1 scripts/dev.sh smoke   # 重新捕获
 
 `host.info` 可附带 `plugin: {id: "dsh-mizar", capabilities: [...]}`。当前列表包括
 `deepseek.balance.v1`、`agent.skills.v1`、`workspace.git.v1`、`file.read.v1`、`file.deliverables.v1`、`session.activity.v1`、
-`session.archive.v1`、`session.fork.v1`、`live-activity.start.v1`、`relay.tier.v1`。
+`session.archive.v1`、`session.fork.v1`、`live-activity.start.v1`、`relay.tier.v1`、
+`session.promptEnhance.v1`。
 缺少标记、其他插件或旧插件不代表余额为零，客户端不得发起 `account.balance`。
 标记只证明插件实现了对应能力，不证明宿主已登录、当前账户有余额或每个会话都可分叉。
 
